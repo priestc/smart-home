@@ -106,6 +106,7 @@ def monitor(duration, verbose, db, no_db):
     label_map = _labels.load()
     seen: set[str] = set()
     last_temp: dict[str, float] = {}      # address -> last recorded temp_f
+    last_hum:  dict[str, float] = {}      # address -> last recorded humidity
     last_write: dict[str, datetime.datetime] = {}  # address -> last write time
     HEARTBEAT = datetime.timedelta(minutes=30)
     conn = None if no_db else open_db(db)
@@ -120,10 +121,12 @@ def monitor(duration, verbose, db, no_db):
         if conn:
             now = datetime.datetime.now()
             temp_changed = reading.temp_f != last_temp.get(reading.address)
+            hum_changed  = reading.humidity != last_hum.get(reading.address)
             overdue = (now - last_write.get(reading.address, datetime.datetime.min)) >= HEARTBEAT
-            if temp_changed or overdue:
+            if temp_changed or hum_changed or overdue:
                 insert_reading(conn, reading)
                 last_temp[reading.address] = reading.temp_f
+                last_hum[reading.address]  = reading.humidity
                 last_write[reading.address] = now
 
     click.echo("Scanning for Govee H5074 sensors... (Ctrl+C to stop)")
