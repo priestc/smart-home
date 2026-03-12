@@ -28,7 +28,7 @@ def open_db(path: str) -> sqlite3.Connection:
 def _migrate(conn: sqlite3.Connection) -> None:
     """Apply any schema migrations needed on existing databases."""
     # Normalize space-separated timestamps to T-separated ISO format
-    conn.execute("UPDATE readings SET ts = REPLACE(ts, ' ', 'T') WHERE ts LIKE '% %'")
+    conn.execute("UPDATE OR IGNORE readings SET ts = REPLACE(ts, ' ', 'T') WHERE ts LIKE '% %'")
     conn.commit()
 
     # Check if address column is NOT NULL (old schema) and migrate if so
