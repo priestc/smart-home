@@ -45,8 +45,8 @@ def decode_advertisement(address: str, name: str, manufacturer_data: dict, rssi:
     #   byte 6: constant 0x02 (ignored)
     if len(data) >= 6 and data[0] == 0x00:
         temp_c = int.from_bytes(data[2:4], "big", signed=True) / 100
-        humidity = data[5]
-        battery = data[4]
+        humidity = int.from_bytes(data[4:6], "big") / 100
+        battery = None  # not present in H5074 advertisement
     elif len(data) >= 4:
         # Fallback: original 4-byte packed format used by some other Govee models
         raw = int.from_bytes(data[0:3], "big")
