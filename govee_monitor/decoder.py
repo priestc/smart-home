@@ -10,19 +10,20 @@ class Reading:
     humidity: float
     battery: int | None  # percent
     rssi: int | None
+    label: str | None = None
 
     @property
     def temp_f(self) -> float:
         return self.temp_c * 9 / 5 + 32
 
     def __str__(self) -> str:
-        batt = f"  battery={self.battery}%" if self.battery is not None else ""
+        display = self.label if self.label else self.name
         rssi = f"  rssi={self.rssi}" if self.rssi is not None else ""
         return (
-            f"{self.name} ({self.address})"
-            f"  temp={self.temp_c:.1f}°C/{self.temp_f:.1f}°F"
+            f"{display}"
+            f"  temp={self.temp_f:.1f}°F"
             f"  humidity={self.humidity:.1f}%"
-            f"{batt}{rssi}"
+            f"{rssi}"
         )
 
 

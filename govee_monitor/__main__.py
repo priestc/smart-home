@@ -3,6 +3,35 @@ import asyncio
 import datetime
 import click
 from govee_monitor.scanner import scan
+from govee_monitor import labels as _labels
+
+
+def _discover_and_label(discovery_secs: float = 8.0) -> dict[str, str]:
+    """Do a brief scan, prompt for labels on any new devices, return labels dict."""
+    found: dict[str, str] = {}  # address -> govee name
+
+    def on_reading(reading):
+        if reading.address not in found:
+            found[reading.address] = reading.name
+
+    try:
+        asyncio.run(scan(on_reading, duration=discovery_secs))
+    except KeyboardInterrupt:
+        pass
+
+    label_map = _labels.load()
+    changed = False
+    for addr, name in found.items():
+        if addr not in label_map:
+            click.echo(f"\nNew sensor found: {name} ({addr})")
+            label = click.prompt("  Enter a label for this sensor").strip()
+            label_map[addr] = label
+            changed = True
+
+    if changed:
+        _labels.save(label_map)
+
+    return label_map
 
 
 @click.group()
@@ -16,14 +45,17 @@ def main():
 @click.option("--verbose", "-v", is_flag=True, help="Show raw advertisement data.")
 def monitor(duration, verbose):
     """Continuously print readings from nearby H5074 sensors."""
+    click.echo("Discovering sensors (8s)...")
+    label_map = _discover_and_label()
     seen = set()
 
     def on_reading(reading):
+        reading.label = label_map.get(reading.address)
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         click.echo(f"[{ts}] {reading}")
         seen.add(reading.address)
 
-    click.echo("Scanning for Govee H5074 sensors... (Ctrl+C to stop)")
+    click.echo("\nMonitoring... (Ctrl+C to stop)")
     try:
         asyncio.run(scan(on_reading, duration=duration, verbose=verbose))
     except KeyboardInterrupt:
@@ -36,12 +68,15 @@ def monitor(duration, verbose):
 @click.option("--verbose", "-v", is_flag=True, help="Show raw advertisement data.")
 def scan_once(timeout, verbose):
     """Scan for a fixed duration and print all devices found."""
-    readings = {}
+    click.echo("Discovering sensors (8s)...")
+    label_map = _discover_and_label()
+    readings: dict[str, object] = {}
 
     def on_reading(reading):
+        reading.label = label_map.get(reading.address)
         readings[reading.address] = reading
 
-    click.echo(f"Scanning for {timeout}s...")
+    click.echo(f"\nScanning for {timeout}s...")
     try:
         asyncio.run(scan(on_reading, duration=timeout, verbose=verbose))
     except KeyboardInterrupt:
