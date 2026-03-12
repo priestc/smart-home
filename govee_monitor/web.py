@@ -180,7 +180,7 @@ async function loadCurrent() {
 
 async function loadCharts() {
   const start = new Date(Date.now() - rangeDays * 86400000).toISOString().slice(0,19);
-  const limit = rangeDays * 24 * 60 * 10; // 10 readings/min headroom per sensor
+  const limit = Math.max(2000, rangeDays * 24 * 60 * 10);
   const data  = await fetch(`/api/history?start=${start}&limit=${limit}`).then(r => r.json());
 
   // group by label, sort ascending
