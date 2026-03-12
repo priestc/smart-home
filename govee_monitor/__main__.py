@@ -127,6 +127,28 @@ def monitor(duration, verbose, db, no_db):
 
 
 @main.command()
+@click.option("--host", default="0.0.0.0", show_default=True, help="Bind address.")
+@click.option("--port", default=5000, show_default=True, help="Port to listen on.")
+@click.option("--db", default=DEFAULT_DB, show_default=True,
+              help="SQLite database path.")
+@click.option("--debug", is_flag=True, hidden=True)
+def serve(host, port, db, debug):
+    """Run the HTTP API server.
+
+    Endpoints:\n
+      GET /api/current           — latest reading per sensor\n
+      GET /api/history           — historical readings\n
+        ?label=inside            — filter by label\n
+        ?start=2026-01-01        — earliest timestamp\n
+        ?end=2026-03-12          — latest timestamp\n
+        ?limit=1000              — max rows (default 1000, max 10000)
+    """
+    from govee_monitor.web import run
+    click.echo(f"Serving on http://{host}:{port}  (db: {db})")
+    run(db_path=db, host=host, port=port, debug=debug)
+
+
+@main.command()
 @click.option("--timeout", "-t", type=float, default=30.0,
               help="Seconds to scan (default: 30).")
 @click.option("--verbose", "-v", is_flag=True, help="Show raw advertisement data.")
