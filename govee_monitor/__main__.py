@@ -1,11 +1,14 @@
 from __future__ import annotations
 import asyncio
+import csv
 import datetime
+import io
+import zipfile
 import click
 from govee_monitor.scanner import scan
 from govee_monitor import labels as _labels
 from govee_monitor.battery import dump_gatt
-from govee_monitor.db import open_db, insert_reading
+from govee_monitor.db import open_db, insert_reading, bulk_insert
 
 DEFAULT_DB = "/var/lib/govee-monitor/readings.db"
 
@@ -48,6 +51,47 @@ def label_sensors(timeout):
     if changed:
         _labels.save(label_map)
         click.echo("\nLabels saved.")
+
+
+@main.command("import")
+@click.argument("zipfile_path", metavar="ZIPFILE")
+@click.option("--label", required=True, help="Label to assign to all imported readings.")
+@click.option("--db", default=DEFAULT_DB, show_default=True,
+              help="SQLite database path.")
+def import_zip(zipfile_path, label, db):
+    """Import temperature history from a Govee export zip file.
+
+    Example: govee-monitor import inside.zip --label=Inside
+    """
+    rows = []
+    with zipfile.ZipFile(zipfile_path) as zf:
+        csv_names = sorted(n for n in zf.namelist() if n.endswith(".csv"))
+        if not csv_names:
+            click.echo("No CSV files found in zip.")
+            return
+        click.echo(f"Reading {len(csv_names)} CSV file(s)...")
+        for name in csv_names:
+            raw = zf.read(name).decode("utf-8-sig")  # strips BOM
+            reader = csv.reader(io.StringIO(raw))
+            next(reader)  # skip header
+            for line in reader:
+                if len(line) < 3:
+                    continue
+                ts = line[0].strip()
+                try:
+                    temp_f = float(line[1].strip())
+                    humidity = float(line[2].strip())
+                except ValueError:
+                    continue
+                rows.append((ts, label, temp_f, humidity))
+
+    if not rows:
+        click.echo("No data rows found.")
+        return
+
+    conn = open_db(db)
+    inserted = bulk_insert(conn, rows)
+    click.echo(f"Imported {inserted} new rows ({len(rows)} total, {len(rows)-inserted} duplicates skipped).")
 
 
 @main.command()
