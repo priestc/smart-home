@@ -1,0 +1,17 @@
+[Unit]
+Description=Govee H5074 BLE Temperature/Humidity Monitor
+After=bluetooth.target
+Requires=bluetooth.target
+
+[Service]
+Type=simple
+User=chris
+Group=bluetooth
+ExecStart=/home/chris/.local/bin/govee-monitor monitor
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

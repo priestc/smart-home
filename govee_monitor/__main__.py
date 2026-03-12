@@ -5,6 +5,9 @@ import click
 from govee_monitor.scanner import scan
 from govee_monitor import labels as _labels
 from govee_monitor.battery import dump_gatt
+from govee_monitor.db import open_db, insert_reading
+
+DEFAULT_DB = "/var/lib/govee-monitor/readings.db"
 
 
 @click.group()
@@ -51,16 +54,24 @@ def label_sensors(timeout):
 @click.option("--duration", "-d", type=float, default=None,
               help="How many seconds to scan (default: indefinitely).")
 @click.option("--verbose", "-v", is_flag=True, help="Show raw advertisement data.")
-def monitor(duration, verbose):
+@click.option("--db", default=DEFAULT_DB, show_default=True,
+              help="SQLite database path for storing readings.")
+@click.option("--no-db", is_flag=True, help="Disable database logging.")
+def monitor(duration, verbose, db, no_db):
     """Continuously print readings from nearby H5074 sensors."""
     label_map = _labels.load()
     seen: set[str] = set()
+    conn = None if no_db else open_db(db)
+    if conn:
+        click.echo(f"Logging to {db}")
 
     def on_reading(reading):
         reading.label = label_map.get(reading.address)
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         click.echo(f"[{ts}] {reading}")
         seen.add(reading.address)
+        if conn:
+            insert_reading(conn, reading)
 
     click.echo("Scanning for Govee H5074 sensors... (Ctrl+C to stop)")
     try:
