@@ -1,0 +1,16 @@
+[Unit]
+Description=Govee Monitor HTTP API
+After=network.target govee-monitor.service
+Wants=govee-monitor.service
+
+[Service]
+Type=simple
+User=chris
+ExecStart=/home/chris/.local/bin/govee-monitor serve
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
