@@ -96,9 +96,7 @@ Two systemd service files are included: one for the background monitor and one f
 ### Install the services
 
 ```bash
-sudo cp ~/smart-home/smart-home.service /etc/systemd/system/
-sudo cp ~/smart-home/smart-home-api.service /etc/systemd/system/
-sudo systemctl daemon-reload
+sudo smart-home install-services
 sudo systemctl enable --now smart-home.service
 sudo systemctl enable --now smart-home-api.service
 ```

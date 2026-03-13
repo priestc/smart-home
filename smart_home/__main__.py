@@ -3,8 +3,10 @@ import asyncio
 import csv
 import datetime
 import io
+import shutil
 import zipfile
 import os
+from pathlib import Path
 import click
 from bleak import BleakScanner
 from smart_home.scanner import scan
@@ -59,6 +61,26 @@ DEVICE_TYPES = {
     "1": ("Govee H5074",         ("Govee_H5074", "GVH5074")),
     "2": ("Xiaomi LYWSD03MMC",   ("LYWSD03MMC", "ATC_")),
 }
+
+
+@main.command("install-services")
+def install_services():
+    """Copy systemd service files to /etc/systemd/system/ and reload the daemon.
+
+    Run with sudo:  sudo smart-home install-services
+    """
+    pkg_dir = Path(__file__).parent
+    services = ["smart-home.service", "smart-home-api.service"]
+    dest_dir = Path("/etc/systemd/system")
+    for name in services:
+        src = pkg_dir / name
+        dst = dest_dir / name
+        shutil.copy(src, dst)
+        click.echo(f"Installed {dst}")
+    os.system("systemctl daemon-reload")
+    click.echo("\nDone. To enable and start:")
+    click.echo("  sudo systemctl enable --now smart-home.service")
+    click.echo("  sudo systemctl enable --now smart-home-api.service")
 
 
 @main.command("list-devices")

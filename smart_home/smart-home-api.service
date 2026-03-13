@@ -1,0 +1,16 @@
+[Unit]
+Description=Smart Home HTTP API
+After=network.target smart-home.service
+Wants=smart-home.service
+
+[Service]
+Type=simple
+User=chris
+ExecStart=/home/chris/.local/bin/smart-home serve
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

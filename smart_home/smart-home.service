@@ -1,0 +1,17 @@
+[Unit]
+Description=Smart Home BLE Temperature/Humidity Monitor
+After=bluetooth.target
+Requires=bluetooth.target
+
+[Service]
+Type=simple
+User=chris
+Group=bluetooth
+ExecStart=/home/chris/.local/bin/smart-home monitor
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
