@@ -15,6 +15,14 @@ A Linux-based smart home monitoring system. Currently supports BLE temperature/h
 - Python 3.9+
 - `pipx`
 
+### Bluetooth permissions
+
+BLE scanning requires membership in the `bluetooth` group. Run this once, then log out and back in:
+
+```bash
+sudo usermod -a -G bluetooth $USER
+```
+
 ---
 
 ## Installation
@@ -36,7 +44,7 @@ pipx install git+https://github.com/priestc/smart-home.git@master --force
 Run the `add-device` command. It will ask for the sensor type, scan for nearby devices, and prompt you to assign a label to each one found.
 
 ```
-sudo smart-home add-device
+smart-home add-device
 ```
 
 Example session:
@@ -60,8 +68,6 @@ Labels saved.
 ```
 
 Labels are stored in `~/.config/govee-monitor/labels.json` and used by the monitor and web dashboard.
-
-> **Note:** `sudo` is required because BLE scanning on Linux needs elevated privileges unless your user is in the `bluetooth` group.
 
 ---
 
