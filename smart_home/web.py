@@ -218,6 +218,13 @@ async function loadCharts() {
     tension: 0.3,
   }));
 
+  const xMin = new Date(Date.now() - rangeDays * 86400000);
+  const xMax = new Date();
+  tempChart.options.scales.x.min = xMin;
+  tempChart.options.scales.x.max = xMax;
+  humChart.options.scales.x.min  = xMin;
+  humChart.options.scales.x.max  = xMax;
+
   tempChart.update();
   humChart.update();
 }
