@@ -60,6 +60,17 @@ DEVICE_TYPES = {
 }
 
 
+@main.command("list-devices")
+def list_devices():
+    """Show all registered devices and their labels."""
+    label_map = _labels.load()
+    if not label_map:
+        click.echo("No devices registered. Run 'smart-home add-device' to add one.")
+        return
+    for addr, label in sorted(label_map.items(), key=lambda x: x[1]):
+        click.echo(f"  {label:<20} {addr}")
+
+
 @main.command("add-device")
 @click.option("--timeout", "-t", type=float, default=15.0,
               help="Seconds to scan (default: 15).")
