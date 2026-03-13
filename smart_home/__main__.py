@@ -67,7 +67,7 @@ DEVICE_TYPES = {
 def install_services():
     """Copy systemd service files to /etc/systemd/system/ and reload the daemon.
 
-    Run with sudo:  sudo smart-home install-services
+    Run with sudo:  sudo env PATH="$PATH" smart-home install-services
     """
     pkg_dir = Path(__file__).parent
     services = ["smart-home.service", "smart-home-api.service"]
