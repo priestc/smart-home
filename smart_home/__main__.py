@@ -4,6 +4,7 @@ import csv
 import datetime
 import io
 import zipfile
+import os
 import click
 from bleak import BleakScanner
 from smart_home.scanner import scan
@@ -11,7 +12,7 @@ from smart_home import labels as _labels
 from smart_home.battery import dump_gatt
 from smart_home.db import open_db, insert_reading, bulk_insert
 
-DEFAULT_DB = "/var/lib/govee-monitor/readings.db"
+DEFAULT_DB = os.path.expanduser("~/.local/share/smart-home/readings.db")
 
 
 @click.group()

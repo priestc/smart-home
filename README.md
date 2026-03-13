@@ -67,7 +67,7 @@ Found 2 new sensor(s). Enter a label for each:
 Labels saved.
 ```
 
-Labels are stored in `~/.config/govee-monitor/labels.json` and used by the monitor and web dashboard.
+Labels are stored in `~/.config/smart-home/labels.json` and used by the monitor and web dashboard.
 
 ---
 
@@ -76,13 +76,13 @@ Labels are stored in `~/.config/govee-monitor/labels.json` and used by the monit
 Scan and print readings continuously:
 
 ```bash
-sudo smart-home monitor
+smart-home monitor
 ```
 
 To run without writing to a database:
 
 ```bash
-sudo smart-home monitor --no-db
+smart-home monitor --no-db
 ```
 
 Readings are only written to the database when the temperature or humidity changes, or every 30 minutes as a heartbeat.
@@ -167,11 +167,11 @@ smart-home import ~/outside.zip --label=outside
 Scan all nearby BLE devices (useful for troubleshooting):
 
 ```bash
-sudo smart-home scan-all
+smart-home scan-all
 ```
 
 Scan for a fixed duration and show decoded readings:
 
 ```bash
-sudo smart-home scan-once
+smart-home scan-once
 ```

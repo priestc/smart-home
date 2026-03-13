@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-_CONFIG_DIR = Path.home() / ".config" / "govee-monitor"
+_CONFIG_DIR = Path.home() / ".config" / "smart-home"
 _LABELS_FILE = _CONFIG_DIR / "labels.json"
 
 
