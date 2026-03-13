@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "govee-monitor"
+name = "smart-home"
 version = "0.1.0"
-description = "Monitor Govee H5074 temperature/humidity sensors via BLE"
+description = "Smart home monitoring: BLE temperature/humidity sensors and more"
 requires-python = ">=3.9"
 dependencies = [
     "bleak>=0.21.0",
@@ -14,4 +14,4 @@ dependencies = [
 ]
 
 [project.scripts]
-govee-monitor = "govee_monitor.__main__:main"
+smart-home = "smart_home.__main__:main"

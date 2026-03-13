@@ -5,10 +5,10 @@ import datetime
 import io
 import zipfile
 import click
-from govee_monitor.scanner import scan
-from govee_monitor import labels as _labels
-from govee_monitor.battery import dump_gatt
-from govee_monitor.db import open_db, insert_reading, bulk_insert
+from smart_home.scanner import scan
+from smart_home import labels as _labels
+from smart_home.battery import dump_gatt
+from smart_home.db import open_db, insert_reading, bulk_insert
 
 DEFAULT_DB = "/var/lib/govee-monitor/readings.db"
 
@@ -153,7 +153,7 @@ def serve(host, port, db, debug):
         ?end=2026-03-12          — latest timestamp\n
         ?limit=1000              — max rows (default 1000, max 10000)
     """
-    from govee_monitor.web import run
+    from smart_home.web import run
     click.echo(f"Serving on http://{host}:{port}  (db: {db})")
     run(db_path=db, host=host, port=port, debug=debug)
 

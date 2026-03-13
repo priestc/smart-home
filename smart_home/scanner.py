@@ -3,7 +3,7 @@ import asyncio
 from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
-from govee_monitor.decoder import decode_advertisement, Reading
+from smart_home.decoder import decode_advertisement, Reading
 
 
 def is_govee_h5074(device: BLEDevice, adv: AdvertisementData) -> bool:

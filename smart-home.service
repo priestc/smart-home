@@ -1,5 +1,5 @@
 [Unit]
-Description=Govee H5074 BLE Temperature/Humidity Monitor
+Description=Smart Home BLE Temperature/Humidity Monitor
 After=bluetooth.target
 Requires=bluetooth.target
 
@@ -7,7 +7,7 @@ Requires=bluetooth.target
 Type=simple
 User=chris
 Group=bluetooth
-ExecStart=/home/chris/.local/bin/govee-monitor monitor
+ExecStart=/home/chris/.local/bin/smart-home monitor
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
