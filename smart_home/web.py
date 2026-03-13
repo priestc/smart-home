@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sqlite3
 from flask import Flask, jsonify, request, Response
+from smart_home.db import open_db
 
 app = Flask(__name__)
 _db_path: str = ""
@@ -232,4 +233,5 @@ setInterval(loadCurrent, 30000);
 def run(db_path: str, host: str, port: int, debug: bool) -> None:
     global _db_path
     _db_path = db_path
+    open_db(db_path).close()  # ensure schema exists
     app.run(host=host, port=port, debug=debug)
