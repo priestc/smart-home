@@ -140,37 +140,34 @@ const toDate = s => new Date(s + "T12:00:00");
 let showMA = false;
 const charts = [];  // {chart, rows} for each sensor
 
-function movingAvg(rows, window) {
+function movingAvg(rows, field, window) {
   return rows.map((r, i) => {
     const slice = rows.slice(Math.max(0, i - window + 1), i + 1);
-    const avg = slice.reduce((s, d) => s + d.avg_f, 0) / slice.length;
+    const avg = slice.reduce((s, d) => s + d[field], 0) / slice.length;
     return { x: toDate(r.date), y: Math.round(avg * 10) / 10 };
   });
 }
 
-function maDataset(rows) {
-  return {
-    label: "5-day avg",
-    data: movingAvg(rows, 5),
-    borderColor: COLORS.ma,
-    backgroundColor: "transparent",
-    borderWidth: 2,
-    borderDash: [5, 3],
-    pointRadius: 0,
-    tension: 0.3,
-  };
+function buildDatasets(rows, ma) {
+  if (ma) {
+    return [
+      { label: "Max (5d avg)", data: movingAvg(rows, "max_f", 5), borderColor: COLORS.max, backgroundColor: "transparent", borderWidth: 2, borderDash: [5, 3], pointRadius: 0, tension: 0.3 },
+      { label: "Avg (5d avg)", data: movingAvg(rows, "avg_f", 5), borderColor: COLORS.avg, backgroundColor: "transparent", borderWidth: 2, borderDash: [5, 3], pointRadius: 0, tension: 0.3 },
+      { label: "Min (5d avg)", data: movingAvg(rows, "min_f", 5), borderColor: COLORS.min, backgroundColor: "transparent", borderWidth: 2, borderDash: [5, 3], pointRadius: 0, tension: 0.3 },
+    ];
+  }
+  return [
+    { label: "Max", data: rows.map(r => ({ x: toDate(r.date), y: r.max_f })), borderColor: COLORS.max, backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, tension: 0.3 },
+    { label: "Avg", data: rows.map(r => ({ x: toDate(r.date), y: r.avg_f })), borderColor: COLORS.avg, backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, tension: 0.3 },
+    { label: "Min", data: rows.map(r => ({ x: toDate(r.date), y: r.min_f })), borderColor: COLORS.min, backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, tension: 0.3 },
+  ];
 }
 
 function toggleMA() {
   showMA = !showMA;
   document.getElementById("maBtn").classList.toggle("active", showMA);
   for (const { chart, rows } of charts) {
-    const existing = chart.data.datasets.findIndex(d => d.label === "5-day avg");
-    if (showMA && existing === -1) {
-      chart.data.datasets.push(maDataset(rows));
-    } else if (!showMA && existing !== -1) {
-      chart.data.datasets.splice(existing, 1);
-    }
+    chart.data.datasets = buildDatasets(rows, showMA);
     chart.update();
   }
 }
@@ -235,35 +232,7 @@ async function load() {
     chart.options.scales.x.max = xMax;
     charts.push({ chart, rows });
 
-    chart.data.datasets = [
-      {
-        label: "Max",
-        data: rows.map(r => ({ x: toDate(r.date), y: r.max_f })),
-        borderColor: COLORS.max,
-        backgroundColor: "transparent",
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.3,
-      },
-      {
-        label: "Avg",
-        data: rows.map(r => ({ x: toDate(r.date), y: r.avg_f })),
-        borderColor: COLORS.avg,
-        backgroundColor: "transparent",
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.3,
-      },
-      {
-        label: "Min",
-        data: rows.map(r => ({ x: toDate(r.date), y: r.min_f })),
-        borderColor: COLORS.min,
-        backgroundColor: "transparent",
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.3,
-      },
-    ];
+    chart.data.datasets = buildDatasets(rows, showMA);
     chart.update();
   }
 }
