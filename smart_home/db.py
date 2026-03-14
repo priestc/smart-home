@@ -16,7 +16,8 @@ def open_db(path: str) -> sqlite3.Connection:
             label     TEXT,
             temp_f    REAL    NOT NULL,
             humidity  REAL    NOT NULL,
-            rssi      INTEGER,
+            rssi        INTEGER,
+            raw_reading TEXT,
             UNIQUE(ts, label)
         )
     """)
@@ -27,8 +28,8 @@ def open_db(path: str) -> sqlite3.Connection:
 def insert_reading(conn: sqlite3.Connection, reading) -> None:
     ts = datetime.datetime.now().isoformat(timespec="seconds")
     conn.execute(
-        "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity, rssi) VALUES (?,?,?,?,?,?)",
-        (ts, reading.address, reading.label, reading.temp_f, reading.humidity, reading.rssi),
+        "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity, rssi, raw_reading) VALUES (?,?,?,?,?,?,?)",
+        (ts, reading.address, reading.label, reading.temp_f, reading.humidity, reading.rssi, reading.raw_reading),
     )
     conn.commit()
 

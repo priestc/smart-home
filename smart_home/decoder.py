@@ -10,6 +10,7 @@ class Reading:
     humidity: float
     battery: int | None  # percent
     rssi: int | None
+    raw_reading: str | None = None  # hex-encoded full manufacturer payload
     label: str | None = None
 
     @property
@@ -69,4 +70,5 @@ def decode_advertisement(address: str, name: str, manufacturer_data: dict, rssi:
         humidity=humidity,
         battery=battery,
         rssi=rssi,
+        raw_reading=data.hex(),
     )
