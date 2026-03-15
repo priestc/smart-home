@@ -326,6 +326,12 @@ def index():
 
 <script>
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b"];
+
+function labelColor(label) {
+  let hash = 0;
+  for (let i = 0; i < label.length; i++) hash = label.charCodeAt(i) + ((hash << 5) - hash);
+  return COLORS[Math.abs(hash) % COLORS.length];
+}
 let tempChart, humChart, rangeDays = 1;
 
 const tempCtx = document.getElementById("tempChart").getContext("2d");
@@ -396,20 +402,20 @@ async function loadCharts() {
 
   const labels = Object.keys(byLabel).sort();
 
-  tempChart.data.datasets = labels.map((lbl, i) => ({
+  tempChart.data.datasets = labels.map(lbl => ({
     label: lbl,
     data: byLabel[lbl].map(p => ({ x: p.x, y: p.y })),
-    borderColor: COLORS[i % COLORS.length],
+    borderColor: labelColor(lbl),
     backgroundColor: "transparent",
     borderWidth: 1.5,
     pointRadius: 0,
     tension: 0,
   }));
 
-  humChart.data.datasets = labels.map((lbl, i) => ({
+  humChart.data.datasets = labels.map(lbl => ({
     label: lbl,
     data: byLabel[lbl].map(p => ({ x: p.x, y: p.h })),
-    borderColor: COLORS[i % COLORS.length],
+    borderColor: labelColor(lbl),
     backgroundColor: "transparent",
     borderWidth: 1.5,
     pointRadius: 0,
