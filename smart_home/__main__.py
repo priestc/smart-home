@@ -322,7 +322,6 @@ def scan_all(timeout):
 
     Use this to diagnose what your sensors are actually advertising.
     """
-    import asyncio
     from bleak import BleakScanner
 
     seen = {}
@@ -342,13 +341,20 @@ def scan_all(timeout):
 
     if not seen:
         click.echo("No BLE devices found. Check that bluetoothd is running and you have permission.")
-        click.echo("Try: sudo govee-monitor scan-all")
         return
 
-    click.echo(f"\nFound {len(seen)} device(s):\n")
-    for addr, (device, adv) in sorted(seen.items()):
+    label_map = _labels.load()
+    supported, unsupported = {}, {}
+    for addr, (device, adv) in seen.items():
+        name = device.name or adv.local_name or ""
+        is_supported = any(name.startswith(p) for _, prefixes in DEVICE_TYPES.values() for p in prefixes)
+        (supported if is_supported else unsupported)[addr] = (device, adv)
+
+    def print_device(addr, device, adv, show_label=False):
         name = device.name or adv.local_name or "(no name)"
-        click.echo(f"  {addr}  name={name!r}  rssi={adv.rssi}")
+        label = label_map.get(addr)
+        label_str = f"  [{label}]" if label else "  [no label]" if show_label else ""
+        click.echo(f"  {addr}  name={name!r}  rssi={adv.rssi}{label_str}")
         if adv.manufacturer_data:
             for cid, data in adv.manufacturer_data.items():
                 click.echo(f"    manufacturer[0x{cid:04X}] = {data.hex()}")
@@ -357,6 +363,18 @@ def scan_all(timeout):
                 click.echo(f"    service_data[{uuid}] = {data.hex()}")
         if adv.service_uuids:
             click.echo(f"    service_uuids = {adv.service_uuids}")
+
+    click.echo(f"\n── Supported devices ({len(supported)}) ──────────────────────────")
+    if supported:
+        for addr, (device, adv) in sorted(supported.items()):
+            print_device(addr, device, adv, show_label=True)
+    else:
+        click.echo("  (none found)")
+
+    click.echo(f"\n── Unsupported devices ({len(unsupported)}) ─────────────────────")
+    if unsupported:
+        for addr, (device, adv) in sorted(unsupported.items()):
+            print_device(addr, device, adv)
 
 
 if __name__ == "__main__":
