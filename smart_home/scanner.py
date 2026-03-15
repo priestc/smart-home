@@ -15,11 +15,18 @@ async def scan(
     callback,
     duration: float | None = None,
     verbose: bool = False,
+    on_device=None,
+    extra_tasks: list | None = None,
 ):
     """Scan for Govee H5074 devices and call callback(Reading) for each update.
     If duration is None, scan indefinitely.
+    on_device(device, adv) is called for every BLE device seen (not just Govee).
+    extra_tasks is a list of coroutines to run concurrently with the scanner.
     """
     def detection_callback(device: BLEDevice, adv: AdvertisementData):
+        if on_device:
+            on_device(device, adv)
+
         name = device.name or adv.local_name or device.address
         if not is_govee_h5074(device, adv):
             return
@@ -40,9 +47,18 @@ async def scan(
         elif verbose:
             print(f"  [decode failed — could not parse advertisement]")
 
-    async with BleakScanner(detection_callback=detection_callback):
-        if duration is not None:
-            await asyncio.sleep(duration)
-        else:
-            while True:
-                await asyncio.sleep(1)
+    async def _run():
+        async with BleakScanner(detection_callback=detection_callback):
+            coros = list(extra_tasks or [])
+            if duration is not None:
+                coros.append(asyncio.sleep(duration))
+                if coros:
+                    await asyncio.gather(*coros)
+            else:
+                async def _forever():
+                    while True:
+                        await asyncio.sleep(1)
+                coros.append(_forever())
+                await asyncio.gather(*coros)
+
+    await _run()

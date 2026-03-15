@@ -28,6 +28,24 @@ def current():
     return jsonify([dict(r) for r in rows])
 
 
+@app.get("/api/presence")
+def presence():
+    """Current presence status for all registered devices."""
+    from smart_home.presence import load_state, load_devices
+    devices = load_devices()
+    state = load_state()
+    result = []
+    for addr, name in devices.items():
+        s = state.get(addr, {})
+        result.append({
+            "address": addr,
+            "name": name,
+            "status": s.get("status", "unknown"),
+            "last_seen": s.get("last_seen"),
+        })
+    return jsonify(sorted(result, key=lambda x: x["name"]))
+
+
 @app.get("/api/history")
 def history():
     """Historical readings. Query params:

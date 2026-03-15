@@ -11,6 +11,7 @@ import click
 from bleak import BleakScanner
 from smart_home.scanner import scan
 from smart_home import labels as _labels
+from smart_home import presence as _presence
 from smart_home.battery import dump_gatt
 from smart_home.db import open_db, insert_reading, bulk_insert
 
@@ -252,6 +253,70 @@ def import_zip(zipfile_path, label, db):
     click.echo(f"Imported {inserted} new rows ({len(rows)} total, {len(rows)-inserted} duplicates skipped).")
 
 
+@main.command("add-presence-device")
+@click.option("--timeout", "-t", type=float, default=15.0,
+              help="Seconds to scan (default: 15).")
+def add_presence_device(timeout):
+    """Scan for BLE devices and register one as a presence detector."""
+    from bleak import BleakScanner
+
+    found = {}  # address -> (name, rssi)
+
+    def callback(device, adv):
+        name = device.name or adv.local_name or "(no name)"
+        found[device.address] = (name, adv.rssi)
+
+    async def _run():
+        async with BleakScanner(detection_callback=callback):
+            await asyncio.sleep(timeout)
+
+    click.echo(f"Scanning for BLE devices ({int(timeout)}s)...")
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        pass
+
+    if not found:
+        click.echo("No devices found.")
+        return
+
+    devices_list = sorted(found.items(), key=lambda x: x[1][1], reverse=True)  # sort by rssi
+    click.echo(f"\nFound {len(devices_list)} device(s):\n")
+    for i, (addr, (name, rssi)) in enumerate(devices_list, 1):
+        click.echo(f"  {i}. {name}  ({addr})  rssi={rssi}")
+
+    choice = click.prompt("\nEnter number to register as presence device", type=int)
+    if not 1 <= choice <= len(devices_list):
+        click.echo("Invalid choice.")
+        return
+
+    addr, (name, _) = devices_list[choice - 1]
+    label = click.prompt(f"Name for this device", default=name).strip()
+
+    devices = _presence.load_devices()
+    devices[addr] = label
+    _presence.save_devices(devices)
+    click.echo(f"\nRegistered '{label}' ({addr}) as a presence device.")
+
+
+@main.command("list-presence-devices")
+def list_presence_devices():
+    """Show registered presence devices and their current status."""
+    devices = _presence.load_devices()
+    if not devices:
+        click.echo("No presence devices registered. Run 'smart-home add-presence-device' to add one.")
+        return
+
+    state = _presence.load_state()
+    click.echo(f"\n  {'name':<24} {'address':<20} {'status':<10} {'last seen'}")
+    click.echo("  " + "-" * 72)
+    for addr, name in sorted(devices.items(), key=lambda x: x[1]):
+        s = state.get(addr, {})
+        status = s.get("status", "unknown")
+        last_seen = s.get("last_seen", "never")
+        click.echo(f"  {name:<24} {addr:<20} {status:<10} {last_seen}")
+
+
 @main.command()
 @click.option("--duration", "-d", type=float, default=None,
               help="How many seconds to scan (default: indefinitely).")
@@ -267,6 +332,38 @@ def monitor(duration, verbose, db, no_db):
     last_hum:  dict[str, float] = {}      # address -> last recorded humidity
     last_write: dict[str, datetime.datetime] = {}  # address -> last write time
     HEARTBEAT = datetime.timedelta(minutes=30)
+
+    # presence tracking
+    presence_devices = _presence.load_devices()
+    presence_last_seen: dict[str, datetime.datetime] = {}
+    presence_state = _presence.load_state()
+    PRESENCE_TIMEOUT = datetime.timedelta(minutes=5)
+
+    def on_device(device, adv):
+        if device.address in presence_devices:
+            presence_last_seen[device.address] = datetime.datetime.now()
+
+    async def check_presence():
+        while True:
+            await asyncio.sleep(30)
+            now = datetime.datetime.now()
+            changed = False
+            for addr, name in presence_devices.items():
+                last = presence_last_seen.get(addr)
+                new_status = "home" if last and (now - last) < PRESENCE_TIMEOUT else "away"
+                old_status = presence_state.get(addr, {}).get("status")
+                if new_status != old_status:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    click.echo(f"[{ts}] Presence: {name} is {new_status}")
+                    presence_state[addr] = {
+                        "name": name,
+                        "status": new_status,
+                        "last_seen": last.isoformat() if last else None,
+                    }
+                    changed = True
+            if changed:
+                _presence.save_state(presence_state)
+
     conn = None if no_db else open_db(db)
     if conn:
         click.echo(f"Logging to {db}")
@@ -289,7 +386,13 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Scanning for Govee H5074 sensors... (Ctrl+C to stop)")
     try:
-        asyncio.run(scan(on_reading, duration=duration, verbose=verbose))
+        asyncio.run(scan(
+            on_reading,
+            duration=duration,
+            verbose=verbose,
+            on_device=on_device if presence_devices else None,
+            extra_tasks=[check_presence()] if presence_devices else None,
+        ))
     except KeyboardInterrupt:
         click.echo(f"\nDone. Saw {len(seen)} device(s).")
 
