@@ -391,13 +391,16 @@ def monitor(duration, verbose, db, no_db):
                 last = presence_last_seen.get(ble_name)
                 new_status = "home" if last and (now - last) < PRESENCE_TIMEOUT else "away"
                 old_status = presence_state.get(ble_name, {}).get("status")
+                old_last_seen = presence_state.get(ble_name, {}).get("last_seen")
+                new_last_seen = last.isoformat() if last else None
                 if new_status != old_status:
-                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    ts = now.strftime("%H:%M:%S")
                     click.echo(f"[{ts}] Presence: {label} is {new_status}")
+                if new_status != old_status or new_last_seen != old_last_seen:
                     presence_state[ble_name] = {
                         "name": label,
                         "status": new_status,
-                        "last_seen": last.isoformat() if last else None,
+                        "last_seen": new_last_seen,
                     }
                     changed = True
             if changed:
