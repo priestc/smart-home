@@ -31,10 +31,11 @@ def current():
 @app.get("/api/history")
 def history():
     """Historical readings. Query params:
-      label  - filter by sensor label (optional)
-      start  - ISO datetime lower bound (optional)
-      end    - ISO datetime upper bound (optional)
-      limit  - max rows returned (default 1000, max 10000)
+      label          - filter by sensor label (optional)
+      start          - ISO datetime lower bound (optional)
+      end            - ISO datetime upper bound (optional)
+      limit          - max rows returned (default 1000, max 200000)
+      bucket_minutes - group readings into N-minute buckets (optional)
     """
     label = request.args.get("label")
     start = request.args.get("start")
@@ -43,6 +44,10 @@ def history():
         limit = min(int(request.args.get("limit", 1000)), 200000)
     except ValueError:
         return jsonify({"error": "limit must be an integer"}), 400
+    try:
+        bucket = max(1, int(request.args.get("bucket_minutes", 1)))
+    except ValueError:
+        return jsonify({"error": "bucket_minutes must be an integer"}), 400
 
     where, params = [], []
     if label:
@@ -55,12 +60,25 @@ def history():
         where.append("ts <= ?")
         params.append(end)
 
-    sql = "SELECT ts, label, temp_f, humidity, rssi FROM readings"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY ts DESC LIMIT ?"
-    params.append(limit)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
+    if bucket > 1:
+        bucket_secs = bucket * 60
+        sql = f"""
+            SELECT
+                datetime(CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs}, 'unixepoch') AS ts,
+                label,
+                ROUND(AVG(temp_f), 2)  AS temp_f,
+                ROUND(AVG(humidity), 2) AS humidity,
+                ROUND(AVG(rssi), 0)    AS rssi
+            FROM readings{where_sql}
+            GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, label
+            ORDER BY ts DESC LIMIT ?
+        """
+    else:
+        sql = f"SELECT ts, label, temp_f, humidity, rssi FROM readings{where_sql} ORDER BY ts DESC LIMIT ?"
+
+    params.append(limit)
     with _conn() as conn:
         rows = conn.execute(sql, params).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -364,8 +382,9 @@ function localISO(date) {
 
 async function loadCharts() {
   const start = localISO(new Date(Date.now() - rangeDays * 86400000));
-  const limit = Math.max(2000, rangeDays * 24 * 60 * 10);
-  const data  = await fetch(`/api/history?start=${start}&limit=${limit}`).then(r => r.json());
+  const bucketMap = { 0.125: 1, 1: 5, 3: 15, 7: 30, 30: 120 };
+  const bucket = bucketMap[rangeDays] || 1;
+  const data  = await fetch(`/api/history?start=${start}&limit=2000&bucket_minutes=${bucket}`).then(r => r.json());
 
   // group by label, sort ascending
   const byLabel = {};
