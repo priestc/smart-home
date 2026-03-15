@@ -260,11 +260,12 @@ def add_presence_device(timeout):
     """Scan for BLE devices and register one as a presence detector."""
     from bleak import BleakScanner
 
-    found = {}  # address -> (name, rssi)
+    found = {}  # ble_name -> rssi (only devices with a name)
 
     def callback(device, adv):
-        name = device.name or adv.local_name or "(no name)"
-        found[device.address] = (name, adv.rssi)
+        name = device.name or adv.local_name or ""
+        if name:
+            found[name] = adv.rssi
 
     async def _run():
         async with BleakScanner(detection_callback=callback):
@@ -277,26 +278,26 @@ def add_presence_device(timeout):
         pass
 
     if not found:
-        click.echo("No devices found.")
+        click.echo("No named devices found.")
         return
 
-    devices_list = sorted(found.items(), key=lambda x: x[1][1], reverse=True)  # sort by rssi
-    click.echo(f"\nFound {len(devices_list)} device(s):\n")
-    for i, (addr, (name, rssi)) in enumerate(devices_list, 1):
-        click.echo(f"  {i}. {name}  ({addr})  rssi={rssi}")
+    devices_list = sorted(found.items(), key=lambda x: x[1], reverse=True)  # sort by rssi
+    click.echo(f"\nFound {len(devices_list)} named device(s):\n")
+    for i, (name, rssi) in enumerate(devices_list, 1):
+        click.echo(f"  {i}. {name!r}  rssi={rssi}")
 
     choice = click.prompt("\nEnter number to register as presence device", type=int)
     if not 1 <= choice <= len(devices_list):
         click.echo("Invalid choice.")
         return
 
-    addr, (name, _) = devices_list[choice - 1]
-    label = click.prompt(f"Name for this device", default=name).strip()
+    ble_name, _ = devices_list[choice - 1]
+    label = click.prompt("Display name for this device", default=ble_name).strip()
 
     devices = _presence.load_devices()
-    devices[addr] = label
+    devices[ble_name] = label
     _presence.save_devices(devices)
-    click.echo(f"\nRegistered '{label}' ({addr}) as a presence device.")
+    click.echo(f"\nRegistered '{label}' (BLE name: {ble_name!r}) as a presence device.")
 
 
 @main.command("list-presence-devices")
@@ -308,13 +309,13 @@ def list_presence_devices():
         return
 
     state = _presence.load_state()
-    click.echo(f"\n  {'name':<24} {'address':<20} {'status':<10} {'last seen'}")
-    click.echo("  " + "-" * 72)
-    for addr, name in sorted(devices.items(), key=lambda x: x[1]):
-        s = state.get(addr, {})
+    click.echo(f"\n  {'label':<24} {'ble name':<24} {'status':<10} {'last seen'}")
+    click.echo("  " + "-" * 76)
+    for ble_name, label in sorted(devices.items(), key=lambda x: x[1]):
+        s = state.get(ble_name, {})
         status = s.get("status", "unknown")
         last_seen = s.get("last_seen", "never")
-        click.echo(f"  {name:<24} {addr:<20} {status:<10} {last_seen}")
+        click.echo(f"  {label:<24} {ble_name:<24} {status:<10} {last_seen}")
 
 
 @main.command()
@@ -340,23 +341,24 @@ def monitor(duration, verbose, db, no_db):
     PRESENCE_TIMEOUT = datetime.timedelta(minutes=5)
 
     def on_device(device, adv):
-        if device.address in presence_devices:
-            presence_last_seen[device.address] = datetime.datetime.now()
+        ble_name = device.name or adv.local_name or ""
+        if ble_name in presence_devices:
+            presence_last_seen[ble_name] = datetime.datetime.now()
 
     async def check_presence():
         while True:
             await asyncio.sleep(30)
             now = datetime.datetime.now()
             changed = False
-            for addr, name in presence_devices.items():
-                last = presence_last_seen.get(addr)
+            for ble_name, label in presence_devices.items():
+                last = presence_last_seen.get(ble_name)
                 new_status = "home" if last and (now - last) < PRESENCE_TIMEOUT else "away"
-                old_status = presence_state.get(addr, {}).get("status")
+                old_status = presence_state.get(ble_name, {}).get("status")
                 if new_status != old_status:
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
-                    click.echo(f"[{ts}] Presence: {name} is {new_status}")
-                    presence_state[addr] = {
-                        "name": name,
+                    click.echo(f"[{ts}] Presence: {label} is {new_status}")
+                    presence_state[ble_name] = {
+                        "name": label,
                         "status": new_status,
                         "last_seen": last.isoformat() if last else None,
                     }

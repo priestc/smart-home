@@ -35,11 +35,11 @@ def presence():
     devices = load_devices()
     state = load_state()
     result = []
-    for addr, name in devices.items():
-        s = state.get(addr, {})
+    for ble_name, label in devices.items():
+        s = state.get(ble_name, {})
         result.append({
-            "address": addr,
-            "name": name,
+            "ble_name": ble_name,
+            "name": label,
             "status": s.get("status", "unknown"),
             "last_seen": s.get("last_seen"),
         })
