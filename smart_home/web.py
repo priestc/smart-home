@@ -326,11 +326,10 @@ def index():
 
 <script>
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b"];
+const colorMap = {};
 
-function labelColor(label) {
-  let hash = 0;
-  for (let i = 0; i < label.length; i++) hash = label.charCodeAt(i) + ((hash << 5) - hash);
-  return COLORS[Math.abs(hash) % COLORS.length];
+function labelColor(lbl) {
+  return colorMap[lbl] ?? COLORS[0];
 }
 let tempChart, humChart, rangeDays = 1;
 
@@ -372,6 +371,9 @@ function setRange(days) {
 
 async function loadCurrent() {
   const data = await fetch("/api/current").then(r => r.json());
+  // assign colors by sorted label position so they're consistent across all charts
+  data.map(s => s.label).filter(Boolean).sort()
+    .forEach((lbl, i) => { colorMap[lbl] = COLORS[i % COLORS.length]; });
   const el = document.getElementById("cards");
   el.innerHTML = data.map(s => `
     <div class="card">
@@ -438,8 +440,7 @@ async function loadCharts() {
 tempChart = makeChart(tempCtx, "Temperature (°F)");
 humChart  = makeChart(humCtx,  "Humidity (%)");
 
-loadCurrent();
-loadCharts();
+loadCurrent().then(loadCharts);
 setInterval(loadCurrent, 30000);
 </script>
 </body>
