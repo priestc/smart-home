@@ -66,7 +66,7 @@ def history():
         bucket_secs = bucket * 60
         sql = f"""
             SELECT
-                datetime(CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs}, 'unixepoch') AS ts,
+                strftime('%Y-%m-%dT%H:%M:%S', CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs}, 'unixepoch') AS ts,
                 label,
                 ROUND(AVG(temp_f), 2)  AS temp_f,
                 ROUND(AVG(humidity), 2) AS humidity,
@@ -76,9 +76,10 @@ def history():
             ORDER BY ts DESC LIMIT ?
         """
     else:
-        sql = f"SELECT ts, label, temp_f, humidity, rssi FROM readings{where_sql} ORDER BY ts DESC LIMIT ?"
+        sql = f"SELECT ts, label, temp_f, humidity, rssi FROM readings{where_sql} ORDER BY ts DESC"
 
-    params.append(limit)
+    if bucket > 1:
+        params.append(limit)
     with _conn() as conn:
         rows = conn.execute(sql, params).fetchall()
     return jsonify([dict(r) for r in rows])
