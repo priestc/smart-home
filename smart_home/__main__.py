@@ -94,6 +94,31 @@ def list_devices():
         click.echo(f"  {label:<20} {addr}")
 
 
+@main.command("recent-readings")
+@click.argument("label")
+@click.option("--limit", "-n", default=20, show_default=True, help="Number of readings to show.")
+@click.option("--db", default=DEFAULT_DB, show_default=True, help="SQLite database path.")
+def recent_readings(label, limit, db):
+    """Show the most recent readings for a sensor label.
+
+    Example: smart-home recent-readings inside
+    """
+    conn = open_db(db)
+    rows = conn.execute(
+        "SELECT ts, temp_f, humidity FROM readings WHERE label = ? ORDER BY ts DESC LIMIT ?",
+        (label, limit),
+    ).fetchall()
+    if not rows:
+        click.echo(f"No readings found for label '{label}'.")
+        return
+    rows = list(reversed(rows))  # show oldest first, most recent at bottom
+    click.echo(f"\n  Recent readings for: {label}\n")
+    click.echo(f"  {'timestamp':<22} {'temp (°F)':<12} {'humidity'}")
+    click.echo("  " + "-" * 44)
+    for ts, temp_f, humidity in rows:
+        click.echo(f"  {ts:<22} {temp_f:<12.1f} {humidity:.1f}%")
+
+
 @main.command("sensor-history")
 @click.option("--label", "-l", default=None, help="Filter by sensor label.")
 @click.option("--limit", "-n", default=20, show_default=True, help="Number of rows to show.")
