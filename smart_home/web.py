@@ -28,6 +28,18 @@ def current():
     return jsonify([dict(r) for r in rows])
 
 
+@app.post("/api/register-push-token")
+def register_push_token():
+    """Register an iOS device token for push notifications."""
+    data = request.get_json(silent=True) or {}
+    token = data.get("token", "").strip()
+    if not token:
+        return jsonify({"error": "token required"}), 400
+    from smart_home.push import register_token
+    register_token(token)
+    return jsonify({"ok": True})
+
+
 @app.get("/api/presence")
 def presence():
     """Current presence status for all registered devices."""

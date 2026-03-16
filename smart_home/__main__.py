@@ -12,6 +12,7 @@ from bleak import BleakScanner
 from smart_home.scanner import scan
 from smart_home import labels as _labels
 from smart_home import presence as _presence
+from smart_home import push as _push
 from smart_home.battery import dump_gatt
 from smart_home.db import open_db, insert_reading, bulk_insert
 
@@ -336,6 +337,55 @@ def list_presence_devices():
         click.echo(f"  {label:<24} {ble_name:<24} {status:<10} {last_seen}{flag}")
 
 
+@main.command("configure-push")
+def configure_push():
+    """Set up Apple Push Notification (APNs) credentials.
+
+    You'll need an APNs Auth Key (.p8 file) from the Apple Developer portal:
+    Certificates, Identifiers & Profiles → Keys → Create a key with APNs enabled.
+    """
+    click.echo("\nAPNs Push Notification Setup\n")
+    click.echo("You need an APNs Auth Key from developer.apple.com.")
+    click.echo("Go to: Certificates, Identifiers & Profiles → Keys → + → Enable Apple Push Notifications\n")
+
+    key_file = click.prompt("Path to .p8 key file").strip()
+    if not Path(key_file).expanduser().exists():
+        click.echo(f"File not found: {key_file}")
+        return
+
+    key_id   = click.prompt("Key ID (10-character string from the key page)").strip()
+    team_id  = click.prompt("Team ID (10-character string from your account page)").strip()
+    bundle_id = click.prompt("App Bundle ID (e.g. com.yourname.smarthomenotify)").strip()
+    sandbox  = click.confirm("Use sandbox/development APNs? (Yes for dev builds, No for App Store)", default=True)
+
+    creds = {
+        "key_file": str(Path(key_file).expanduser()),
+        "key_id": key_id,
+        "team_id": team_id,
+        "bundle_id": bundle_id,
+        "sandbox": sandbox,
+    }
+    _push.save_credentials(creds)
+    click.echo("\nCredentials saved. The monitor will now send push notifications when a presence device goes away.")
+    click.echo("\nTo test, run:  smart-home test-push")
+
+
+@main.command("test-push")
+def test_push():
+    """Send a test push notification to all registered devices."""
+    tokens = _push.load_tokens()
+    if not tokens:
+        click.echo("No devices registered. Open the SmartHome iOS app and tap 'Register for Notifications'.")
+        return
+    creds = _push.load_credentials()
+    if not creds:
+        click.echo("Push not configured. Run 'smart-home configure-push' first.")
+        return
+    click.echo(f"Sending test notification to {len(tokens)} device(s)...")
+    _push.send_notification(title="Smart Home", body="Test notification — push is working!")
+    click.echo("Done.")
+
+
 @main.command("presence-history")
 @click.option("--days", "-d", default=7, show_default=True, help="How many days back to analyze.")
 @click.option("--label", "-l", default=None, help="Filter by presence device label.")
@@ -488,6 +538,11 @@ def monitor(duration, verbose, db, no_db):
                 if new_status != old_status:
                     ts = now.strftime("%H:%M:%S")
                     click.echo(f"[{ts}] Presence: {label} is {new_status}")
+                    if new_status == "away":
+                        _push.send_notification(
+                            title="Left home",
+                            body=f"{label} left home",
+                        )
                     _presence.append_history({
                         "ts": now.isoformat(timespec="seconds"),
                         "ble_name": ble_name,
