@@ -42,6 +42,74 @@ def register_push_token():
     return jsonify({"ok": True})
 
 
+@app.get("/api/presence/history")
+def presence_history_api():
+    """Per-device presence stats (7d / 30d) and recent away periods."""
+    import datetime
+    from smart_home.presence import load_history, load_devices, load_state
+    entries = load_history()
+    devices = load_devices()
+    state   = load_state()
+    if not devices:
+        return jsonify([])
+    now = datetime.datetime.now()
+    by_device: dict = {}
+    for e in entries:
+        by_device.setdefault(e["ble_name"], []).append(e)
+
+    def _periods(dev_entries, window_start):
+        pre    = [e for e in dev_entries if e["ts"] <  window_start.isoformat()]
+        in_win = [e for e in dev_entries if e["ts"] >= window_start.isoformat()]
+        initial = pre[-1]["status"] if pre else "unknown"
+        trans = [(window_start, initial)]
+        for e in in_win:
+            trans.append((datetime.datetime.fromisoformat(e["ts"]), e["status"]))
+        trans.append((now, None))
+        out = []
+        for i in range(len(trans) - 1):
+            s, status = trans[i]
+            e2 = trans[i + 1][0]
+            if status and status != "unknown":
+                out.append((s, e2, status))
+        return out
+
+    result = []
+    for ble_name, label in sorted(devices.items(), key=lambda x: x[1]):
+        s = state.get(ble_name, {})
+        dev_entries = sorted(by_device.get(ble_name, []), key=lambda e: e["ts"])
+        windows = {}
+        for days in (7, 30):
+            periods = _periods(dev_entries, now - datetime.timedelta(days=days))
+            home_secs = sum((e - s).total_seconds() for s, e, st in periods if st == "home")
+            away_secs = sum((e - s).total_seconds() for s, e, st in periods if st == "away")
+            total = home_secs + away_secs
+            windows[str(days)] = {
+                "away_count": sum(1 for _, _, st in periods if st == "away"),
+                "home_secs":  round(home_secs),
+                "away_secs":  round(away_secs),
+                "home_pct":   round(100 * home_secs / total) if total else None,
+                "away_pct":   round(100 * away_secs / total) if total else None,
+            }
+        # recent away periods from last 90 days
+        away_list = [
+            {
+                "start": s.isoformat(timespec="seconds"),
+                "end":   e.isoformat(timespec="seconds"),
+                "duration_secs": round((e - s).total_seconds()),
+            }
+            for s, e, st in _periods(dev_entries, now - datetime.timedelta(days=90))
+            if st == "away"
+        ]
+        result.append({
+            "name":        label,
+            "status":      s.get("status", "unknown"),
+            "last_seen":   s.get("last_seen"),
+            "windows":     windows,
+            "recent_away": list(reversed(away_list))[:25],
+        })
+    return jsonify(result)
+
+
 @app.get("/api/presence")
 def presence():
     """Current presence status for all registered devices."""
@@ -135,6 +203,132 @@ def trends():
             ORDER BY date ASC
         """).fetchall()
     return jsonify([dict(r) for r in rows])
+
+
+@app.get("/presence")
+def presence_page():
+    return Response("""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Presence &mdash; Smart Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; color: #1a2535; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1.5rem; }
+    .nav a { font-size: .85rem; color: #2e7dd4; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .device { background: #fff; border-radius: 12px; padding: 1.4rem 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .device-header { display: flex; align-items: center; gap: .8rem; margin-bottom: 1.2rem; }
+    .dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
+    .dot.home { background: #2a9d6e; } .dot.away { background: #c0392b; } .dot.unknown { background: #aabbc8; }
+    .device-name { font-size: 1.1rem; font-weight: 700; }
+    .device-sub  { font-size: .78rem; color: #7a90a8; margin-top: .1rem; }
+    .stats { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
+    .stat-box { background: #f0f4f8; border-radius: 8px; padding: .7rem 1rem; min-width: 130px; }
+    .stat-box .sb-label { font-size: .7rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+    .stat-box .sb-val   { font-size: 1.3rem; font-weight: 700; margin-top: .2rem; color: #1a2535; }
+    .stat-box .sb-sub   { font-size: .75rem; color: #7a90a8; margin-top: .1rem; }
+    .away-title { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: .6rem; }
+    .away-list { display: flex; flex-direction: column; gap: .4rem; }
+    .away-row { display: flex; justify-content: space-between; align-items: baseline; font-size: .85rem; padding: .4rem .6rem; border-radius: 6px; background: #f8f9fb; gap: 1rem; }
+    .away-row .ar-time { color: #4a6080; }
+    .away-row .ar-dur  { color: #7a90a8; font-size: .78rem; white-space: nowrap; }
+    .empty { color: #7a90a8; font-size: .9rem; }
+    .win-tabs { display: flex; gap: .4rem; margin-bottom: .9rem; }
+    .win-tab { background: #f0f4f8; color: #4a6080; border: none; border-radius: 6px; padding: .3rem .9rem; cursor: pointer; font-size: .8rem; font-weight: 600; transition: all .15s; }
+    .win-tab.active { background: #2e7dd4; color: #fff; }
+  </style>
+</head>
+<body>
+  <h1>Presence</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div id="content"><p class="empty">Loading&hellip;</p></div>
+
+<script>
+function fmtDur(s) {
+  s = Math.round(s);
+  if (s < 60)    return `${s}s`;
+  if (s < 3600)  return `${Math.floor(s/60)}m`;
+  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+  if (d)  return h ? `${d}d ${h}h` : `${d}d`;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+function fmtDt(iso) {
+  return new Date(iso).toLocaleString(undefined, {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+}
+function timeSince(iso) {
+  const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (s < 60)    return `${s}s ago`;
+  if (s < 3600)  return `${Math.floor(s/60)}m ago`;
+  if (s < 86400) return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m ago`;
+  return `${Math.floor(s/86400)}d ago`;
+}
+
+function renderDevice(d) {
+  const sub = d.last_seen ? `Last seen ${timeSince(d.last_seen)}` : "Never seen";
+  const tabs = [7, 30].map(n => `<button class="win-tab${n===7?' active':''}" onclick="switchWin(this,'${d.name}',${n})">${n}d</button>`).join("");
+
+  function statsHtml(w) {
+    if (!w || w.total_secs === 0) return '<p class="empty" style="margin:.5rem 0">No data for this window.</p>';
+    return `<div class="stats">
+      <div class="stat-box"><div class="sb-label">Away events</div><div class="sb-val">${w.away_count}</div></div>
+      <div class="stat-box"><div class="sb-label">Time home</div><div class="sb-val">${fmtDur(w.home_secs)}</div><div class="sb-sub">${w.home_pct ?? '?'}%</div></div>
+      <div class="stat-box"><div class="sb-label">Time away</div><div class="sb-val">${fmtDur(w.away_secs)}</div><div class="sb-sub">${w.away_pct ?? '?'}%</div></div>
+    </div>`;
+  }
+
+  const awayHtml = d.recent_away.length === 0
+    ? '<p class="empty">No away periods recorded.</p>'
+    : '<div class="away-list">' + d.recent_away.map(a =>
+        `<div class="away-row">
+          <span class="ar-time">${fmtDt(a.start)} &rarr; ${fmtDt(a.end)}</span>
+          <span class="ar-dur">${fmtDur(a.duration_secs)}</span>
+        </div>`).join("") + "</div>";
+
+  return `<div class="device" data-name="${d.name}" data-windows='${JSON.stringify(d.windows)}'>
+    <div class="device-header">
+      <div class="dot ${d.status}"></div>
+      <div><div class="device-name">${d.name}</div><div class="device-sub">${d.status} &middot; ${sub}</div></div>
+    </div>
+    <div class="win-tabs">${tabs}</div>
+    <div class="win-stats">${statsHtml(d.windows["7"])}</div>
+    <div class="away-title">Recent away periods (last 90 days)</div>
+    ${awayHtml}
+  </div>`;
+}
+
+function switchWin(btn, name, days) {
+  const card = [...document.querySelectorAll(".device")].find(el => el.dataset.name === name);
+  card.querySelectorAll(".win-tab").forEach(b => b.classList.toggle("active", b === btn));
+  const w = JSON.parse(card.dataset.windows)[String(days)];
+  function fmtDur(s) {
+    s = Math.round(s);
+    if (s < 60) return `${s}s`; if (s < 3600) return `${Math.floor(s/60)}m`;
+    const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+    if (d) return h ? `${d}d ${h}h` : `${d}d`; return m ? `${h}h ${m}m` : `${h}h`;
+  }
+  card.querySelector(".win-stats").innerHTML = (!w || w.total_secs === 0)
+    ? '<p class="empty" style="margin:.5rem 0">No data for this window.</p>'
+    : `<div class="stats">
+        <div class="stat-box"><div class="sb-label">Away events</div><div class="sb-val">${w.away_count}</div></div>
+        <div class="stat-box"><div class="sb-label">Time home</div><div class="sb-val">${fmtDur(w.home_secs)}</div><div class="sb-sub">${w.home_pct ?? '?'}%</div></div>
+        <div class="stat-box"><div class="sb-label">Time away</div><div class="sb-val">${fmtDur(w.away_secs)}</div><div class="sb-sub">${w.away_pct ?? '?'}%</div></div>
+      </div>`;
+}
+
+async function load() {
+  const data = await fetch("/api/presence/history").then(r => r.json());
+  const el = document.getElementById("content");
+  if (!data.length) { el.innerHTML = '<p class="empty">No presence devices registered.</p>'; return; }
+  el.innerHTML = data.map(renderDevice).join("");
+}
+load();
+</script>
+</body>
+</html>""", mimetype="text/html")
 
 
 @app.get("/api/minmax-tod")
@@ -675,13 +869,13 @@ async function loadPresence() {
   if (!data.length) { el.innerHTML = ""; return; }
   el.innerHTML = data.map(d => {
     const ago = d.last_seen ? timeSince(new Date(d.last_seen)) : "never";
-    return `<div class="presence-card">
+    return `<a href="/presence" class="presence-card" style="text-decoration:none;color:inherit">
       <div class="presence-dot ${d.status}"></div>
       <div class="presence-info">
         <div class="name">${d.name}</div>
         <div class="status">${d.status} &middot; ${ago}</div>
       </div>
-    </div>`;
+    </a>`;
   }).join("");
 }
 function timeSince(date) {
