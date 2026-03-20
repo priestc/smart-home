@@ -356,6 +356,11 @@ def index():
     <canvas id="humChart" height="90"></canvas>
   </div>
 
+  <div class="chart-wrap" id="diffWrap" style="display:none">
+    <h2>Inside / Outside Differential (°F)</h2>
+    <canvas id="diffChart" height="90"></canvas>
+  </div>
+
 <script>
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b"];
 const colorMap = {};
@@ -363,10 +368,11 @@ const colorMap = {};
 function labelColor(lbl) {
   return colorMap[lbl] ?? COLORS[0];
 }
-let tempChart, humChart, rangeDays = 1;
+let tempChart, humChart, diffChart, rangeDays = 1;
 
 const tempCtx = document.getElementById("tempChart").getContext("2d");
 const humCtx  = document.getElementById("humChart").getContext("2d");
+const diffCtx = document.getElementById("diffChart").getContext("2d");
 
 function makeChart(ctx, label, yLabel) {
   return new Chart(ctx, {
@@ -465,12 +471,68 @@ async function loadCharts() {
     chart.options.scales.x.time.unit = timeUnit;
   }
 
+  // Inside / Outside differential
+  const insideLabel  = Object.keys(byLabel).find(l => l.toLowerCase() === "inside");
+  const outsideLabel = Object.keys(byLabel).find(l => l.toLowerCase() === "outside");
+  const diffWrap = document.getElementById("diffWrap");
+  if (insideLabel && outsideLabel) {
+    const outsideMap = new Map();
+    for (const row of data) {
+      if (row.label === outsideLabel && row.temp_f != null) outsideMap.set(row.ts, row.temp_f);
+    }
+    const diffData = [];
+    for (const row of data) {
+      if (row.label === insideLabel && row.temp_f != null) {
+        const outTemp = outsideMap.get(row.ts);
+        if (outTemp != null) diffData.push({ x: new Date(row.ts), y: Math.round((row.temp_f - outTemp) * 10) / 10 });
+      }
+    }
+    diffData.sort((a, b) => a.x - b.x);
+    diffChart.data.datasets = [{
+      label: "Inside − Outside",
+      data: diffData,
+      borderColor: "#9b4dca",
+      backgroundColor: "transparent",
+      borderWidth: 1.5,
+      pointRadius: 0,
+      tension: 0,
+    }];
+    diffChart.options.scales.x.min = xMin;
+    diffChart.options.scales.x.max = xMax;
+    diffChart.options.scales.x.time.unit = timeUnit;
+    diffChart.update();
+    diffWrap.style.display = "";
+  } else {
+    diffWrap.style.display = "none";
+  }
+
   tempChart.update();
   humChart.update();
 }
 
 tempChart = makeChart(tempCtx, "Temperature (°F)");
 humChart  = makeChart(humCtx,  "Humidity (%)");
+diffChart = new Chart(diffCtx, {
+  type: "line",
+  data: { datasets: [] },
+  options: {
+    animation: false,
+    parsing: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: {
+        type: "time",
+        time: { tooltipFormat: "MMM d, h:mm a" },
+        ticks: { color: "#7a90a8", maxTicksLimit: 8 },
+        grid:  { color: "#e8eef4" }
+      },
+      y: {
+        ticks: { color: "#7a90a8", callback: v => v + "°F" },
+        grid:  { color: ctx => ctx.tick.value === 0 ? "#aabbc8" : "#e8eef4" }
+      }
+    }
+  }
+});
 
 loadCurrent().then(loadCharts);
 setInterval(loadCurrent, 30000);
