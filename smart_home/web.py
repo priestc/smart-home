@@ -423,9 +423,9 @@ function localISO(date) {
 
 async function loadCharts() {
   const start = localISO(new Date(Date.now() - rangeDays * 86400000));
-  const bucketMap = { 0.125: 1, 1: 5, 3: 15, 7: 30, 30: 120 };
+  const bucketMap = { 0.125: 1, 1: 2, 3: 10, 7: 20, 30: 60 };
   const bucket = bucketMap[rangeDays] || 1;
-  const data  = await fetch(`/api/history?start=${start}&limit=5000&bucket_minutes=${bucket}`).then(r => r.json());
+  const data  = await fetch(`/api/history?start=${start}&limit=8000&bucket_minutes=${bucket}`).then(r => r.json());
 
   // group by label, sort ascending
   const byLabel = {};
