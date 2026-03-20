@@ -1,9 +1,11 @@
 from __future__ import annotations
 import sqlite3
 from flask import Flask, jsonify, request, Response
+from flask_compress import Compress
 from smart_home.db import open_db
 
 app = Flask(__name__)
+Compress(app)
 _db_path: str = ""
 
 
@@ -21,7 +23,7 @@ def current():
             SELECT label, temp_f, humidity, rssi, ts
             FROM readings
             WHERE id IN (
-                SELECT MAX(id) FROM readings GROUP BY label
+                SELECT MAX(id) FROM readings WHERE temp_f IS NOT NULL GROUP BY label
             )
             ORDER BY label
         """).fetchall()

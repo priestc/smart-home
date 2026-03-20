@@ -14,7 +14,7 @@ from smart_home import labels as _labels
 from smart_home import presence as _presence
 from smart_home import push as _push
 from smart_home.battery import dump_gatt
-from smart_home.db import open_db, insert_reading, bulk_insert
+from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading
 
 DEFAULT_DB = os.path.expanduser("~/.local/share/smart-home/readings.db")
 
@@ -492,7 +492,10 @@ def monitor(duration, verbose, db, no_db):
     last_temp: dict[str, float] = {}      # address -> last recorded temp_f
     last_hum:  dict[str, float] = {}      # address -> last recorded humidity
     last_write: dict[str, datetime.datetime] = {}  # address -> last write time
+    last_seen: dict[str, datetime.datetime] = {}   # address -> last advertisement received
+    last_no_reading: dict[str, datetime.datetime] = {}  # address -> last no_reading insert
     HEARTBEAT = datetime.timedelta(minutes=30)
+    MISSING_THRESHOLD = datetime.timedelta(minutes=10)
 
     # presence tracking
     presence_devices = _presence.load_devices()
@@ -565,11 +568,32 @@ def monitor(duration, verbose, db, no_db):
     if presence_devices:
         click.echo(f"Tracking presence for {len(presence_devices)} device(s).")
 
+    async def check_missing_sensors():
+        while True:
+            await asyncio.sleep(300)  # check every 5 minutes
+            if not conn:
+                continue
+            now = datetime.datetime.now()
+            for addr, label in label_map.items():
+                if not label:
+                    continue
+                last = last_seen.get(addr)
+                if last is None:
+                    continue  # never seen this session, skip
+                if (now - last) >= MISSING_THRESHOLD:
+                    last_nr = last_no_reading.get(addr, datetime.datetime.min)
+                    if (now - last_nr) >= MISSING_THRESHOLD:
+                        insert_no_reading(conn, label, addr)
+                        last_no_reading[addr] = now
+                        ts = now.strftime("%H:%M:%S")
+                        click.echo(f"[{ts}] No reading: {label} ({addr})")
+
     def on_reading(reading):
         reading.label = label_map.get(reading.address)
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         click.echo(f"[{ts}] {reading}")
         seen.add(reading.address)
+        last_seen[reading.address] = datetime.datetime.now()
         if conn:
             now = datetime.datetime.now()
             temp_changed = reading.temp_f != last_temp.get(reading.address)
@@ -583,12 +607,15 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
+        extra = [check_missing_sensors()]
+        if presence_devices:
+            extra.append(check_presence())
         asyncio.run(scan(
             on_reading,
             duration=duration,
             verbose=verbose,
             on_device=on_device,
-            extra_tasks=[check_presence()] if presence_devices else None,
+            extra_tasks=extra,
         ))
     except KeyboardInterrupt:
         click.echo(f"\nDone. Saw {len(seen)} device(s).")
