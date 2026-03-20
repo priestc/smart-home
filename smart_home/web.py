@@ -352,6 +352,7 @@ function makeTODChart(ctx) {
     options: {
       animation: false,
       parsing: false,
+      interaction: { mode: "index", intersect: false },
       plugins: {
         legend: { labels: { color: "#4a6080" } },
         tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${fmtHour(ctx.parsed.y)}` } }
