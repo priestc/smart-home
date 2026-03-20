@@ -449,6 +449,18 @@ def index():
       margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05);
     }
     .chart-wrap h2 { font-size: 0.85rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: 1rem; }
+    .presence-cards { display: flex; gap: 1rem; margin-bottom: 2rem; flex-wrap: wrap; }
+    .presence-card {
+      background: #fff; border-radius: 12px; padding: 1rem 1.5rem; min-width: 160px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05);
+      display: flex; align-items: center; gap: .9rem;
+    }
+    .presence-dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
+    .presence-dot.home { background: #2a9d6e; }
+    .presence-dot.away { background: #c0392b; }
+    .presence-dot.unknown { background: #aabbc8; }
+    .presence-info .name { font-size: .85rem; font-weight: 600; color: #1a2535; }
+    .presence-info .status { font-size: .75rem; color: #7a90a8; margin-top: .15rem; }
     .range-btns  { margin-bottom: 1.5rem; display: flex; gap: .4rem; flex-wrap: wrap; }
     .range-btns button {
       background: #fff; color: #4a6080; border: 1px solid #d0dce8;
@@ -463,6 +475,8 @@ def index():
   <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a></h1>
 
   <div class="cards" id="cards"></div>
+
+  <div class="presence-cards" id="presence-cards"></div>
 
   <div class="range-btns">
     <button onclick="setRange(0.125)" >3h</button>
@@ -662,8 +676,34 @@ diffChart = new Chart(diffCtx, {
   }
 });
 
+async function loadPresence() {
+  const data = await fetch("/api/presence").then(r => r.json());
+  const el = document.getElementById("presence-cards");
+  if (!data.length) { el.innerHTML = ""; return; }
+  el.innerHTML = data.map(d => {
+    const ago = d.last_seen ? timeSince(new Date(d.last_seen)) : "never";
+    return `<div class="presence-card">
+      <div class="presence-dot ${d.status}"></div>
+      <div class="presence-info">
+        <div class="name">${d.name}</div>
+        <div class="status">${d.status} &middot; ${ago}</div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function timeSince(date) {
+  const s = Math.floor((Date.now() - date) / 1000);
+  if (s < 60)   return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  if (s < 86400) return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m ago`;
+  return `${Math.floor(s/86400)}d ago`;
+}
+
 loadCurrent().then(loadCharts);
+loadPresence();
 setInterval(loadCurrent, 30000);
+setInterval(loadPresence, 30000);
 </script>
 </body>
 </html>"""
