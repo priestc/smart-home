@@ -233,7 +233,8 @@ const COLORS = {
 const toDate = s => new Date(s + "T12:00:00");
 
 let showMA = false;
-const charts = [];  // {chart, rows} for each sensor
+const charts = [];     // {chart, rows} for each sensor (min/max/avg)
+const todCharts = [];  // {chart, rows} for each sensor (time-of-day)
 
 function movingAvg(rows, field, window) {
   return rows.map((r, i) => {
@@ -258,11 +259,28 @@ function buildDatasets(rows, ma) {
   ];
 }
 
+function buildTODDatasets(rows, ma) {
+  if (ma) {
+    return [
+      { label: "Time of daily max (5d avg)", data: movingAvg(rows, "max_hour", 5), borderColor: "#e07820", backgroundColor: "transparent", borderWidth: 2, borderDash: [5, 3], pointRadius: 0, tension: 0 },
+      { label: "Time of daily min (5d avg)", data: movingAvg(rows, "min_hour", 5), borderColor: "#2e7dd4", backgroundColor: "transparent", borderWidth: 2, borderDash: [5, 3], pointRadius: 0, tension: 0 },
+    ];
+  }
+  return [
+    { label: "Time of daily max", data: rows.map(r => ({ x: toDate(r.date), y: r.max_hour })), borderColor: "#e07820", backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+    { label: "Time of daily min", data: rows.map(r => ({ x: toDate(r.date), y: r.min_hour })), borderColor: "#2e7dd4", backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, tension: 0 },
+  ];
+}
+
 function toggleMA() {
   showMA = !showMA;
   document.getElementById("maBtn").classList.toggle("active", showMA);
   for (const { chart, rows } of charts) {
     chart.data.datasets = buildDatasets(rows, showMA);
+    chart.update();
+  }
+  for (const { chart, rows } of todCharts) {
+    chart.data.datasets = buildTODDatasets(rows, showMA);
     chart.update();
   }
 }
@@ -400,22 +418,8 @@ async function loadTOD() {
     const chart = makeTODChart(wrap.querySelector("canvas").getContext("2d"));
     chart.options.scales.x.min = xMin;
     chart.options.scales.x.max = xMax;
-    chart.data.datasets = [
-      {
-        label: "Time of daily max",
-        data: rows.map(r => ({ x: toDate(r.date), y: r.max_hour })),
-        borderColor: "#e07820",
-        backgroundColor: "transparent",
-        borderWidth: 1.5, pointRadius: 0, tension: 0,
-      },
-      {
-        label: "Time of daily min",
-        data: rows.map(r => ({ x: toDate(r.date), y: r.min_hour })),
-        borderColor: "#2e7dd4",
-        backgroundColor: "transparent",
-        borderWidth: 1.5, pointRadius: 0, tension: 0,
-      },
-    ];
+    todCharts.push({ chart, rows });
+    chart.data.datasets = buildTODDatasets(rows, showMA);
     chart.update();
   }
 }
