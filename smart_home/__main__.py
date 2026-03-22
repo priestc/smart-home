@@ -578,7 +578,8 @@ def monitor(duration, verbose, db, no_db):
             is_new = device.address not in xiaomi_devices
             xiaomi_devices[device.address] = (device, ble_name or "LYWSD03MMC")
             if is_new:
-                click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered Xiaomi sensor: {ble_name!r} ({device.address})")
+                label = label_map.get(device.address) or ble_name or device.address
+                click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered Xiaomi sensor: {label} ({device.address})")
 
         if verbose and ble_name:
             click.echo(f"[presence] untracked: {ble_name!r} ({device.address})")
