@@ -217,6 +217,35 @@ def history_month():
     return jsonify(result)
 
 
+@app.get("/api/history/year")
+def history_year():
+    """All temperature readings across the full year, normalized to year 2000 for overlay.
+    Returns rows grouped by calendar year, each with ts normalized to 2000-MM-DDTHH:MM:SS.
+    Query param: bucket_minutes (default 360).
+    """
+    import datetime as _dt
+    bucket_minutes = max(1, request.args.get("bucket_minutes", 360, type=int))
+    bucket_secs = bucket_minutes * 60
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT
+                strftime('%Y', ts) AS year,
+                CAST(strftime('%s', '2000' || substr(replace(ts,'T',' '), 5)) AS INTEGER) / ? * ? AS bucket,
+                label,
+                ROUND(AVG(temp_f), 1) AS temp_f
+            FROM readings
+            WHERE temp_f IS NOT NULL AND label IS NOT NULL
+            GROUP BY bucket, label, year
+            ORDER BY bucket ASC
+        """, (bucket_secs, bucket_secs)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        ts = _dt.datetime.utcfromtimestamp(d["bucket"]).strftime("%Y-%m-%dT%H:%M:%S")
+        result.append({"year": d["year"], "ts": ts, "label": d["label"], "temp_f": d["temp_f"]})
+    return jsonify(result)
+
+
 @app.get("/api/trends")
 def trends():
     """Daily min/max/avg temperature per label for the past year."""
@@ -784,6 +813,7 @@ _TEMP_PAGE = """\
   <div class="btn-group">
     <div class="btn-group-label">By Month</div>
     <div class="range-btns" id="month-btns">
+      <button onclick="setAllMonths()">All Months</button>
       <button onclick="setMonth(1)">Jan</button>
       <button onclick="setMonth(2)">Feb</button>
       <button onclick="setMonth(3)">Mar</button>
@@ -891,11 +921,18 @@ function setRange(days) {
   document.querySelectorAll("#month-btns button").forEach(b => b.classList.remove("active"));
   loadChart();
 }
+function setAllMonths() {
+  mode = "year";
+  document.querySelectorAll("#recent-btns button").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll("#month-btns button").forEach((b,i) =>
+    b.classList.toggle("active", i === 0));
+  loadChart();
+}
 function setMonth(m) {
   mode = "month"; activeMonth = m;
   document.querySelectorAll("#recent-btns button").forEach(b => b.classList.remove("active"));
   document.querySelectorAll("#month-btns button").forEach((b,i) =>
-    b.classList.toggle("active", i + 1 === m));
+    b.classList.toggle("active", i === m));
   loadChart();
 }
 
@@ -930,7 +967,7 @@ async function loadChart() {
     chart.options.scales.x.max = xMax;
     chart.options.scales.x.time.unit = timeUnit;
     addDiffDatasets(data, false);
-  } else {
+  } else if (mode === "month") {
     const data = await fetch(`/api/history/month?month=${activeMonth}&bucket_minutes=60`).then(r => r.json());
     const byKey = {};
     for (const row of data) {
@@ -947,6 +984,22 @@ async function loadChart() {
     chart.options.scales.x.min = xMin;
     chart.options.scales.x.max = xMax;
     chart.options.scales.x.time.unit = "day";
+    addDiffDatasets(data, true);
+  } else {
+    const data = await fetch(`/api/history/year?bucket_minutes=360`).then(r => r.json());
+    const byKey = {};
+    for (const row of data) {
+      const key = `${row.label} ${row.year}`;
+      (byKey[key] ??= []).push({ x: new Date(row.ts), y: row.temp_f });
+    }
+    const keys = Object.keys(byKey).sort();
+    chart.data.datasets = keys.map((key, i) => ({
+      label: key, data: byKey[key], borderColor: COLORS[i % COLORS.length],
+      backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, tension: 0,
+    }));
+    chart.options.scales.x.min = new Date(2000, 0, 1);
+    chart.options.scales.x.max = new Date(2000, 11, 31, 23, 59, 59);
+    chart.options.scales.x.time.unit = "month";
     addDiffDatasets(data, true);
   }
   applyHidden();
