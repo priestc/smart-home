@@ -576,7 +576,7 @@ def monitor(duration, verbose, db, no_db):
 
         if is_xiaomi_lywsd03mmc(device, adv) and device.address in label_map:
             is_new = device.address not in xiaomi_devices
-            xiaomi_devices[device.address] = (device, ble_name or "LYWSD03MMC")
+            xiaomi_devices[device.address] = (device, ble_name or "LYWSD03MMC", adv.rssi)
             if is_new:
                 label = label_map.get(device.address) or ble_name or device.address
                 click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered Xiaomi sensor: {label} ({device.address})")
@@ -682,17 +682,18 @@ def monitor(duration, verbose, db, no_db):
     async def check_xiaomi_sensors():
         while True:
             await asyncio.sleep(30)
-            for addr, (ble_device, name) in list(xiaomi_devices.items()):
+            for addr, (ble_device, name, last_rssi) in list(xiaomi_devices.items()):
                 label = label_map.get(addr) or name
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 click.echo(f"[{ts}] Polling {label} ({addr})...")
-                reading = await read_lywsd03mmc(ble_device, name)
+                reading, err = await read_lywsd03mmc(ble_device, name)
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 if reading is not None:
+                    reading.rssi = last_rssi
                     click.echo(f"[{ts}] Poll OK: {label} temp={reading.temp_f:.1f}°F humidity={reading.humidity:.1f}%")
                     on_reading(reading)
                 else:
-                    click.echo(f"[{ts}] Poll FAILED: {label} ({addr})")
+                    click.echo(f"[{ts}] Poll FAILED: {label} ({addr}): {err}")
 
     def on_reading(reading):
         db_label = label_map.get(reading.address)
