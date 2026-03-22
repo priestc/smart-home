@@ -1,9 +1,38 @@
 from __future__ import annotations
 import asyncio
-from bleak import BleakScanner
+from bleak import BleakScanner, BleakClient
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from smart_home.decoder import decode_advertisement, decode_xiaomi_mibeacon, Reading
+
+# LYWSD03MMC GATT characteristic: temp (int16 LE, 0.01°C) + humidity (uint8, %) + voltage (uint16 LE, mV)
+_LYWSD03MMC_CHAR = "EBE0CCC1-7A0A-4B0C-8A1A-6FF2997DA3A6"
+
+
+async def read_lywsd03mmc(address: str, name: str) -> Reading | None:
+    """Actively connect to a LYWSD03MMC and read temperature/humidity via GATT."""
+    try:
+        async with BleakClient(address, timeout=10.0) as client:
+            data = await client.read_gatt_char(_LYWSD03MMC_CHAR)
+    except Exception:
+        return None
+    if len(data) < 3:
+        return None
+    temp_c   = int.from_bytes(data[0:2], "little", signed=True) / 100.0
+    humidity = float(data[2])
+    battery  = None
+    if len(data) >= 5:
+        mv = int.from_bytes(data[3:5], "little")
+        battery = max(0, min(100, int((mv - 2100) / 10)))
+    return Reading(
+        address=address,
+        name=name,
+        temp_c=temp_c,
+        humidity=humidity,
+        battery=battery,
+        rssi=None,
+        raw_reading=data.hex(),
+    )
 
 
 def is_govee_h5074(device: BLEDevice, adv: AdvertisementData) -> bool:

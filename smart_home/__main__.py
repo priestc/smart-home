@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import click
 from bleak import BleakScanner
-from smart_home.scanner import scan
+from smart_home.scanner import scan, is_xiaomi_lywsd03mmc, read_lywsd03mmc
 from smart_home import labels as _labels
 from smart_home import presence as _presence
 from smart_home import push as _push
@@ -543,6 +543,9 @@ def monitor(duration, verbose, db, no_db):
     HEARTBEAT = datetime.timedelta(minutes=30)
     MISSING_THRESHOLD = datetime.timedelta(minutes=10)
 
+    # Xiaomi devices discovered via passive scan — polled actively for readings
+    xiaomi_devices: dict[str, str] = {}  # address -> BLE name
+
     # presence tracking
     presence_devices = _presence.load_devices()
     presence_last_seen: dict[str, datetime.datetime] = {}
@@ -569,6 +572,10 @@ def monitor(duration, verbose, db, no_db):
             if verbose:
                 click.echo(f"[presence] {matched_name!r} seen (by addr={device.address})")
             return
+
+        if is_xiaomi_lywsd03mmc(device, adv) and device.address not in xiaomi_devices:
+            xiaomi_devices[device.address] = ble_name or "LYWSD03MMC"
+            click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered Xiaomi sensor: {ble_name!r} ({device.address})")
 
         if verbose and ble_name:
             click.echo(f"[presence] untracked: {ble_name!r} ({device.address})")
@@ -668,6 +675,17 @@ def monitor(duration, verbose, db, no_db):
                         ts = now.strftime("%H:%M:%S")
                         click.echo(f"[{ts}] No reading: {label} ({addr})")
 
+    async def check_xiaomi_sensors():
+        while True:
+            await asyncio.sleep(30)
+            for addr, name in list(xiaomi_devices.items()):
+                reading = await read_lywsd03mmc(addr, name)
+                if reading is not None:
+                    on_reading(reading)
+                elif verbose:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    click.echo(f"[{ts}] Xiaomi connect failed: {name} ({addr})")
+
     def on_reading(reading):
         reading.label = label_map.get(reading.address)
         ts = datetime.datetime.now().strftime("%H:%M:%S")
@@ -712,7 +730,7 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
-        extra = [check_missing_sensors()]
+        extra = [check_missing_sensors(), check_xiaomi_sensors()]
         if presence_devices:
             extra.append(check_presence())
         asyncio.run(scan(
