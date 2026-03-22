@@ -526,6 +526,12 @@ def monitor(duration, verbose, db, no_db):
 
         if verbose and ble_name:
             click.echo(f"[presence] untracked: {ble_name!r} ({device.address})")
+            if adv.manufacturer_data:
+                for cid, data in adv.manufacturer_data.items():
+                    click.echo(f"  manufacturer_data[0x{cid:04X}] = {data.hex()}")
+            if adv.service_data:
+                for uuid, data in adv.service_data.items():
+                    click.echo(f"  service_data[{uuid}] = {data.hex()}")
 
     async def check_presence():
         while True:
