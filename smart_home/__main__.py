@@ -707,8 +707,8 @@ def monitor(duration, verbose, db, no_db):
                 last_hum[reading.address]  = reading.humidity
                 last_write[reading.address] = now
 
-        # Check for all-time temperature records
-        label = reading.label
+        # Check for all-time temperature records (only for explicitly labeled sensors)
+        label = db_label
         if label and reading.temp_f is not None:
             if label not in records:
                 # First time seeing this label — initialize without notifying
