@@ -18,7 +18,8 @@ async def read_lywsd03mmc(device, name: str) -> tuple[Reading | None, str | None
         async with BleakClient(device, timeout=10.0) as client:
             data = await client.read_gatt_char(_LYWSD03MMC_CHAR)
     except Exception as e:
-        return None, str(e)
+        msg = str(e) or type(e).__name__
+        return None, msg
     if len(data) < 3:
         return None, f"data too short ({len(data)} bytes)"
     temp_c   = int.from_bytes(data[0:2], "little", signed=True) / 100.0
@@ -119,7 +120,12 @@ async def scan(
                     callback(reading)
 
     async def _run():
-        scanner = BleakScanner(detection_callback=detection_callback)
+        # passive scanning mode: listen for advertisements without sending scan
+        # requests, which avoids interfering with GATT connection attempts.
+        scanner = BleakScanner(
+            detection_callback=detection_callback,
+            scanning_mode="passive",
+        )
         if scanner_ref is not None:
             scanner_ref.append(scanner)
         async with scanner:
