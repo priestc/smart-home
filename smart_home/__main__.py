@@ -583,13 +583,20 @@ def monitor(duration, verbose, db, no_db):
         for label, hi, lo in rows:
             records[label] = {"high": hi, "low": lo}
 
+    _last_record_notify: datetime.datetime = datetime.datetime.min
+    RECORD_NOTIFY_COOLDOWN = datetime.timedelta(hours=1)
+
     async def _notify_record(kind: str, label: str, temp: float) -> None:
+        nonlocal _last_record_notify
         now = datetime.datetime.now()
         if kind == "low" and now.hour < 8:
             # Sleep until 8 AM today
             target = now.replace(hour=8, minute=0, second=0, microsecond=0)
-            delay = (target - now).total_seconds()
-            await asyncio.sleep(delay)
+            await asyncio.sleep((target - now).total_seconds())
+            now = datetime.datetime.now()
+        if (now - _last_record_notify) < RECORD_NOTIFY_COOLDOWN:
+            return
+        _last_record_notify = now
         _push.send_notification(
             title=f"New record {kind}: {label}",
             body=f"{label} hit a new all-time record {kind} of {temp:.1f}°F",
