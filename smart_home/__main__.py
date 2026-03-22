@@ -581,6 +581,12 @@ def monitor(duration, verbose, db, no_db):
             if is_new:
                 label = label_map.get(device.address) or ble_name or device.address
                 click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered Xiaomi sensor: {label} ({device.address})")
+                # Poll immediately while the device is fresh in BlueZ's cache.
+                # Delay slightly so the scanner has time to fully register the device.
+                try:
+                    asyncio.get_running_loop().create_task(_poll_xiaomi(device.address, delay=3.0))
+                except RuntimeError:
+                    pass
 
         if verbose and ble_name:
             click.echo(f"[presence] untracked: {ble_name!r} ({device.address})")
@@ -680,22 +686,44 @@ def monitor(duration, verbose, db, no_db):
                         ts = now.strftime("%H:%M:%S")
                         click.echo(f"[{ts}] No reading: {label} ({addr})")
 
+    _poll_lock = asyncio.Lock()
+
+    async def _poll_xiaomi(addr: str, delay: float = 0.0) -> None:
+        """Poll one Xiaomi sensor. Uses a lock to prevent concurrent GATT connections.
+        On 'not found' removes the device so it will be re-polled on next discovery.
+        """
+        if delay:
+            await asyncio.sleep(delay)
+        entry = xiaomi_devices.get(addr)
+        if entry is None:
+            return
+        ble_device, name, last_rssi = entry
+        label = label_map.get(addr) or name
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        click.echo(f"[{ts}] Polling {label} ({addr})...")
+        async with _poll_lock:
+            reading, err = await read_lywsd03mmc(ble_device, name)
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        if reading is not None:
+            # Refresh rssi from xiaomi_devices in case it was updated while polling
+            _, _, last_rssi = xiaomi_devices.get(addr, (None, None, last_rssi))
+            reading.rssi = last_rssi
+            click.echo(f"[{ts}] Poll OK: {label} temp={reading.temp_f:.1f}°F humidity={reading.humidity:.1f}%")
+            on_reading(reading)
+        else:
+            click.echo(f"[{ts}] Poll FAILED: {label} ({addr}): {err}")
+            if err and "not found" in err:
+                # BlueZ dropped the device from its cache; remove so next advertisement
+                # triggers a fresh immediate poll instead of perpetually failing.
+                xiaomi_devices.pop(addr, None)
+                click.echo(f"[{ts}] Removed {label} from poll list — will re-add on next advertisement")
+
     async def check_xiaomi_sensors():
+        """Periodic fallback poll for sensors that haven't been re-discovered recently."""
         while True:
-            await asyncio.sleep(30)
-            for addr, (ble_device, name, last_rssi) in list(xiaomi_devices.items()):
-                label = label_map.get(addr) or name
-                ts = datetime.datetime.now().strftime("%H:%M:%S")
-                click.echo(f"[{ts}] Polling {label} ({addr})...")
-                reading, err = await read_lywsd03mmc(ble_device, name)
-                ts = datetime.datetime.now().strftime("%H:%M:%S")
-                if reading is not None:
-                    reading.rssi = last_rssi
-                    click.echo(f"[{ts}] Poll OK: {label} temp={reading.temp_f:.1f}°F humidity={reading.humidity:.1f}%")
-                    on_reading(reading)
-                else:
-                    click.echo(f"[{ts}] Poll FAILED: {label} ({addr}): {err}")
-                await asyncio.sleep(2)  # give BlueZ time to fully tear down before next connect
+            await asyncio.sleep(60)
+            for addr in list(xiaomi_devices):
+                await _poll_xiaomi(addr)
 
     def on_reading(reading):
         db_label = label_map.get(reading.address)
