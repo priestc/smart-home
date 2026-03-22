@@ -13,13 +13,20 @@ async def read_lywsd03mmc(device, name: str) -> tuple[Reading | None, str | None
     """Actively connect to a LYWSD03MMC and read temperature/humidity via GATT.
     Returns (Reading, None) on success or (None, error_message) on failure.
     device should be a BLEDevice object (more reliable than address string on Linux/BlueZ).
+    Retries up to 3 times with a short delay; br-connection-canceled is often transient.
     """
-    try:
-        async with BleakClient(device, timeout=10.0) as client:
-            data = await client.read_gatt_char(_LYWSD03MMC_CHAR)
-    except Exception as e:
-        msg = str(e) or type(e).__name__
-        return None, msg
+    last_err = None
+    for attempt in range(3):
+        if attempt > 0:
+            await asyncio.sleep(4)
+        try:
+            async with BleakClient(device, timeout=10.0) as client:
+                data = await client.read_gatt_char(_LYWSD03MMC_CHAR)
+            break  # success
+        except Exception as e:
+            last_err = str(e) or type(e).__name__
+    else:
+        return None, last_err
     if len(data) < 3:
         return None, f"data too short ({len(data)} bytes)"
     temp_c   = int.from_bytes(data[0:2], "little", signed=True) / 100.0
@@ -120,29 +127,7 @@ async def scan(
                     callback(reading)
 
     async def _run():
-        # Passive scanning mode avoids sending scan request packets, which on
-        # BlueZ/Linux interfere with GATT connection attempts (br-connection-canceled).
-        # BlueZ requires or_patterns to filter which advertisements to deliver.
-        try:
-            from bleak.backends.bluezdbus.advertisement_monitor import OrPattern
-            from bleak.backends.bluezdbus.scanner import BlueZScannerArgs
-            scanner = BleakScanner(
-                detection_callback=detection_callback,
-                scanning_mode="passive",
-                bluez=BlueZScannerArgs(or_patterns=[
-                    # Govee H5074: manufacturer data company ID 0xEC88 (little-endian)
-                    OrPattern(0, 0xFF, bytes([0x88, 0xEC])),
-                    # Xiaomi LYWSD03MMC: 16-bit service UUID 0xFE95 (little-endian)
-                    OrPattern(0, 0x16, bytes([0x95, 0xFE])),
-                    # Broad match for presence/other devices: common BLE flags values
-                    OrPattern(0, 0x01, b"\x06"),  # LE General Discoverable + BR/EDR Not Supported
-                    OrPattern(0, 0x01, b"\x1a"),  # LE Limited Discoverable
-                    OrPattern(0, 0x01, b"\x02"),  # LE Limited Discoverable (old)
-                ]),
-            )
-        except (ImportError, Exception):
-            # Non-Linux or older bleak: fall back to active scanning
-            scanner = BleakScanner(detection_callback=detection_callback)
+        scanner = BleakScanner(detection_callback=detection_callback)
         if scanner_ref is not None:
             scanner_ref.append(scanner)
         async with scanner:
