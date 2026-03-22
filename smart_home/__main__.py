@@ -545,7 +545,8 @@ def monitor(duration, verbose, db, no_db):
 
     # Xiaomi devices discovered via passive scan — polled actively for readings
     # Stores BLEDevice object (not just address) so BleakClient connects reliably on Linux
-    xiaomi_devices: dict[str, tuple] = {}  # address -> (BLEDevice, name)
+    xiaomi_devices: dict[str, tuple] = {}  # address -> (BLEDevice, name, last_rssi)
+    scanner_ref: list = []  # holds the BleakScanner so polling can pause/resume it
 
     # presence tracking
     presence_devices = _presence.load_devices()
@@ -682,18 +683,30 @@ def monitor(duration, verbose, db, no_db):
     async def check_xiaomi_sensors():
         while True:
             await asyncio.sleep(30)
-            for addr, (ble_device, name, last_rssi) in list(xiaomi_devices.items()):
-                label = label_map.get(addr) or name
-                ts = datetime.datetime.now().strftime("%H:%M:%S")
-                click.echo(f"[{ts}] Polling {label} ({addr})...")
-                reading, err = await read_lywsd03mmc(ble_device, name)
-                ts = datetime.datetime.now().strftime("%H:%M:%S")
-                if reading is not None:
-                    reading.rssi = last_rssi
-                    click.echo(f"[{ts}] Poll OK: {label} temp={reading.temp_f:.1f}°F humidity={reading.humidity:.1f}%")
-                    on_reading(reading)
-                else:
-                    click.echo(f"[{ts}] Poll FAILED: {label} ({addr}): {err}")
+            if not xiaomi_devices:
+                continue
+            # Stop passive scanning while doing GATT connections — BlueZ scan requests
+            # interfere with BLE connection establishment (causes br-connection-canceled).
+            ble_scanner = scanner_ref[0] if scanner_ref else None
+            if ble_scanner:
+                await ble_scanner.stop()
+            try:
+                for addr, (ble_device, name, last_rssi) in list(xiaomi_devices.items()):
+                    label = label_map.get(addr) or name
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    click.echo(f"[{ts}] Polling {label} ({addr})...")
+                    reading, err = await read_lywsd03mmc(ble_device, name)
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    if reading is not None:
+                        reading.rssi = last_rssi
+                        click.echo(f"[{ts}] Poll OK: {label} temp={reading.temp_f:.1f}°F humidity={reading.humidity:.1f}%")
+                        on_reading(reading)
+                    else:
+                        click.echo(f"[{ts}] Poll FAILED: {label} ({addr}): {err}")
+                    await asyncio.sleep(2)  # give BlueZ time to fully tear down before next connect
+            finally:
+                if ble_scanner:
+                    await ble_scanner.start()
 
     def on_reading(reading):
         db_label = label_map.get(reading.address)
@@ -749,6 +762,7 @@ def monitor(duration, verbose, db, no_db):
             verbose=verbose,
             on_device=on_device,
             extra_tasks=extra,
+            scanner_ref=scanner_ref,
         ))
     except KeyboardInterrupt:
         click.echo(f"\nDone. Saw {len(seen)} device(s).")

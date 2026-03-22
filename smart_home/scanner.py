@@ -54,11 +54,14 @@ async def scan(
     verbose: bool = False,
     on_device=None,
     extra_tasks: list | None = None,
+    scanner_ref: list | None = None,
 ):
     """Scan all BLE devices. For every device seen, on_device(device, adv) is called.
     For supported temperature sensors, callback(Reading) is also called.
     If duration is None, scan indefinitely.
     extra_tasks is a list of coroutines to run concurrently with the scanner.
+    If scanner_ref is a list, the BleakScanner instance will be appended to it so
+    callers can call scanner.stop()/scanner.start() to pause scanning (e.g. for GATT).
     """
     # Per-device accumulated state for sensors that split data across frames
     xiaomi_state: dict[str, dict] = {}
@@ -116,7 +119,10 @@ async def scan(
                     callback(reading)
 
     async def _run():
-        async with BleakScanner(detection_callback=detection_callback):
+        scanner = BleakScanner(detection_callback=detection_callback)
+        if scanner_ref is not None:
+            scanner_ref.append(scanner)
+        async with scanner:
             coros = list(extra_tasks or [])
             if duration is not None:
                 coros.append(asyncio.sleep(duration))
