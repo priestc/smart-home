@@ -15,7 +15,7 @@ async def read_lywsd03mmc(device, name: str) -> tuple[Reading | None, str | None
     Single attempt — callers should retry by scheduling on the next advertisement.
     """
     try:
-        async with BleakClient(device, timeout=7.0) as client:
+        async with BleakClient(device, timeout=10.0) as client:
             data = await client.read_gatt_char(_LYWSD03MMC_CHAR)
     except Exception as e:
         return None, str(e) or type(e).__name__

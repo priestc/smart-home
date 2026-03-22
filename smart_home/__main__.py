@@ -694,12 +694,11 @@ def monitor(duration, verbose, db, no_db):
                         ts = now.strftime("%H:%M:%S")
                         click.echo(f"[{ts}] No reading: {label} ({addr})")
 
-    _poll_lock = asyncio.Lock()
-
     async def _poll_xiaomi(addr: str) -> None:
         """Poll one Xiaomi sensor immediately after it has been seen advertising.
         Uses _poll_active to ensure only one poll per device runs at a time.
-        Uses _poll_lock to prevent concurrent GATT connections across devices.
+        Concurrent connections across different devices are allowed — BlueZ handles
+        serialization and returns 'Operation already in progress' if busy.
         """
         try:
             # Brief delay to let BlueZ fully register the device before connecting
@@ -711,8 +710,7 @@ def monitor(duration, verbose, db, no_db):
             label = label_map.get(addr) or name
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             click.echo(f"[{ts}] Polling {label} ({addr})...")
-            async with _poll_lock:
-                reading, err = await read_lywsd03mmc(ble_device, name)
+            reading, err = await read_lywsd03mmc(ble_device, name)
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             if reading is not None:
                 _last_poll_ok[addr] = datetime.datetime.now()
