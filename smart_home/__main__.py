@@ -11,6 +11,7 @@ import click
 from bleak import BleakScanner
 from smart_home.scanner import scan, is_xiaomi_lywsd03mmc, is_pvvx_lywsd03mmc, read_lywsd03mmc
 from smart_home import labels as _labels
+from smart_home import pvvx as _pvvx
 from smart_home import presence as _presence
 from smart_home import push as _push
 from smart_home.battery import dump_gatt
@@ -536,6 +537,7 @@ def presence_history(days, label):
 def monitor(duration, verbose, db, no_db):
     """Scan all BLE devices: log sensor readings and track presence."""
     label_map = _labels.load()
+    pvvx_addresses = _pvvx.load_addresses()
     seen: set[str] = set()
     last_temp: dict[str, float] = {}      # address -> last recorded temp_f
     last_hum:  dict[str, float] = {}      # address -> last recorded humidity
@@ -581,7 +583,7 @@ def monitor(duration, verbose, db, no_db):
                 click.echo(f"[presence] {matched_name!r} seen (by addr={device.address})")
             return
 
-        if is_xiaomi_lywsd03mmc(device, adv) and not is_pvvx_lywsd03mmc(device, adv) and device.address in label_map:
+        if is_xiaomi_lywsd03mmc(device, adv) and device.address.upper() not in pvvx_addresses and device.address in label_map:
             is_new = device.address not in xiaomi_devices
             xiaomi_devices[device.address] = (device, ble_name or "LYWSD03MMC", adv.rssi)
             if is_new:
@@ -1071,6 +1073,8 @@ def flash_device(address, firmware_path, timeout):
         return
 
     # ── 5. Post-flash ─────────────────────────────────────────────────────────
+    _pvvx.mark_address(address)
+
     atc_name = "ATC_" + address.replace(":", "")[-6:]
     click.echo(f"\nFlash complete! The sensor is rebooting.")
     click.echo(f"New BLE name: {atc_name}")
