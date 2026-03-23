@@ -3,7 +3,13 @@ import asyncio
 from bleak import BleakScanner, BleakClient
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
-from smart_home.decoder import decode_advertisement, decode_xiaomi_mibeacon, Reading
+from smart_home.decoder import (
+    decode_advertisement,
+    decode_xiaomi_mibeacon,
+    decode_pvvx_advertisement,
+    PVVX_SERVICE_UUID,
+    Reading,
+)
 
 # LYWSD03MMC GATT characteristic: temp (int16 LE, 0.01°C) + humidity (uint8, %) + voltage (uint16 LE, mV)
 _LYWSD03MMC_CHAR = "EBE0CCC1-7A0A-4B0C-8A1A-6FF2997DA3A6"
@@ -36,6 +42,14 @@ async def read_lywsd03mmc(device, name: str) -> tuple[Reading | None, str | None
         rssi=None,
         raw_reading=data.hex(),
     ), None
+
+
+def is_pvvx_lywsd03mmc(device: BLEDevice, adv: AdvertisementData) -> bool:
+    """True for LYWSD03MMC sensors running PVVX/ATC custom firmware.
+    They advertise with name ATC_XXXXXX and service UUID 0x181A.
+    """
+    name = device.name or adv.local_name or ""
+    return name.startswith("ATC_")
 
 
 def is_govee_h5074(device: BLEDevice, adv: AdvertisementData) -> bool:
@@ -88,6 +102,22 @@ async def scan(
                 callback(reading)
             elif verbose:
                 print(f"  [decode failed — could not parse advertisement]")
+
+        elif is_pvvx_lywsd03mmc(device, adv):
+            if verbose:
+                print(f"[raw] {name} ({device.address})")
+                print(f"  service_data={adv.service_data!r}")
+                print(f"  rssi={adv.rssi}")
+            reading = decode_pvvx_advertisement(
+                address=device.address,
+                name=name,
+                service_data=adv.service_data,
+                rssi=adv.rssi,
+            )
+            if reading is not None:
+                callback(reading)
+            elif verbose:
+                print(f"  [decode failed — could not parse PVVX advertisement]")
 
         elif is_xiaomi_lywsd03mmc(device, adv):
             if verbose:

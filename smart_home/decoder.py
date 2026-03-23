@@ -95,6 +95,36 @@ def decode_xiaomi_mibeacon(address: str, name: str, service_data: dict, rssi: in
     return result if result else None
 
 
+# PVVX custom advertisement (non-encrypted), service UUID 0x181A
+PVVX_SERVICE_UUID = "0000181a-0000-1000-8000-00805f9b34fb"
+
+
+def decode_pvvx_advertisement(
+    address: str, name: str, service_data: dict, rssi: int | None
+) -> Reading | None:
+    """Decode a PVVX/ATC_MiThermometer custom BLE advertisement.
+
+    Payload layout (15 bytes after the service UUID):
+      [MAC 6B][temp int16 LE /100 °C][humi uint16 LE /100 %]
+      [batt_mv uint16 LE][batt% uint8][counter uint8][flags uint8]
+    """
+    data = service_data.get(PVVX_SERVICE_UUID)
+    if data is None or len(data) < 15:
+        return None
+    temp_c   = int.from_bytes(data[6:8], "little", signed=True) / 100.0
+    humidity = int.from_bytes(data[8:10], "little") / 100.0
+    battery  = data[12]  # percent
+    return Reading(
+        address=address,
+        name=name,
+        temp_c=temp_c,
+        humidity=humidity,
+        battery=battery,
+        rssi=rssi,
+        raw_reading=data.hex(),
+    )
+
+
 def decode_advertisement(address: str, name: str, manufacturer_data: dict, rssi: int | None) -> Reading | None:
     """Decode a Govee H5074 BLE advertisement into a Reading.
     Returns None if the data cannot be decoded.

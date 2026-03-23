@@ -910,5 +910,180 @@ def scan_all(timeout):
             print_device(addr, device, adv)
 
 
+@main.command("flash")
+@click.argument("address", required=False)
+@click.option(
+    "--firmware", "-f", "firmware_path", default=None,
+    help="Path to a .bin file to flash (default: download latest PVVX from GitHub).",
+)
+@click.option(
+    "--timeout", "-t", type=float, default=40.0,
+    help="Seconds to wait for sensor after power-cycle (default: 40).",
+)
+def flash_device(address, firmware_path, timeout):
+    """Flash PVVX custom firmware onto a LYWSD03MMC temperature sensor.
+
+    After flashing, the sensor broadcasts temperature/humidity passively
+    (no GATT connection needed) and its BLE name changes to ATC_XXXXXX.
+    Existing labels are preserved — the MAC address does not change.
+
+    If ADDRESS is not given, scans for nearby LYWSD03MMC sensors first.
+    """
+    from smart_home import flasher as _flasher
+
+    label_map = _labels.load()
+
+    # ── 1. Identify the target sensor ────────────────────────────────────────
+    if not address:
+        click.echo("Scanning for LYWSD03MMC sensors (10s)...")
+        found: dict[str, str] = {}
+
+        def _cb(device, adv):
+            name = device.name or adv.local_name or ""
+            if name.startswith("LYWSD03MMC") and device.address not in found:
+                found[device.address] = name
+
+        async def _quick_scan():
+            async with BleakScanner(detection_callback=_cb):
+                await asyncio.sleep(10.0)
+
+        try:
+            asyncio.run(_quick_scan())
+        except KeyboardInterrupt:
+            pass
+
+        if not found:
+            click.echo(
+                "No LYWSD03MMC sensors found.\n"
+                "  • Make sure the sensor is powered on.\n"
+                "  • If it was already flashed with PVVX it will show as ATC_XXXXXX.\n"
+                "  • You can pass the MAC address directly: smart-home flash AA:BB:CC:DD:EE:FF"
+            )
+            return
+
+        items = list(found.items())
+        click.echo(f"\nFound {len(items)} sensor(s):\n")
+        for i, (addr, name) in enumerate(items, 1):
+            lbl = label_map.get(addr, "")
+            click.echo(f"  {i}.  {addr}  {name}" + (f"  [{lbl}]" if lbl else ""))
+
+        if len(items) == 1:
+            address = items[0][0]
+            click.echo(f"\nAuto-selected the only sensor.")
+        else:
+            idx = click.prompt("\nEnter number to flash", type=int)
+            if not 1 <= idx <= len(items):
+                click.echo("Invalid choice.")
+                return
+            address = items[idx - 1][0]
+
+    address = address.upper()
+    sensor_label = label_map.get(address, address)
+    click.echo(f"\nSensor to flash: {sensor_label} ({address})")
+
+    # ── 2. Load / download firmware ───────────────────────────────────────────
+    if firmware_path:
+        firmware_data = Path(firmware_path).read_bytes()
+        click.echo(f"Firmware: {firmware_path} ({len(firmware_data):,} bytes)")
+    else:
+        click.echo("Downloading PVVX firmware...")
+        try:
+            firmware_data = _flasher.download_firmware()
+        except Exception as e:
+            click.echo(f"Download failed: {e}\nUse --firmware /path/to/ATC_v57.bin instead.")
+            return
+        click.echo(f"Firmware ready ({len(firmware_data):,} bytes)")
+
+    try:
+        total_blocks = _flasher.validate_firmware(firmware_data)
+    except ValueError as e:
+        click.echo(f"Invalid firmware: {e}")
+        return
+
+    # ── 3. Power-cycle instruction ────────────────────────────────────────────
+    click.echo()
+    click.echo("The sensor must be in connectable mode to accept the firmware.")
+    click.echo("Steps:")
+    click.echo("  1. Remove the battery from the sensor")
+    click.echo("  2. Press Enter below")
+    click.echo("  3. Immediately reinsert the battery")
+    click.echo()
+    click.prompt(
+        "Press Enter, then quickly reinsert the battery",
+        default="", prompt_suffix=" > ", show_default=False,
+    )
+
+    # ── 4. Scan for device, then flash immediately when seen ─────────────────
+    click.echo(f"Waiting for {sensor_label} (up to {int(timeout)}s)...")
+    target: list = [None]
+    flash_error: list[str | None] = [None]
+
+    async def _wait_and_flash():
+        found_ev = asyncio.Event()
+
+        def _det(device, adv):
+            if device.address.upper() == address:
+                target[0] = device
+                found_ev.set()
+
+        scanner = BleakScanner(detection_callback=_det)
+        async with scanner:
+            try:
+                await asyncio.wait_for(found_ev.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                flash_error[0] = (
+                    f"Sensor not found within {int(timeout)}s. "
+                    "Try power-cycling again immediately before inserting the battery."
+                )
+                return
+
+        click.echo(f"Found {sensor_label}! Connecting and flashing ({total_blocks} blocks)...")
+        click.echo()
+
+        last_pct: list[int] = [-1]
+
+        def _progress(done: int, total: int) -> None:
+            pct = done * 100 // total
+            if pct != last_pct[0]:
+                last_pct[0] = pct
+                filled = pct // 5
+                bar = "#" * filled + "." * (20 - filled)
+                click.echo(f"\r  [{bar}] {pct:3d}%  ({done}/{total} blocks)", nl=False)
+
+        try:
+            await _flasher.flash_firmware(target[0], firmware_data, progress=_progress)
+        except Exception as e:
+            flash_error[0] = str(e)
+            return
+
+        click.echo()  # newline after progress bar
+
+    try:
+        asyncio.run(_wait_and_flash())
+    except KeyboardInterrupt:
+        click.echo("\nAborted.")
+        return
+
+    if flash_error[0]:
+        click.echo(f"\nFlash failed: {flash_error[0]}")
+        return
+
+    # ── 5. Post-flash ─────────────────────────────────────────────────────────
+    atc_name = "ATC_" + address.replace(":", "")[-6:]
+    click.echo(f"\nFlash complete! The sensor is rebooting.")
+    click.echo(f"New BLE name: {atc_name}")
+    click.echo()
+
+    if address not in label_map:
+        if click.confirm("Save a label for this sensor?", default=True):
+            lbl = click.prompt("Label", default=atc_name).strip()
+            if lbl:
+                label_map[address] = lbl
+                _labels.save(label_map)
+                click.echo("Label saved.")
+    else:
+        click.echo(f"Existing label kept: {label_map[address]}")
+
+
 if __name__ == "__main__":
     main()
