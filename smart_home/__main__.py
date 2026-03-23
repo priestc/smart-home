@@ -914,6 +914,19 @@ def scan_all(timeout):
             print_device(addr, device, adv)
 
 
+@main.command("mark-pvvx")
+@click.argument("address")
+def mark_pvvx(address):
+    """Mark a sensor as already running PVVX firmware.
+
+    Use this if a sensor was flashed before this tracking was added.
+    ADDRESS is the MAC address (e.g. A4:C1:38:7C:6F:9D).
+    """
+    _pvvx.mark_address(address)
+    click.echo(f"Marked {address.upper()} as PVVX.")
+    click.echo(f"Known PVVX devices: {sorted(_pvvx.load_addresses())}")
+
+
 @main.command("flash")
 @click.argument("address", required=False)
 @click.option(
