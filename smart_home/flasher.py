@@ -103,7 +103,8 @@ def _make_end_packet(total_blocks: int) -> bytes:
 _DISCONNECT_ERRORS   = ("disconnect", "closed", "not connected", "broken pipe", "service discovery")
 _MAX_RETRIES         = 5    # reconnect attempts before giving up
 _RECONNECT_DELAY     = 3.0  # seconds to wait before reconnecting
-_POST_CONNECT_DELAY  = 1.0  # seconds to wait after reconnect for service discovery to settle
+_POST_CONNECT_POLL   = 0.2  # interval for polling service-ready after reconnect
+_POST_CONNECT_LIMIT  = 10.0 # max seconds to wait for services to be ready
 _INTER_BLOCK_DELAY   = 0.020
 
 
@@ -184,7 +185,19 @@ async def flash_firmware(
                     except Exception:
                         pass
                     client, oad_char = await _connect_and_find_oad(address)
-                    await asyncio.sleep(_POST_CONNECT_DELAY)  # let service discovery settle
+                    # Poll until BlueZ has fully registered the services for GATT writes.
+                    # client.connect() can return before the D-Bus service objects are
+                    # ready, causing "Service Discovery has not been performed yet" on the
+                    # first write. We poll client.services rather than using a fixed delay.
+                    _waited = 0.0
+                    while _waited < _POST_CONNECT_LIMIT:
+                        if client.is_connected and any(
+                            svc.uuid.lower() == OAD_SERVICE.lower()
+                            for svc in client.services
+                        ):
+                            break
+                        await asyncio.sleep(_POST_CONNECT_POLL)
+                        _waited += _POST_CONNECT_POLL
                     # Telink OAD resets on disconnect \u2014 restart from block 0.
                     block_num = 0
                     continue
