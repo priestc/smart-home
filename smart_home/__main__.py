@@ -749,8 +749,8 @@ def monitor(duration, verbose, db, no_db):
             ts = datetime.datetime.now().replace(second=0, microsecond=0).isoformat(timespec="seconds")
             for addr, reading in list(latest_reading.items()):
                 conn.execute(
-                    "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity, rssi, raw_reading) VALUES (?,?,?,?,?,?,?)",
-                    (ts, reading.address, reading.label, reading.temp_f, reading.humidity, reading.rssi, reading.raw_reading),
+                    "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity, rssi, battery, raw_reading) VALUES (?,?,?,?,?,?,?,?)",
+                    (ts, reading.address, reading.label, reading.temp_f, reading.humidity, reading.rssi, reading.battery, reading.raw_reading),
                 )
             conn.commit()
             n = len(latest_reading)
