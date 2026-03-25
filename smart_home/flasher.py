@@ -200,13 +200,15 @@ async def flash_firmware(
                 progress(block_num, total_blocks)
 
         # Send end-of-image packet to trigger the device to apply firmware.
+        # Sent multiple times: the device reboots as soon as it accepts one,
+        # so later sends will hit a disconnected device — that's expected and ignored.
         end_packet = _make_end_packet(total_blocks)
-        try:
-            await client.write_gatt_char(OAD_CHAR, end_packet, response=False)
-        except Exception:
-            # Device may disconnect immediately upon receiving the end packet
-            # as it reboots into the new firmware \u2014 that's expected.
-            pass
+        for _ in range(3):
+            try:
+                await client.write_gatt_char(OAD_CHAR, end_packet, response=False)
+            except Exception:
+                break  # device already disconnected/rebooting, stop sending
+            await asyncio.sleep(0.1)
 
     finally:
         try:

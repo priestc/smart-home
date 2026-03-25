@@ -1058,6 +1058,7 @@ def flash_device(address, firmware_path, timeout):
         click.echo()
 
         last_pct: list[int] = [-1]
+        bar_started: list[bool] = [False]
 
         def _progress(done: int, total: int, reconnecting: bool = False) -> None:
             if reconnecting:
@@ -1070,14 +1071,18 @@ def flash_device(address, firmware_path, timeout):
                 filled = pct // 5
                 bar = "#" * filled + "." * (20 - filled)
                 click.echo(f"\r  [{bar}] {pct:3d}%  ({done}/{total} blocks)", nl=False)
+                bar_started[0] = True
+
+        # Print an initial empty bar so something is always visible while flashing.
+        _progress(0, total_blocks)
 
         try:
             await _flasher.flash_firmware(target[0], firmware_data, progress=_progress)
         except Exception as e:
             flash_error[0] = str(e)
-            return
-
-        click.echo()  # newline after progress bar
+        finally:
+            if bar_started[0]:
+                click.echo()  # newline after progress bar
 
     try:
         asyncio.run(_wait_and_flash())
