@@ -539,12 +539,8 @@ def monitor(duration, verbose, db, no_db):
     label_map = _labels.load()
     pvvx_addresses = _pvvx.load_addresses()
     seen: set[str] = set()
-    last_temp: dict[str, float] = {}      # address -> last recorded temp_f
-    last_hum:  dict[str, float] = {}      # address -> last recorded humidity
-    last_write: dict[str, datetime.datetime] = {}  # address -> last write time
     last_seen: dict[str, datetime.datetime] = {}   # address -> last advertisement received
     last_no_reading: dict[str, datetime.datetime] = {}  # address -> last no_reading insert
-    HEARTBEAT = datetime.timedelta(minutes=30)
     MISSING_THRESHOLD = datetime.timedelta(minutes=10)
 
     # Xiaomi devices — polled actively via GATT on each advertisement (with cooldown).
@@ -730,6 +726,9 @@ def monitor(duration, verbose, db, no_db):
         finally:
             _poll_active.discard(addr)
 
+    # latest reading per address, updated on every advertisement
+    latest_reading: dict[str, object] = {}
+
     def on_reading(reading):
         db_label = label_map.get(reading.address)
         reading.label = db_label or reading.name or reading.address  # always show something in terminal
@@ -737,16 +736,25 @@ def monitor(duration, verbose, db, no_db):
         click.echo(f"[{ts}] {reading}")
         seen.add(reading.address)
         last_seen[reading.address] = datetime.datetime.now()
-        if conn and db_label:
-            now = datetime.datetime.now()
-            temp_changed = reading.temp_f != last_temp.get(reading.address)
-            hum_changed  = reading.humidity != last_hum.get(reading.address)
-            overdue = (now - last_write.get(reading.address, datetime.datetime.min)) >= HEARTBEAT
-            if temp_changed or hum_changed or overdue:
-                insert_reading(conn, reading)
-                last_temp[reading.address] = reading.temp_f
-                last_hum[reading.address]  = reading.humidity
-                last_write[reading.address] = now
+        if db_label:
+            latest_reading[reading.address] = reading
+
+    async def snapshot_loop():
+        """Once per minute, write the latest reading for every sensor to the DB
+        using a single shared timestamp so all readings align in the database."""
+        while True:
+            await asyncio.sleep(60)
+            if not conn or not latest_reading:
+                continue
+            ts = datetime.datetime.now().replace(second=0, microsecond=0).isoformat(timespec="seconds")
+            for addr, reading in list(latest_reading.items()):
+                conn.execute(
+                    "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity, rssi, raw_reading) VALUES (?,?,?,?,?,?,?)",
+                    (ts, reading.address, reading.label, reading.temp_f, reading.humidity, reading.rssi, reading.raw_reading),
+                )
+            conn.commit()
+            n = len(latest_reading)
+            click.echo(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Snapshot written: {n} sensor(s) at {ts}")
 
         # Check for all-time temperature records (only for explicitly labeled sensors)
         label = db_label
@@ -775,7 +783,7 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
-        extra = [check_missing_sensors()]
+        extra = [check_missing_sensors(), snapshot_loop()]
         if presence_devices:
             extra.append(check_presence())
         asyncio.run(scan(
