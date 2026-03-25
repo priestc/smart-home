@@ -169,7 +169,7 @@ async def flash_firmware(
             packet     = _make_block_packet(block_num, block_data)
 
             try:
-                await client.write_gatt_char(OAD_CHAR, packet, response=False)
+                await client.write_gatt_char(OAD_CHAR, packet, response=True)
 
             except Exception as e:
                 err = str(e).lower()
