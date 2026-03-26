@@ -879,16 +879,8 @@ function isIndoorLabel(l) {
   return lo.startsWith('indoor-') || lo.startsWith('inside-');
 }
 
-// Apply a simple N-point moving average to an array of {x, y} points
-function smoothPoints(pts, n) {
-  return pts.map((p, i) => {
-    const slice = pts.slice(Math.max(0, i - n + 1), i + 1);
-    const avg = slice.reduce((s, v) => s + v.y, 0) / slice.length;
-    return { x: p.x, y: avg };
-  });
-}
-
-// Build datasets from raw API data according to active sensor modes
+// Build datasets from raw API data according to active sensor modes.
+// All lines use tension:0 (straight point-to-point) with no smoothing applied.
 function buildSensorDatasets(data, isMonth) {
   const allLabels = [...new Set(data.map(r => r.label).filter(Boolean))];
   const indoorLabels = allLabels.filter(isIndoorLabel);
@@ -929,8 +921,7 @@ function buildSensorDatasets(data, isMonth) {
     }
   }
 
-  // Indoor average — average sensors per timestamp, then apply 5-point moving average
-  // to smooth out sensor noise that causes stair-stepping at high resolution
+  // Indoor average — raw mean per timestamp, no smoothing, tension:0
   if (activeModes.has('indoor-avg') && indoorLabels.length > 0) {
     if (isMonth) {
       const years = [...new Set(data.map(r => r.year).filter(Boolean))].sort();
@@ -938,12 +929,12 @@ function buildSensorDatasets(data, isMonth) {
         const yearRows = data.filter(r => r.year === year && indoorLabels.includes(r.label));
         const tsMap = {};
         for (const row of yearRows) (tsMap[row.ts] ??= []).push(row.temp_f);
-        const raw = Object.entries(tsMap)
+        const pts = Object.entries(tsMap)
           .map(([ts, vals]) => ({ x: new Date(ts), y: vals.reduce((a,b)=>a+b,0)/vals.length }))
           .sort((a,b) => a.x - b.x);
-        datasets.push({ label: `Indoor average ${year}`, data: smoothPoints(raw, 5),
+        datasets.push({ label: `Indoor average ${year}`, data: pts,
           borderColor: '#2a9d6e', backgroundColor: 'transparent',
-          borderWidth: 2, pointRadius: 0, tension: 0.3 });
+          borderWidth: 2, pointRadius: 0, tension: 0 });
       });
     } else {
       const tsMap = {};
@@ -951,16 +942,16 @@ function buildSensorDatasets(data, isMonth) {
         if (!indoorLabels.includes(row.label) || row.temp_f == null) continue;
         (tsMap[row.ts] ??= []).push(row.temp_f);
       }
-      const raw = Object.entries(tsMap)
+      const pts = Object.entries(tsMap)
         .map(([ts, vals]) => ({ x: new Date(ts), y: vals.reduce((a,b)=>a+b,0)/vals.length }))
         .sort((a,b) => a.x - b.x);
-      datasets.push({ label: 'Indoor average', data: smoothPoints(raw, 5),
+      datasets.push({ label: 'Indoor average', data: pts,
         borderColor: '#2a9d6e', backgroundColor: 'transparent',
-        borderWidth: 2, pointRadius: 0, tension: 0.3 });
+        borderWidth: 2, pointRadius: 0, tension: 0 });
     }
   }
 
-  // By room — one line per indoor/inside sensor
+  // By room — one line per indoor/inside sensor, tension:0
   if (activeModes.has('by-room') && indoorLabels.length > 0) {
     const roomColors = ['#9b4dca','#c0392b','#16a085','#d35400','#8e44ad','#27ae60','#2980b9','#e74c3c','#f39c12'];
     indoorLabels.sort().forEach((lbl, idx) => {
