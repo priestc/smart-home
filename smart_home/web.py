@@ -806,9 +806,10 @@ _TEMP_PAGE = """\
   </div>
   <div class="btn-group">
     <div class="range-btns" id="sensor-btns">
-      <button onclick="toggleSensor('Inside', this)" class="active">Inside</button>
-      <button onclick="toggleSensor('Outside', this)" class="active">Outside</button>
-      <button onclick="toggleDifferential(this)" id="btn-diff">Differential</button>
+      <button onclick="setSensorMode('outside-sun', this)" id="btn-outside-sun" class="active">Outside (sun)</button>
+      <button onclick="setSensorMode('outside-shade', this)" id="btn-outside-shade" class="active">Outside (shade)</button>
+      <button onclick="setSensorMode('indoor-avg', this)" id="btn-indoor-avg" class="active">Indoor average</button>
+      <button onclick="setSensorMode('by-room', this)" id="btn-by-room">By room</button>
     </div>
   </div>
   <div class="btn-group">
@@ -859,75 +860,122 @@ function getBucket() {
   if (mode === "recent") return BUCKETS.recent[resolution][rangeDays] || 60;
   return BUCKETS[mode][resolution];
 }
-const hiddenLabels = new Set();
-let showDifferential = false;
-function toggleSensor(name, btn) {
-  if (hiddenLabels.has(name)) { hiddenLabels.delete(name); btn.classList.add("active"); }
-  else { hiddenLabels.add(name); btn.classList.remove("active"); }
-  chart.data.datasets.forEach(ds => {
-    if (ds.label.toLowerCase().includes(name.toLowerCase())) ds.hidden = hiddenLabels.has(name);
-  });
-  chart.update();
-}
-function toggleDifferential(btn) {
-  showDifferential = !showDifferential;
-  btn.classList.toggle("active", showDifferential);
-  if (showDifferential) {
-    ["Inside","Outside"].forEach(name => {
-      hiddenLabels.add(name);
-      document.querySelectorAll("#sensor-btns button").forEach(b => {
-        if (b.textContent === name) b.classList.remove("active");
-      });
-    });
+// Sensor view mode: which of the 4 buttons are active (multi-select)
+const activeModes = new Set(['outside-sun', 'outside-shade', 'indoor-avg']);
+function setSensorMode(mode, btn) {
+  if (activeModes.has(mode)) {
+    activeModes.delete(mode);
+    btn.classList.remove('active');
   } else {
-    ["Inside","Outside"].forEach(name => {
-      hiddenLabels.delete(name);
-      document.querySelectorAll("#sensor-btns button").forEach(b => {
-        if (b.textContent === name) b.classList.add("active");
-      });
-    });
+    activeModes.add(mode);
+    btn.classList.add('active');
   }
   loadChart();
 }
-function applyHidden() {
-  chart.data.datasets.forEach(ds => {
-    ds.hidden = [...hiddenLabels].some(n => ds.label.toLowerCase().includes(n.toLowerCase()));
-  });
-}
-function addDiffDatasets(data, isMonth) {
-  if (!showDifferential) return;
-  if (isMonth) {
-    const yearMap = {};
-    for (const row of data) {
-      yearMap[row.year] ??= {};
-      yearMap[row.year][row.ts] ??= {};
-      if (row.label.toLowerCase().includes("inside"))  yearMap[row.year][row.ts].inside  = row.temp_f;
-      if (row.label.toLowerCase().includes("outside")) yearMap[row.year][row.ts].outside = row.temp_f;
+
+// Build datasets from raw API data according to active sensor modes
+function buildSensorDatasets(data, isMonth) {
+  // Collect all labels from the data
+  const allLabels = [...new Set(data.map(r => r.label).filter(Boolean))];
+  const indoorLabels = allLabels.filter(l => l.toLowerCase().startsWith('indoor-'));
+  const datasets = [];
+
+  function makePoints(rows, labelKey, tsKey) {
+    const byKey = {};
+    for (const row of rows) {
+      const k = isMonth ? `${row[labelKey]} ${row.year}` : row[labelKey];
+      (byKey[k] ??= []).push({ x: new Date(row[tsKey]), y: row.temp_f });
     }
-    Object.entries(yearMap).sort().forEach(([year, tsMap], i) => {
-      const pts = Object.entries(tsMap)
-        .filter(([,v]) => v.inside != null && v.outside != null)
-        .map(([ts,v]) => ({ x: new Date(ts), y: +(v.inside - v.outside).toFixed(1) }))
-        .sort((a,b) => a.x - b.x);
-      chart.data.datasets.push({ label: `Differential ${year}`, data: pts,
-        borderColor: COLORS[i % COLORS.length], backgroundColor: "transparent",
-        borderWidth: 1.5, pointRadius: 0, tension: 0 });
-    });
-  } else {
-    const tsMap = {};
-    for (const row of data) {
-      tsMap[row.ts] ??= {};
-      if (row.label.toLowerCase().includes("inside"))  tsMap[row.ts].inside  = row.temp_f;
-      if (row.label.toLowerCase().includes("outside")) tsMap[row.ts].outside = row.temp_f;
-    }
-    const pts = Object.entries(tsMap)
-      .filter(([,v]) => v.inside != null && v.outside != null)
-      .map(([ts,v]) => ({ x: new Date(ts), y: +(v.inside - v.outside).toFixed(1) }))
-      .sort((a,b) => a.x - b.x);
-    chart.data.datasets.push({ label: "Differential", data: pts,
-      borderColor: "#9b4dca", backgroundColor: "transparent",
-      borderWidth: 1.5, pointRadius: 0, tension: 0 });
+    return byKey;
   }
+
+  // Outside (sun) — label: 'outside-sun' or 'outside_sun' etc.
+  if (activeModes.has('outside-sun')) {
+    const lbl = allLabels.find(l => l.toLowerCase().replace(/[_\s]/g,'-') === 'outside-sun');
+    if (lbl) {
+      const rows = data.filter(r => r.label === lbl);
+      const pts = makePoints(rows, 'label', 'ts');
+      Object.entries(pts).forEach(([key, points], i) => {
+        datasets.push({ label: isMonth ? `Outside (sun) ${key.split(' ').pop()}` : 'Outside (sun)',
+          data: points, borderColor: '#e07820', backgroundColor: 'transparent',
+          borderWidth: 1.5, pointRadius: 0, tension: 0 });
+      });
+    }
+  }
+
+  // Outside (shade) — label: 'outside-shade' or 'outside_shade' etc.
+  if (activeModes.has('outside-shade')) {
+    const lbl = allLabels.find(l => l.toLowerCase().replace(/[_\s]/g,'-') === 'outside-shade');
+    if (lbl) {
+      const rows = data.filter(r => r.label === lbl);
+      const pts = makePoints(rows, 'label', 'ts');
+      Object.entries(pts).forEach(([key, points], i) => {
+        datasets.push({ label: isMonth ? `Outside (shade) ${key.split(' ').pop()}` : 'Outside (shade)',
+          data: points, borderColor: '#2e7dd4', backgroundColor: 'transparent',
+          borderWidth: 1.5, pointRadius: 0, tension: 0 });
+      });
+    }
+  }
+
+  // Indoor average — average all indoor-* sensors at each timestamp
+  if (activeModes.has('indoor-avg') && indoorLabels.length > 0) {
+    if (isMonth) {
+      // group by year
+      const years = [...new Set(data.map(r => r.year).filter(Boolean))];
+      years.sort().forEach((year, yi) => {
+        const yearRows = data.filter(r => r.year === year && indoorLabels.includes(r.label));
+        const tsMap = {};
+        for (const row of yearRows) {
+          (tsMap[row.ts] ??= []).push(row.temp_f);
+        }
+        const pts = Object.entries(tsMap)
+          .map(([ts, vals]) => ({ x: new Date(ts), y: +(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) }))
+          .sort((a,b) => a.x - b.x);
+        datasets.push({ label: `Indoor average ${year}`, data: pts,
+          borderColor: '#2a9d6e', backgroundColor: 'transparent',
+          borderWidth: 2, pointRadius: 0, tension: 0 });
+      });
+    } else {
+      const tsMap = {};
+      for (const row of data) {
+        if (!indoorLabels.includes(row.label) || row.temp_f == null) continue;
+        (tsMap[row.ts] ??= []).push(row.temp_f);
+      }
+      const pts = Object.entries(tsMap)
+        .map(([ts, vals]) => ({ x: new Date(ts), y: +(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) }))
+        .sort((a,b) => a.x - b.x);
+      datasets.push({ label: 'Indoor average', data: pts,
+        borderColor: '#2a9d6e', backgroundColor: 'transparent',
+        borderWidth: 2, pointRadius: 0, tension: 0 });
+    }
+  }
+
+  // By room — one line per indoor-* sensor
+  if (activeModes.has('by-room') && indoorLabels.length > 0) {
+    const roomColors = ['#9b4dca','#c0392b','#16a085','#d35400','#8e44ad','#27ae60','#2980b9','#e74c3c','#f39c12'];
+    indoorLabels.sort().forEach((lbl, idx) => {
+      const color = roomColors[idx % roomColors.length];
+      if (isMonth) {
+        const years = [...new Set(data.map(r => r.year).filter(Boolean))].sort();
+        years.forEach((year, yi) => {
+          const rows = data.filter(r => r.label === lbl && r.year === year);
+          const pts = rows.map(r => ({ x: new Date(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
+          datasets.push({ label: `${lbl} ${year}`, data: pts,
+            borderColor: color, backgroundColor: 'transparent',
+            borderWidth: 1.5, pointRadius: 0, tension: 0,
+            borderDash: yi > 0 ? [4,3] : [] });
+        });
+      } else {
+        const pts = data.filter(r => r.label === lbl && r.temp_f != null)
+          .map(r => ({ x: new Date(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
+        datasets.push({ label: lbl, data: pts,
+          borderColor: color, backgroundColor: 'transparent',
+          borderWidth: 1.5, pointRadius: 0, tension: 0 });
+      }
+    });
+  }
+
+  return datasets;
 }
 
 function localISO(d) {
@@ -980,53 +1028,25 @@ async function loadChart() {
     const data = await fetch(`/api/history?start=${start}&limit=8000&bucket_minutes=${getBucket()}`).then(r => r.json());
     const xMin = new Date(Date.now() - rangeDays * 86400000), xMax = new Date();
     const timeUnit = rangeDays >= 3 ? "day" : "hour";
-    const byLabel = {};
-    for (const row of data) (byLabel[row.label] ??= []).push({ x: new Date(row.ts), y: row.temp_f });
-    for (const pts of Object.values(byLabel)) pts.sort((a,b) => a.x - b.x);
-    chart.data.datasets = Object.keys(byLabel).sort().map(lbl => ({
-      label: lbl, data: byLabel[lbl], borderColor: labelColor(lbl),
-      backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, tension: 0,
-    }));
+    chart.data.datasets = buildSensorDatasets(data, false);
     chart.options.scales.x.min = xMin;
     chart.options.scales.x.max = xMax;
     chart.options.scales.x.time.unit = timeUnit;
-    addDiffDatasets(data, false);
   } else if (mode === "month") {
     const data = await fetch(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
-    const byKey = {};
-    for (const row of data) {
-      const key = `${row.label} ${row.year}`;
-      (byKey[key] ??= []).push({ x: new Date(row.ts), y: row.temp_f });
-    }
-    const keys = Object.keys(byKey).sort();
-    chart.data.datasets = keys.map((key, i) => ({
-      label: key, data: byKey[key], borderColor: COLORS[i % COLORS.length],
-      backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, tension: 0,
-    }));
+    chart.data.datasets = buildSensorDatasets(data, true);
     const xMin = new Date(2000, activeMonth - 1, 1);
     const xMax = new Date(2000, activeMonth, 0, 23, 59, 59);
     chart.options.scales.x.min = xMin;
     chart.options.scales.x.max = xMax;
     chart.options.scales.x.time.unit = "day";
-    addDiffDatasets(data, true);
   } else {
     const data = await fetch(`/api/history/year?bucket_minutes=${getBucket()}`).then(r => r.json());
-    const byKey = {};
-    for (const row of data) {
-      const key = `${row.label} ${row.year}`;
-      (byKey[key] ??= []).push({ x: new Date(row.ts), y: row.temp_f });
-    }
-    const keys = Object.keys(byKey).sort();
-    chart.data.datasets = keys.map((key, i) => ({
-      label: key, data: byKey[key], borderColor: COLORS[i % COLORS.length],
-      backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, tension: 0,
-    }));
+    chart.data.datasets = buildSensorDatasets(data, true);
     chart.options.scales.x.min = new Date(2000, 0, 1);
     chart.options.scales.x.max = new Date(2000, 11, 31, 23, 59, 59);
     chart.options.scales.x.time.unit = "month";
-    addDiffDatasets(data, true);
   }
-  applyHidden();
   chart.update();
 }
 loadColors().then(loadChart);
