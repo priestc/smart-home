@@ -809,8 +809,11 @@ _TEMP_PAGE = """\
       <button onclick="setSensorMode('outside-sun', this)" id="btn-outside-sun" class="active">Outside (sun)</button>
       <button onclick="setSensorMode('outside-shade', this)" id="btn-outside-shade" class="active">Outside (shade)</button>
       <button onclick="setSensorMode('indoor-avg', this)" id="btn-indoor-avg" class="active">Indoor average</button>
-      <button onclick="setSensorMode('by-room', this)" id="btn-by-room">By room</button>
     </div>
+  </div>
+  <div class="btn-group" id="room-btn-group" style="display:none">
+    <div class="btn-group-label">Rooms</div>
+    <div class="range-btns" id="room-btns"></div>
   </div>
   <div class="btn-group">
     <div class="btn-group-label">Most Recent</div>
@@ -951,30 +954,28 @@ function buildSensorDatasets(data, isMonth) {
     }
   }
 
-  // By room — one line per indoor/inside sensor, tension:0
-  if (activeModes.has('by-room') && indoorLabels.length > 0) {
-    const roomColors = ['#9b4dca','#c0392b','#16a085','#d35400','#8e44ad','#27ae60','#2980b9','#e74c3c','#f39c12'];
-    indoorLabels.sort().forEach((lbl, idx) => {
-      const color = roomColors[idx % roomColors.length];
-      if (isMonth) {
-        const years = [...new Set(data.map(r => r.year).filter(Boolean))].sort();
-        years.forEach((year, yi) => {
-          const pts = data.filter(r => r.label === lbl && r.year === year)
-            .map(r => ({ x: new Date(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
-          datasets.push({ label: `${lbl} ${year}`, data: pts,
-            borderColor: color, backgroundColor: 'transparent',
-            borderWidth: 1.5, pointRadius: 0, tension: 0,
-            borderDash: yi > 0 ? [4,3] : [] });
-        });
-      } else {
-        const pts = data.filter(r => r.label === lbl && r.temp_f != null)
-          .map(r => ({ x: new Date(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
-        datasets.push({ label: lbl, data: pts,
+  // Individual rooms — one line per toggled indoor-* sensor
+  indoorLabels.sort().forEach(lbl => {
+    if (!activeModes.has(lbl)) return;
+    const color = labelColor(lbl);
+    if (isMonth) {
+      const years = [...new Set(data.map(r => r.year).filter(Boolean))].sort();
+      years.forEach((year, yi) => {
+        const rows = data.filter(r => r.label === lbl && r.year === year);
+        const pts = rows.map(r => ({ x: new Date(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
+        datasets.push({ label: `${lbl} ${year}`, data: pts,
           borderColor: color, backgroundColor: 'transparent',
-          borderWidth: 1.5, pointRadius: 0, tension: 0 });
-      }
-    });
-  }
+          borderWidth: 1.5, pointRadius: 0, tension: 0,
+          borderDash: yi > 0 ? [4,3] : [] });
+      });
+    } else {
+      const pts = data.filter(r => r.label === lbl && r.temp_f != null)
+        .map(r => ({ x: new Date(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
+      datasets.push({ label: lbl, data: pts,
+        borderColor: color, backgroundColor: 'transparent',
+        borderWidth: 1.5, pointRadius: 0, tension: 0 });
+    }
+  });
 
   return datasets;
 }
@@ -987,6 +988,24 @@ async function loadColors() {
   const data = await fetch("/api/current").then(r => r.json());
   data.map(s => s.label).filter(Boolean).sort()
     .forEach((lbl, i) => { colorMap[lbl] = COLORS[i % COLORS.length]; });
+  const indoorLabels = data.map(s => s.label).filter(l => l && l.toLowerCase().startsWith('indoor-')).sort();
+  const roomBtns = document.getElementById('room-btns');
+  const roomGroup = document.getElementById('room-btn-group');
+  if (indoorLabels.length > 0) {
+    roomGroup.style.display = '';
+    const existing = [...roomBtns.querySelectorAll('button')].map(b => b.dataset.room);
+    if (JSON.stringify(existing) !== JSON.stringify(indoorLabels)) {
+      roomBtns.innerHTML = '';
+      indoorLabels.forEach(lbl => {
+        const btn = document.createElement('button');
+        btn.dataset.room = lbl;
+        btn.textContent = lbl.replace(/^indoor-/i, '').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        btn.onclick = () => setSensorMode(lbl, btn);
+        if (activeModes.has(lbl)) btn.classList.add('active');
+        roomBtns.appendChild(btn);
+      });
+    }
+  }
 }
 function setRange(days) {
   mode = "recent"; rangeDays = days;
