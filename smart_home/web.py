@@ -1069,7 +1069,7 @@ const chart = new Chart(document.getElementById("chart"), {
     interaction: { mode: "index", intersect: false },
     plugins: { legend: { labels: { color: "#4a6080" } } },
     scales: {
-      x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" }, ticks: { color: "#7a90a8", maxTicksLimit: 8 }, grid: { color: "#e8eef4" } },
+      x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" }, ticks: { color: "#7a90a8", maxTicksLimit: 25 }, grid: { color: "#e8eef4" } },
       y: { ticks: { color: "#7a90a8", callback: v => (+v).toFixed(1) + "\\u00b0F" }, grid: { color: "#e8eef4" } }
     }
   }
@@ -1080,11 +1080,19 @@ async function loadChart() {
     const start = localISO(new Date(Date.now() - rangeDays * 86400000));
     const data = await fetch(`/api/history?start=${start}&limit=8000&bucket_minutes=${getBucket()}`).then(r => r.json());
     const xMin = new Date(Date.now() - rangeDays * 86400000), xMax = new Date();
-    const timeUnit = rangeDays >= 3 ? "day" : "hour";
     chart.data.datasets = buildSensorDatasets(data, false);
     chart.options.scales.x.min = xMin;
     chart.options.scales.x.max = xMax;
-    chart.options.scales.x.time.unit = timeUnit;
+    if (rangeDays === 0.125) {
+      chart.options.scales.x.time.unit = "minute";
+      chart.options.scales.x.ticks.stepSize = 30;
+    } else if (rangeDays === 1) {
+      chart.options.scales.x.time.unit = "hour";
+      chart.options.scales.x.ticks.stepSize = 1;
+    } else {
+      chart.options.scales.x.time.unit = "day";
+      chart.options.scales.x.ticks.stepSize = 1;
+    }
   } else if (mode === "month") {
     const data = await fetch(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
     chart.data.datasets = buildSensorDatasets(data, true);
