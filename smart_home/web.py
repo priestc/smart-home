@@ -879,12 +879,20 @@ function isIndoorLabel(l) {
   return lo.startsWith('indoor-') || lo.startsWith('inside-');
 }
 
+// Snap a Date to the nearest bucket boundary (bucketMs = bucket size in milliseconds)
+function snapToBucket(date, bucketMs) {
+  return Math.floor(date.getTime() / bucketMs) * bucketMs;
+}
+
 // Build datasets from raw API data according to active sensor modes
 function buildSensorDatasets(data, isMonth) {
   // Collect all labels from the data
   const allLabels = [...new Set(data.map(r => r.label).filter(Boolean))];
   const indoorLabels = allLabels.filter(isIndoorLabel);
   const datasets = [];
+  // bucket size in ms — used to snap indoor avg timestamps so sensors with slightly
+  // different polling times collapse into the same bucket and get averaged together
+  const bucketMs = getBucket() * 60 * 1000;
 
   function makePoints(rows, labelKey, tsKey) {
     const byKey = {};
@@ -923,32 +931,34 @@ function buildSensorDatasets(data, isMonth) {
     }
   }
 
-  // Indoor average — average all indoor/inside sensors at each timestamp
+  // Indoor average — average all indoor/inside sensors, snapping timestamps to bucket
+  // grid so sensors with slightly different poll times collapse into the same bucket.
   if (activeModes.has('indoor-avg') && indoorLabels.length > 0) {
     if (isMonth) {
-      // group by year
       const years = [...new Set(data.map(r => r.year).filter(Boolean))];
       years.sort().forEach((year, yi) => {
         const yearRows = data.filter(r => r.year === year && indoorLabels.includes(r.label));
-        const tsMap = {};
+        const bucketMap = {};
         for (const row of yearRows) {
-          (tsMap[row.ts] ??= []).push(row.temp_f);
+          const snapped = snapToBucket(new Date(row.ts), bucketMs);
+          (bucketMap[snapped] ??= []).push(row.temp_f);
         }
-        const pts = Object.entries(tsMap)
-          .map(([ts, vals]) => ({ x: new Date(ts), y: +(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) }))
+        const pts = Object.entries(bucketMap)
+          .map(([ms, vals]) => ({ x: new Date(+ms), y: +(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) }))
           .sort((a,b) => a.x - b.x);
         datasets.push({ label: `Indoor average ${year}`, data: pts,
           borderColor: '#2a9d6e', backgroundColor: 'transparent',
           borderWidth: 2, pointRadius: 0, tension: 0 });
       });
     } else {
-      const tsMap = {};
+      const bucketMap = {};
       for (const row of data) {
         if (!indoorLabels.includes(row.label) || row.temp_f == null) continue;
-        (tsMap[row.ts] ??= []).push(row.temp_f);
+        const snapped = snapToBucket(new Date(row.ts), bucketMs);
+        (bucketMap[snapped] ??= []).push(row.temp_f);
       }
-      const pts = Object.entries(tsMap)
-        .map(([ts, vals]) => ({ x: new Date(ts), y: +(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) }))
+      const pts = Object.entries(bucketMap)
+        .map(([ms, vals]) => ({ x: new Date(+ms), y: +(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) }))
         .sort((a,b) => a.x - b.x);
       datasets.push({ label: 'Indoor average', data: pts,
         borderColor: '#2a9d6e', backgroundColor: 'transparent',
