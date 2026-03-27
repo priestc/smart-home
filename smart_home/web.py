@@ -977,7 +977,7 @@ function buildSensorDatasets(data, isMonth) {
     }
   });
 
-  // Inside/outside difference — indoor average minus outside-shade at each timestamp
+  // Inside/outside difference — split into warmer (positive) and cooler (negative flipped)
   if (activeModes.has('diff')) {
     const shadeLbl = allLabels.find(l => l.toLowerCase().replace(/[_\s]/g,'-') === 'outside-shade');
     if (shadeLbl && indoorLabels.length > 0) {
@@ -989,14 +989,17 @@ function buildSensorDatasets(data, isMonth) {
           const indoorMap = {};
           data.filter(r => indoorLabels.includes(r.label) && r.year === year && r.temp_f != null)
             .forEach(r => { (indoorMap[r.ts] ??= []).push(r.temp_f); });
-          const pts = Object.entries(indoorMap)
+          const allPts = Object.entries(indoorMap)
             .filter(([ts]) => shadeMap[ts] != null)
             .map(([ts, vals]) => ({ x: new Date(ts), y: vals.reduce((a,b)=>a+b,0)/vals.length - shadeMap[ts] }))
             .sort((a,b) => a.x - b.x);
-          datasets.push({ label: `Difference ${year}`, data: pts,
-            borderColor: '#9b4dca', backgroundColor: 'transparent',
-            borderWidth: 1.5, pointRadius: 0, tension: 0,
-            borderDash: yi > 0 ? [4,3] : [] });
+          const dash = yi > 0 ? [4,3] : [];
+          datasets.push({ label: `Degrees warmer inside ${year}`, backgroundColor: 'transparent',
+            data: allPts.map(p => ({ x: p.x, y: p.y > 0 ? p.y : null })),
+            borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
+          datasets.push({ label: `Degrees cooler inside ${year}`, backgroundColor: 'transparent',
+            data: allPts.map(p => ({ x: p.x, y: p.y < 0 ? -p.y : null })),
+            borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
         });
       } else {
         const shadeMap = {};
@@ -1004,13 +1007,16 @@ function buildSensorDatasets(data, isMonth) {
         const indoorMap = {};
         data.filter(r => indoorLabels.includes(r.label) && r.temp_f != null)
           .forEach(r => { (indoorMap[r.ts] ??= []).push(r.temp_f); });
-        const pts = Object.entries(indoorMap)
+        const allPts = Object.entries(indoorMap)
           .filter(([ts]) => shadeMap[ts] != null)
           .map(([ts, vals]) => ({ x: new Date(ts), y: vals.reduce((a,b)=>a+b,0)/vals.length - shadeMap[ts] }))
           .sort((a,b) => a.x - b.x);
-        datasets.push({ label: 'Inside/outside difference', data: pts,
-          borderColor: '#9b4dca', backgroundColor: 'transparent',
-          borderWidth: 1.5, pointRadius: 0, tension: 0 });
+        datasets.push({ label: 'Degrees warmer inside', backgroundColor: 'transparent',
+          data: allPts.map(p => ({ x: p.x, y: p.y > 0 ? p.y : null })),
+          borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0 });
+        datasets.push({ label: 'Degrees cooler inside', backgroundColor: 'transparent',
+          data: allPts.map(p => ({ x: p.x, y: p.y < 0 ? -p.y : null })),
+          borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0 });
       }
     }
   }
