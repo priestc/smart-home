@@ -1176,7 +1176,8 @@ async function loadChart() {
       chart.options.scales.x.time.unit = "day";
       chart.options.scales.x.ticks.stepSize = 1;
     }
-    document.getElementById('btn-prev').disabled = data.length === 0;
+    const peek = await fetch(`/api/history?end=${localISO(xMin)}&limit=1&bucket_minutes=${getBucket()}`).then(r => r.json());
+    document.getElementById('btn-prev').disabled = peek.length === 0;
     document.getElementById('btn-next').disabled = offsetMs >= 0;
   } else if (mode === "month") {
     const data = await fetch(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
