@@ -788,6 +788,7 @@ _TEMP_PAGE = """\
     .range-btns button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s; }
     .range-btns button:hover { background: #f0f4f8; border-color: #aabbc8; }
     .range-btns button.active { background: #e07820; color: #fff; border-color: #e07820; }
+    .range-btns button:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
     .res-row { display: flex; align-items: center; gap: .6rem; margin-bottom: 1.2rem; }
     .res-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
     .res-row select { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; cursor: pointer; }
@@ -816,11 +817,13 @@ _TEMP_PAGE = """\
   <div class="btn-group">
     <div class="btn-group-label">Most Recent</div>
     <div class="range-btns" id="recent-btns">
-      <button onclick="setRange(0.125)">3h</button>
-      <button onclick="setRange(1)" class="active">24h</button>
-      <button onclick="setRange(3)">3d</button>
-      <button onclick="setRange(7)">7d</button>
-      <button onclick="setRange(30)">30d</button>
+      <button id="btn-prev" onclick="shiftView(-1)">&#8592;</button>
+      <button onclick="setRange(0.125)" data-days="0.125">3h</button>
+      <button onclick="setRange(1)" data-days="1" class="active">24h</button>
+      <button onclick="setRange(3)" data-days="3">3d</button>
+      <button onclick="setRange(7)" data-days="7">7d</button>
+      <button onclick="setRange(30)" data-days="30">30d</button>
+      <button id="btn-next" onclick="shiftView(1)" disabled>&#8594;</button>
     </div>
   </div>
   <div class="btn-group">
@@ -846,7 +849,7 @@ _TEMP_PAGE = """\
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
 const colorMap = {};
 function labelColor(lbl) { return colorMap[lbl] ?? COLORS[0]; }
-let mode = "recent", rangeDays = 1, activeMonth = null;
+let mode = "recent", rangeDays = 1, activeMonth = null, offsetMs = 0;
 const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 const isLocal = /^192\\.168\\./.test(location.hostname);
 let resolution = isLocal ? "max" : isMobile ? "low" : "medium";
@@ -1091,25 +1094,34 @@ async function loadColors() {
     });
   }
 }
+function shiftView(dir) {
+  offsetMs += dir * rangeDays * 86400000;
+  if (offsetMs > 0) offsetMs = 0;
+  loadChart();
+}
 function setRange(days) {
-  mode = "recent"; rangeDays = days;
-  document.querySelectorAll("#recent-btns button").forEach((b,i) =>
-    b.classList.toggle("active", [0.125,1,3,7,30][i] === days));
+  mode = "recent"; rangeDays = days; offsetMs = 0;
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b =>
+    b.classList.toggle("active", parseFloat(b.dataset.days) === days));
   document.querySelectorAll("#month-btns button").forEach(b => b.classList.remove("active"));
   loadChart();
 }
 function setAllMonths() {
   mode = "year";
-  document.querySelectorAll("#recent-btns button").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b => b.classList.remove("active"));
   document.querySelectorAll("#month-btns button").forEach((b,i) =>
     b.classList.toggle("active", i === 0));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
   loadChart();
 }
 function setMonth(m) {
   mode = "month"; activeMonth = m;
-  document.querySelectorAll("#recent-btns button").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b => b.classList.remove("active"));
   document.querySelectorAll("#month-btns button").forEach((b,i) =>
     b.classList.toggle("active", i === m));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
   loadChart();
 }
 
@@ -1147,9 +1159,10 @@ const chart = new Chart(document.getElementById("chart"), {
 
 async function loadChart() {
   if (mode === "recent") {
-    const start = localISO(new Date(Date.now() - rangeDays * 86400000));
-    const data = await fetch(`/api/history?start=${start}&limit=8000&bucket_minutes=${getBucket()}`).then(r => r.json());
-    const xMin = new Date(Date.now() - rangeDays * 86400000), xMax = new Date();
+    const xMax = new Date(Date.now() + offsetMs);
+    const xMin = new Date(xMax - rangeDays * 86400000);
+    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
+    const data = await fetch(`/api/history?${params}`).then(r => r.json());
     chart.data.datasets = buildSensorDatasets(data, false);
     chart.options.scales.x.min = xMin;
     chart.options.scales.x.max = xMax;
@@ -1163,6 +1176,8 @@ async function loadChart() {
       chart.options.scales.x.time.unit = "day";
       chart.options.scales.x.ticks.stepSize = 1;
     }
+    document.getElementById('btn-prev').disabled = data.length === 0;
+    document.getElementById('btn-next').disabled = offsetMs >= 0;
   } else if (mode === "month") {
     const data = await fetch(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
     chart.data.datasets = buildSensorDatasets(data, true);
