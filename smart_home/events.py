@@ -8,7 +8,7 @@ def _is_indoor(label: str) -> bool:
 
 
 def _ts_to_epoch(ts: str) -> float:
-    return datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").timestamp()
+    return datetime.datetime.strptime(ts.replace("T", " "), "%Y-%m-%d %H:%M:%S").timestamp()
 
 
 def _epoch_to_ts(t: float) -> str:
@@ -39,7 +39,7 @@ def _interpolate_crossing(
     return t_cross, val
 
 
-def _recent_readings(conn: sqlite3.Connection, label: str, n: int = 3) -> list[tuple[str, float]]:
+def _recent_readings(conn: sqlite3.Connection, label: str, n: int = 120) -> list[tuple[str, float]]:
     """Return last n (ts, temp_f) rows for label, oldest first."""
     rows = conn.execute(
         "SELECT ts, temp_f FROM readings WHERE label=? AND temp_f IS NOT NULL ORDER BY ts DESC LIMIT ?",
@@ -81,17 +81,18 @@ def _check_two_label_crossing(
     if len(common) < 2:
         return 0
 
-    ts1, a1, b1 = common[-2]
-    ts2, a2, b2 = common[-1]
-    result = _interpolate_crossing(_ts_to_epoch(ts1), a1, b1, _ts_to_epoch(ts2), a2, b2)
-    if result is None:
-        return 0
-
-    t_cross, val = result
-    details = f"{label_a}={a2:.1f}°F, {label_b}={b2:.1f}°F"
-    if _insert_event(conn, _epoch_to_ts(t_cross), event_type, val, details):
-        return 1
-    return 0
+    inserted = 0
+    for i in range(len(common) - 1):
+        ts1, a1, b1 = common[i]
+        ts2, a2, b2 = common[i + 1]
+        result = _interpolate_crossing(_ts_to_epoch(ts1), a1, b1, _ts_to_epoch(ts2), a2, b2)
+        if result is None:
+            continue
+        t_cross, val = result
+        details = f"{label_a}={a2:.1f}°F, {label_b}={b2:.1f}°F"
+        if _insert_event(conn, _epoch_to_ts(t_cross), event_type, val, details):
+            inserted += 1
+    return inserted
 
 
 def _check_indoor_outside_crossing(
@@ -117,17 +118,18 @@ def _check_indoor_outside_crossing(
     if len(common) < 2:
         return 0
 
-    ts1, a1, b1 = common[-2]
-    ts2, a2, b2 = common[-1]
-    result = _interpolate_crossing(_ts_to_epoch(ts1), a1, b1, _ts_to_epoch(ts2), a2, b2)
-    if result is None:
-        return 0
-
-    t_cross, val = result
-    details = f"indoor_avg={a2:.1f}°F, outside_shade={b2:.1f}°F ({len(indoor_labels)} sensors)"
-    if _insert_event(conn, _epoch_to_ts(t_cross), event_type, val, details):
-        return 1
-    return 0
+    inserted = 0
+    for i in range(len(common) - 1):
+        ts1, a1, b1 = common[i]
+        ts2, a2, b2 = common[i + 1]
+        result = _interpolate_crossing(_ts_to_epoch(ts1), a1, b1, _ts_to_epoch(ts2), a2, b2)
+        if result is None:
+            continue
+        t_cross, val = result
+        details = f"indoor_avg={a2:.1f}°F, outside_shade={b2:.1f}°F ({len(indoor_labels)} sensors)"
+        if _insert_event(conn, _epoch_to_ts(t_cross), event_type, val, details):
+            inserted += 1
+    return inserted
 
 
 def detect_and_insert_events(conn: sqlite3.Connection) -> int:
