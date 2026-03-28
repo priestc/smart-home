@@ -886,30 +886,48 @@ function isIndoorLabel(l) {
   return lo.startsWith('indoor-') || lo.startsWith('inside-');
 }
 
-// Insert parity crossing points (y=0) into a sorted allPts array and split into
-// warmer (positive) and cooler (negative) datasets.  Each crossing point lands at
-// y=0 in BOTH datasets so the two coloured lines meet the zero axis seamlessly.
+// Split allPts into warmer/cooler datasets using crossing events as boundaries.
+// Points are assigned to a side by chronological segment (not by individual sign),
+// so a bucket that briefly averages to the wrong sign near a crossing still
+// connects cleanly to the y=0 crossing point — no gap.
 function splitDiff(allPts, crossings) {
-  // Merge crossing points in and sort the full array by time
-  const pts = [...allPts];
-  for (const ev of crossings) {
-    const t = new Date(ev.ts.replace(' ', 'T'));
-    pts.push({ x: t, y: 0, _crossing: true });
+  const crossTimes = crossings
+    .map(ev => new Date(ev.ts.replace(' ', 'T')))
+    .sort((a, b) => a - b);
+
+  if (!crossTimes.length) {
+    // No crossing events — simple sign-based split
+    return {
+      warmer: allPts.map(p => ({ x: p.x, y: p.y > 0 ? p.y : null })),
+      cooler:  allPts.map(p => ({ x: p.x, y: p.y < 0 ? p.y : null })),
+    };
   }
+
+  // Insert crossing points (y=0) into the sequence and re-sort
+  const pts = [...allPts];
+  for (const t of crossTimes) pts.push({ x: t, y: 0, _crossing: true });
   pts.sort((a, b) => a.x - b.x);
+
+  // Determine which side comes first: look at the average of data before
+  // the first crossing to decide if the initial segment is warmer or cooler.
+  const beforeFirst = allPts.filter(p => p.x < crossTimes[0]);
+  const initialAvg = beforeFirst.length
+    ? beforeFirst.reduce((s, p) => s + p.y, 0) / beforeFirst.length
+    : 0;
+  const startsWarmer = initialAvg >= 0;
 
   const warmer = [], cooler = [];
   for (const p of pts) {
-    if (p._crossing || p.y === 0) {
+    if (p._crossing) {
       warmer.push({ x: p.x, y: 0 });
       cooler.push({ x: p.x, y: 0 });
-    } else if (p.y > 0) {
-      warmer.push({ x: p.x, y: p.y });
-      cooler.push({ x: p.x, y: null });
-    } else {
-      warmer.push({ x: p.x, y: null });
-      cooler.push({ x: p.x, y: p.y });
+      continue;
     }
+    // Number of crossings at or before this point determines which side we're on
+    const nCrossed = crossTimes.filter(t => t <= p.x).length;
+    const isWarmerSide = startsWarmer ? nCrossed % 2 === 0 : nCrossed % 2 !== 0;
+    warmer.push({ x: p.x, y: isWarmerSide ? p.y : null });
+    cooler.push({ x: p.x, y: isWarmerSide ? null : p.y });
   }
   return { warmer, cooler };
 }
