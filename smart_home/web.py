@@ -905,7 +905,10 @@ function splitDiff(allPts, crossings) {
 
   // Insert crossing points (y=0) into the sequence and re-sort
   const pts = [...allPts];
-  for (const t of crossTimes) pts.push({ x: t, y: 0, _crossing: true });
+  for (const ev of crossings) {
+    const t = new Date(ev.ts.replace(' ', 'T'));
+    pts.push({ x: t, y: 0, _crossing: true, _parityTemp: ev.value });
+  }
   pts.sort((a, b) => a.x - b.x);
 
   // Determine which side comes first: look at the average of data before
@@ -919,8 +922,8 @@ function splitDiff(allPts, crossings) {
   const warmer = [], cooler = [];
   for (const p of pts) {
     if (p._crossing) {
-      warmer.push({ x: p.x, y: 0 });
-      cooler.push({ x: p.x, y: 0 });
+      warmer.push({ x: p.x, y: 0, _parity: true, _parityTemp: p._parityTemp });
+      cooler.push({ x: p.x, y: 0, _parity: true, _parityTemp: p._parityTemp });
       continue;
     }
     // Number of crossings at or before this point determines which side we're on
@@ -1193,7 +1196,31 @@ const chart = new Chart(document.getElementById("chart"), {
   options: {
     animation: false, parsing: false,
     interaction: { mode: "nearestXPerDataset", intersect: false },
-    plugins: { legend: { labels: { color: "#4a6080" } } },
+    plugins: {
+      legend: { labels: { color: "#4a6080" } },
+      tooltip: {
+        callbacks: {
+          label: function(ctx) {
+            const raw = ctx.raw;
+            if (!raw) return null;
+            if (raw._parity) {
+              const temp = raw._parityTemp != null ? raw._parityTemp.toFixed(1) + "\\u00b0F" : "";
+              return "\\u2696\\ufe0f Parity" + (temp ? ": " + temp : "");
+            }
+            if (raw.y == null) return null;
+            return (ctx.dataset.label || "") + ": " + Math.abs(raw.y).toFixed(1) + "\\u00b0F";
+          },
+          labelColor: function(ctx) {
+            if (ctx.raw && ctx.raw._parity)
+              return { borderColor: "#8e44ad", backgroundColor: "#8e44ad" };
+            return { borderColor: ctx.dataset.borderColor, backgroundColor: ctx.dataset.borderColor };
+          },
+          labelTextColor: function(ctx) {
+            return (ctx.raw && ctx.raw._parity) ? "#8e44ad" : "#1a2535";
+          }
+        }
+      }
+    },
     scales: {
       x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" }, ticks: { color: "#7a90a8", maxTicksLimit: 25 }, grid: { color: "#e8eef4" } },
       y: { ticks: { color: "#7a90a8", callback: v => (+v).toFixed(1) + "\\u00b0F" }, grid: { color: "#e8eef4" } }
