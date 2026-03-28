@@ -886,9 +886,37 @@ function isIndoorLabel(l) {
   return lo.startsWith('indoor-') || lo.startsWith('inside-');
 }
 
+// Insert parity crossing points (y=0) into a sorted allPts array and split into
+// warmer (positive) and cooler (negative) datasets.  Each crossing point lands at
+// y=0 in BOTH datasets so the two coloured lines meet the zero axis seamlessly.
+function splitDiff(allPts, crossings) {
+  // Merge crossing points in and sort the full array by time
+  const pts = [...allPts];
+  for (const ev of crossings) {
+    const t = new Date(ev.ts.replace(' ', 'T'));
+    pts.push({ x: t, y: 0, _crossing: true });
+  }
+  pts.sort((a, b) => a.x - b.x);
+
+  const warmer = [], cooler = [];
+  for (const p of pts) {
+    if (p._crossing || p.y === 0) {
+      warmer.push({ x: p.x, y: 0 });
+      cooler.push({ x: p.x, y: 0 });
+    } else if (p.y > 0) {
+      warmer.push({ x: p.x, y: p.y });
+      cooler.push({ x: p.x, y: null });
+    } else {
+      warmer.push({ x: p.x, y: null });
+      cooler.push({ x: p.x, y: p.y });
+    }
+  }
+  return { warmer, cooler };
+}
+
 // Build datasets from raw API data according to active sensor modes.
 // All lines use tension:0 (straight point-to-point) with no smoothing applied.
-function buildSensorDatasets(data, isMonth) {
+function buildSensorDatasets(data, events, isMonth) {
   const allLabels = [...new Set(data.map(r => r.label).filter(Boolean))];
   const indoorLabels = allLabels.filter(isIndoorLabel);
   const datasets = [];
@@ -981,7 +1009,7 @@ function buildSensorDatasets(data, isMonth) {
     }
   });
 
-  // Inside/outside difference — split into warmer (positive) and cooler (negative flipped)
+  // Inside/outside difference — split into warmer (positive) and cooler (negative)
   if (activeModes.has('diff')) {
     const shadeLbl = allLabels.find(l => l.toLowerCase().replace(/[_\s]/g,'-') === 'outside-shade');
     if (shadeLbl && indoorLabels.length > 0) {
@@ -998,12 +1026,11 @@ function buildSensorDatasets(data, isMonth) {
             .map(([ts, vals]) => ({ x: new Date(ts), y: vals.reduce((a,b)=>a+b,0)/vals.length - shadeMap[ts] }))
             .sort((a,b) => a.x - b.x);
           const dash = yi > 0 ? [4,3] : [];
+          const { warmer, cooler } = splitDiff(allPts, []);
           datasets.push({ label: `Degrees warmer inside ${year}`, backgroundColor: 'transparent',
-            data: allPts.map(p => ({ x: p.x, y: p.y > 0 ? p.y : null })),
-            borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
+            data: warmer, borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
           datasets.push({ label: `Degrees cooler inside ${year}`, backgroundColor: 'transparent',
-            data: allPts.map(p => ({ x: p.x, y: p.y < 0 ? p.y : null })),
-            borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
+            data: cooler, borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
         });
       } else {
         const shadeMap = {};
@@ -1015,12 +1042,12 @@ function buildSensorDatasets(data, isMonth) {
           .filter(([ts]) => shadeMap[ts] != null)
           .map(([ts, vals]) => ({ x: new Date(ts), y: vals.reduce((a,b)=>a+b,0)/vals.length - shadeMap[ts] }))
           .sort((a,b) => a.x - b.x);
+        const ioCrossings = events.filter(e => e.event_type === 'inside_outside_parity');
+        const { warmer, cooler } = splitDiff(allPts, ioCrossings);
         datasets.push({ label: 'Degrees warmer inside', backgroundColor: 'transparent',
-          data: allPts.map(p => ({ x: p.x, y: p.y > 0 ? p.y : null })),
-          borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0 });
+          data: warmer, borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0 });
         datasets.push({ label: 'Degrees cooler inside', backgroundColor: 'transparent',
-          data: allPts.map(p => ({ x: p.x, y: p.y < 0 ? p.y : null })),
-          borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0 });
+          data: cooler, borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0 });
       }
     }
   }
@@ -1041,12 +1068,11 @@ function buildSensorDatasets(data, isMonth) {
             .map(ts => ({ x: new Date(ts), y: sunMap[ts] - shadeMap[ts] }))
             .sort((a,b) => a.x - b.x);
           const dash = yi > 0 ? [4,3] : [];
+          const { warmer, cooler } = splitDiff(allPts, []);
           datasets.push({ label: `Degrees warmer in sun ${year}`, backgroundColor: 'transparent',
-            data: allPts.map(p => ({ x: p.x, y: p.y > 0 ? p.y : null })),
-            borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
+            data: warmer, borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
           datasets.push({ label: `Degrees cooler in sun ${year}`, backgroundColor: 'transparent',
-            data: allPts.map(p => ({ x: p.x, y: p.y < 0 ? p.y : null })),
-            borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
+            data: cooler, borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
         });
       } else {
         const shadeMap = {}, sunMap = {};
@@ -1056,12 +1082,12 @@ function buildSensorDatasets(data, isMonth) {
           .filter(ts => shadeMap[ts] != null)
           .map(ts => ({ x: new Date(ts), y: sunMap[ts] - shadeMap[ts] }))
           .sort((a,b) => a.x - b.x);
+        const ssCrossings = events.filter(e => e.event_type === 'sun_shade_parity');
+        const { warmer, cooler } = splitDiff(allPts, ssCrossings);
         datasets.push({ label: 'Degrees warmer in sun', backgroundColor: 'transparent',
-          data: allPts.map(p => ({ x: p.x, y: p.y > 0 ? p.y : null })),
-          borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0 });
+          data: warmer, borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0 });
         datasets.push({ label: 'Degrees cooler in sun', backgroundColor: 'transparent',
-          data: allPts.map(p => ({ x: p.x, y: p.y < 0 ? p.y : null })),
-          borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0 });
+          data: cooler, borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0 });
       }
     }
   }
@@ -1162,8 +1188,11 @@ async function loadChart() {
     const xMax = new Date(Date.now() + offsetMs);
     const xMin = new Date(xMax - rangeDays * 86400000);
     const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
-    const data = await fetch(`/api/history?${params}`).then(r => r.json());
-    chart.data.datasets = buildSensorDatasets(data, false);
+    const [data, events] = await Promise.all([
+      fetch(`/api/history?${params}`).then(r => r.json()),
+      fetch(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`).then(r => r.json()),
+    ]);
+    chart.data.datasets = buildSensorDatasets(data, events, false);
     chart.options.scales.x.min = xMin;
     chart.options.scales.x.max = xMax;
     if (rangeDays === 0.125) {
@@ -1181,7 +1210,7 @@ async function loadChart() {
     document.getElementById('btn-next').disabled = offsetMs >= 0;
   } else if (mode === "month") {
     const data = await fetch(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
-    chart.data.datasets = buildSensorDatasets(data, true);
+    chart.data.datasets = buildSensorDatasets(data, [], true);
     const xMin = new Date(2000, activeMonth - 1, 1);
     const xMax = new Date(2000, activeMonth, 0, 23, 59, 59);
     chart.options.scales.x.min = xMin;
@@ -1189,7 +1218,7 @@ async function loadChart() {
     chart.options.scales.x.time.unit = "day";
   } else {
     const data = await fetch(`/api/history/year?bucket_minutes=${getBucket()}`).then(r => r.json());
-    chart.data.datasets = buildSensorDatasets(data, true);
+    chart.data.datasets = buildSensorDatasets(data, [], true);
     chart.options.scales.x.min = new Date(2000, 0, 1);
     chart.options.scales.x.max = new Date(2000, 11, 31, 23, 59, 59);
     chart.options.scales.x.time.unit = "month";
@@ -1282,9 +1311,24 @@ async function loadChart() {
 def events_api():
     """Recent temperature parity events."""
     limit = min(int(request.args.get("limit", 50)), 200)
-    from smart_home.events import get_recent_events
+    start = request.args.get("start", "").replace("T", " ") or None
+    end   = request.args.get("end",   "").replace("T", " ") or None
     with _conn() as conn:
-        events = get_recent_events(conn, limit=limit)
+        query = "SELECT id, ts, event_type, value, details FROM temperature_events"
+        params: list = []
+        clauses: list[str] = []
+        if start:
+            clauses.append("ts >= ?")
+            params.append(start)
+        if end:
+            clauses.append("ts <= ?")
+            params.append(end)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY ts DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+    events = [{"id": r[0], "ts": r[1], "event_type": r[2], "value": r[3], "details": r[4]} for r in rows]
     return jsonify(events)
 
 
