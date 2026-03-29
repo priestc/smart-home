@@ -2393,10 +2393,14 @@ def index():
     .presence-info .name { font-size: .85rem; font-weight: 600; color: #1a2535; }
     .presence-info .status { font-size: .75rem; color: #7a90a8; margin-top: .15rem; }
     .section-title { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .75rem; }
-    .sensor-events { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 2rem; }
-    .sensor-event { background: #fff; border-radius: 10px; padding: .75rem 1.2rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); display: flex; align-items: center; gap: 1rem; border-left: 4px solid #c0392b; }
-    .sensor-event .se-label { font-weight: 600; font-size: .9rem; color: #1a2535; }
-    .sensor-event .se-time  { font-size: .78rem; color: #7a90a8; margin-left: auto; }
+    .events-list { display: flex; flex-direction: column; gap: .4rem; margin-bottom: 2rem; }
+    .ev-row { background: #fff; border-radius: 10px; padding: .65rem 1.1rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); display: flex; align-items: center; gap: .75rem; }
+    .ev-badge { display: inline-block; padding: .18rem .5rem; border-radius: 20px; font-size: .7rem; font-weight: 700; letter-spacing: .03em; white-space: nowrap; }
+    .ev-badge.b-off  { background: #fde8e8; color: #c0392b; }
+    .ev-badge.b-sun  { background: #fff3e0; color: #d4760a; }
+    .ev-badge.b-io   { background: #e8f4fd; color: #1a6db5; }
+    .ev-detail { font-size: .85rem; color: #1a2535; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ev-time   { font-size: .75rem; color: #aabbc8; white-space: nowrap; margin-left: auto; }
     .chart-links { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 2rem; }
     .chart-link { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; background: #fff; border-radius: 12px; padding: 1rem 1.5rem; min-width: 220px; text-decoration: none; color: #1a2535; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); transition: box-shadow .15s, transform .15s; }
     .chart-link:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12), 0 6px 18px rgba(0,0,0,.08); transform: translateY(-1px); }
@@ -2410,9 +2414,9 @@ def index():
   <div class="cards" id="cards"></div>
   <div class="presence-cards" id="presence-cards"></div>
 
-  <div id="sensor-events-wrap" style="display:none">
-    <div class="section-title">Sensor Events</div>
-    <div class="sensor-events" id="sensor-events"></div>
+  <div id="events-wrap" style="display:none">
+    <div class="section-title">Events &nbsp;<a href="/events" style="font-size:.75rem;font-weight:500;color:#2e7dd4;text-decoration:none;">View all &rarr;</a></div>
+    <div class="events-list" id="events-list"></div>
   </div>
 
   <div class="section-title">Charts</div>
@@ -2458,27 +2462,34 @@ function timeSince(date) {
   if (s < 86400) return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m ago`;
   return `${Math.floor(s/86400)}d ago`;
 }
-async function loadSensorEvents() {
-  const data = await fetch("/api/events?event_type=sensor_offline&limit=10").then(r => r.json());
-  const wrap = document.getElementById("sensor-events-wrap");
-  const el = document.getElementById("sensor-events");
+const EV_LABELS = {
+  sensor_offline:        ["Sensor Offline",        "b-off"],
+  sun_shade_parity:      ["Sun / Shade Parity",    "b-sun"],
+  inside_outside_parity: ["Inside / Outside Parity","b-io"],
+};
+async function loadEvents() {
+  const data = await fetch("/api/events?limit=15").then(r => r.json());
+  const wrap = document.getElementById("events-wrap");
+  const el = document.getElementById("events-list");
   if (!data.length) { wrap.style.display = "none"; return; }
   wrap.style.display = "";
   el.innerHTML = data.map(e => {
+    const [label, cls] = EV_LABELS[e.event_type] || [e.event_type, "b-io"];
     const timeStr = new Date(e.ts.replace(" ", "T")).toLocaleString();
-    return `<div class="sensor-event">
-      <span style="font-size:1.1rem">&#128683;</span>
-      <span class="se-label">${e.details || e.event_type}</span>
-      <span class="se-time">${timeStr}</span>
+    const detail = e.details || (e.value != null ? `${e.value.toFixed(1)}°F` : "");
+    return `<div class="ev-row">
+      <span class="ev-badge ${cls}">${label}</span>
+      <span class="ev-detail">${detail}</span>
+      <span class="ev-time">${timeStr}</span>
     </div>`;
   }).join("");
 }
 loadCurrent();
 loadPresence();
-loadSensorEvents();
+loadEvents();
 setInterval(loadCurrent, 30000);
 setInterval(loadPresence, 30000);
-setInterval(loadSensorEvents, 60000);
+setInterval(loadEvents, 60000);
 </script>
 </body>
 </html>"""
