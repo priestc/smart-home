@@ -682,6 +682,7 @@ def monitor(duration, verbose, db, no_db):
     last_seen: dict[str, datetime.datetime] = {}   # address -> last advertisement received
     last_no_reading: dict[str, datetime.datetime] = {}  # address -> last no_reading insert
     sensor_offline_alerted: set[str] = set()  # addresses for which offline alert was sent this episode
+    battery_low_alerted: set[str] = set()     # labels for which battery-low alert was sent
     MISSING_THRESHOLD = datetime.timedelta(minutes=10)
 
     # Xiaomi devices — polled actively via GATT on each advertisement (with cooldown).
@@ -931,6 +932,24 @@ def monitor(duration, verbose, db, no_db):
                 high_res_buffer.setdefault(db_label, []).append(
                     (now.timestamp(), reading.temp_f)
                 )
+            # Battery low alert
+            if reading.battery is not None:
+                if reading.battery < 20 and db_label not in battery_low_alerted:
+                    battery_low_alerted.add(db_label)
+                    if conn:
+                        ts_str = now.strftime("%Y-%m-%d %H:%M:%S")
+                        conn.execute(
+                            "INSERT OR IGNORE INTO temperature_events (ts, event_type, value, details) VALUES (?,?,?,?)",
+                            (ts_str, "battery_low", reading.battery, f"{db_label} battery at {reading.battery}%"),
+                        )
+                        conn.commit()
+                    _push.send_notification(
+                        title="Battery Low",
+                        body=f"{db_label} battery is at {reading.battery}%",
+                    )
+                    click.echo(f"[{ts}] Battery low: {db_label} at {reading.battery}%")
+                elif reading.battery >= 30 and db_label in battery_low_alerted:
+                    battery_low_alerted.discard(db_label)
 
     async def snapshot_loop():
         """Once per minute, write the latest reading for every sensor to the DB

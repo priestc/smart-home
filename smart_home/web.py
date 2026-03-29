@@ -2306,6 +2306,7 @@ def events_page():
         "inside_outside_parity": "Inside / Outside Parity",
         "sensor_offline": "Sensor Offline",
         "sensor_online": "Sensor Online",
+        "battery_low": "Battery Low",
     }
     html = """<!DOCTYPE html>
 <html lang="en">
@@ -2327,6 +2328,7 @@ def events_page():
     .badge-io   { background: #e8f4fd; color: #1a6db5; }
     .badge-off  { background: #fde8e8; color: #c0392b; }
     .badge-on   { background: #e8fdf0; color: #1a7a4a; }
+    .badge-bat  { background: #fff8e1; color: #b8860b; }
     .val  { font-weight: 700; color: #e07820; }
     .det  { color: #7a90a8; font-size: .8rem; margin-top: .15rem; }
     .empty { text-align: center; color: #aabbc8; padding: 3rem 1rem; font-size: .9rem; }
@@ -2349,7 +2351,7 @@ async function load() {
   }
   tbody.innerHTML = data.map(e => {
     const label = EVENT_LABELS[e.event_type] || e.event_type;
-    const badgeClass = e.event_type === "sun_shade_parity" ? "badge-sun" : e.event_type === "sensor_offline" ? "badge-off" : e.event_type === "sensor_online" ? "badge-on" : "badge-io";
+    const badgeClass = e.event_type === "sun_shade_parity" ? "badge-sun" : e.event_type === "sensor_offline" ? "badge-off" : e.event_type === "sensor_online" ? "badge-on" : e.event_type === "battery_low" ? "badge-bat" : "badge-io";
     const ts = e.ts.replace(" ", "T");
     const timeStr = new Date(ts).toLocaleString();
     const val = e.value != null ? `${e.value.toFixed(1)}&deg;F` : "&mdash;";
@@ -2400,6 +2402,7 @@ def index():
     .ev-badge { display: inline-block; padding: .18rem .5rem; border-radius: 20px; font-size: .7rem; font-weight: 700; letter-spacing: .03em; white-space: nowrap; }
     .ev-badge.b-off  { background: #fde8e8; color: #c0392b; }
     .ev-badge.b-on   { background: #e8fdf0; color: #1a7a4a; }
+    .ev-badge.b-bat  { background: #fff8e1; color: #b8860b; }
     .ev-badge.b-sun  { background: #fff3e0; color: #d4760a; }
     .ev-badge.b-io   { background: #e8f4fd; color: #1a6db5; }
     .ev-detail { font-size: .85rem; color: #1a2535; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2468,6 +2471,7 @@ function timeSince(date) {
 const EV_LABELS = {
   sensor_offline:        ["Sensor Offline",          "b-off"],
   sensor_online:         ["Sensor Online",           "b-on"],
+  battery_low:           ["Battery Low",             "b-bat"],
   sun_shade_parity:      ["Sun / Shade Parity",      "b-sun"],
   inside_outside_parity: ["Inside / Outside Parity", "b-io"],
 };
