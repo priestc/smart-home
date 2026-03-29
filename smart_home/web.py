@@ -1418,7 +1418,7 @@ function buildSensorDatasets(data, events, isMonth) {
           borderDash: yi > 0 ? [4,3] : [] });
       });
     } else {
-      const pts = data.filter(r => r.label === lbl && r.temp_f != null)
+      const pts = data.filter(r => r.label === lbl)
         .map(r => ({ x: new Date(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
       datasets.push({ label: lbl, data: pts,
         borderColor: color, backgroundColor: 'transparent',
@@ -1989,8 +1989,8 @@ async function loadChart() {
     .map(lbl => {
       const color = colorMap[lbl] || COLORS[0];
       const pts = data
-        .filter(r => r.label === lbl && r.battery != null)
-        .map(r => ({ x: new Date(r.ts), y: r.battery }))
+        .filter(r => r.label === lbl)
+        .map(r => ({ x: new Date(r.ts), y: r.battery ?? null }))
         .sort((a, b) => a.x - b.x);
       return { label: lbl, data: pts, borderColor: color, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0 };
     });
@@ -2251,8 +2251,8 @@ async function loadChart() {
     .map(lbl => {
       const color = colorMap[lbl] || COLORS[0];
       const pts = data
-        .filter(r => r.label === lbl && r.rssi != null)
-        .map(r => ({ x: new Date(r.ts), y: r.rssi }))
+        .filter(r => r.label === lbl)
+        .map(r => ({ x: new Date(r.ts), y: r.rssi ?? null }))
         .sort((a, b) => a.x - b.x);
       return { label: lbl, data: pts, borderColor: color, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0 };
     });

@@ -916,6 +916,13 @@ def monitor(duration, verbose, db, no_db):
                     "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity, rssi, battery, raw_reading) VALUES (?,?,?,?,?,?,?,?)",
                     (ts, reading.address, reading.label, reading.temp_f, reading.humidity, reading.rssi, reading.battery, reading.raw_reading),
                 )
+            # Null readings for labeled sensors that didn't report this cycle
+            for addr, label in label_map.items():
+                if label and addr not in latest_reading:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity) VALUES (?,?,?,NULL,NULL)",
+                        (ts, addr, label),
+                    )
             conn.commit()
             n = len(latest_reading)
             click.echo(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Snapshot written: {n} sensor(s) at {ts}")
