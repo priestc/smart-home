@@ -2417,11 +2417,6 @@ def index():
   <div class="cards" id="cards"></div>
   <div class="presence-cards" id="presence-cards"></div>
 
-  <div id="events-wrap" style="display:none">
-    <div class="section-title">Events &nbsp;<a href="/events" style="font-size:.75rem;font-weight:500;color:#2e7dd4;text-decoration:none;">View all &rarr;</a></div>
-    <div class="events-list" id="events-list"></div>
-  </div>
-
   <div class="section-title">Charts</div>
   <div class="chart-links">
     <a href="/chart/temperature" class="chart-link"><span class="cl-title">Temperature</span><span class="cl-arrow">&#8594;</span></a>
@@ -2430,6 +2425,11 @@ def index():
     <a href="/chart/sensors"     class="chart-link"><span class="cl-title">Sensors</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/signal"      class="chart-link"><span class="cl-title">Signal Strength</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/events"            class="chart-link"><span class="cl-title">Temperature Events</span><span class="cl-arrow">&#8594;</span></a>
+  </div>
+
+  <div id="events-wrap" style="display:none">
+    <div class="section-title">Events &nbsp;<a href="/events" style="font-size:.75rem;font-weight:500;color:#2e7dd4;text-decoration:none;">View all &rarr;</a></div>
+    <div class="events-list" id="events-list"></div>
   </div>
 
 <script>

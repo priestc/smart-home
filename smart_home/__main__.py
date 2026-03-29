@@ -898,9 +898,26 @@ def monitor(duration, verbose, db, no_db):
             sensor_offline_alerted.discard(reading.address)
             if conn and db_label:
                 ts_str = now.strftime("%Y-%m-%d %H:%M:%S")
+                # Look up when the sensor went offline to compute duration
+                offline_row = conn.execute(
+                    "SELECT ts FROM temperature_events WHERE event_type='sensor_offline' AND details=? ORDER BY ts DESC LIMIT 1",
+                    (db_label,),
+                ).fetchone()
+                if offline_row:
+                    offline_dt = datetime.datetime.strptime(offline_row[0], "%Y-%m-%d %H:%M:%S")
+                    secs = int((now - offline_dt).total_seconds())
+                    mins, s = divmod(secs, 60)
+                    hrs, m = divmod(mins, 60)
+                    if hrs:
+                        duration = f"{hrs}h {m}m"
+                    else:
+                        duration = f"{m}m"
+                    details = f"{db_label} — offline for {duration}"
+                else:
+                    details = db_label
                 conn.execute(
                     "INSERT OR IGNORE INTO temperature_events (ts, event_type, value, details) VALUES (?,?,?,?)",
-                    (ts_str, "sensor_online", None, db_label),
+                    (ts_str, "sensor_online", None, details),
                 )
                 conn.commit()
                 _push.send_notification(
