@@ -764,6 +764,402 @@ _AXIS_UPDATE = """\
   chart.update();"""
 
 
+_DIFF_PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Differentials &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; color: #1a2535; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1.5rem; }
+    .nav a { font-size: .85rem; color: #2e7dd4; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .chart-wrap { background: #fff; border-radius: 12px; padding: 1.4rem 1.4rem 1rem; margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .chart-wrap h2 { font-size: 0.85rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: 1rem; }
+    .btn-group { margin-bottom: 1.2rem; }
+    .btn-group-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .4rem; }
+    .range-btns { display: flex; gap: .4rem; flex-wrap: wrap; }
+    .range-btns button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s; }
+    .range-btns button:hover { background: #f0f4f8; border-color: #aabbc8; }
+    .range-btns button.active { background: #e07820; color: #fff; border-color: #e07820; }
+    .range-btns button:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
+    .res-row { display: flex; align-items: center; gap: .6rem; margin-bottom: 1.2rem; }
+    .res-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+    .res-row select { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Differentials</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div class="res-row">
+    <label for="res">Resolution</label>
+    <select id="res" onchange="resolution=this.value; loadChart()">
+      <option value="low">Low</option>
+      <option value="medium">Medium</option>
+      <option value="max">Max</option>
+    </select>
+  </div>
+  <div class="btn-group">
+    <div class="range-btns" id="sensor-btns">
+      <button onclick="setSensorMode('diff', this)" id="btn-diff" class="active">Inside/outside difference</button>
+      <button onclick="setSensorMode('sun-shade-diff', this)" id="btn-sun-shade-diff">Shade/sun differential</button>
+    </div>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">Most Recent</div>
+    <div class="range-btns" id="recent-btns">
+      <button id="btn-prev" onclick="shiftView(-1)">&#8592;</button>
+      <button onclick="setRange(0.125)" data-days="0.125">3h</button>
+      <button onclick="setRange(1)" data-days="1" class="active">24h</button>
+      <button onclick="setRange(3)" data-days="3">3d</button>
+      <button onclick="setRange(7)" data-days="7">7d</button>
+      <button onclick="setRange(30)" data-days="30">30d</button>
+      <button id="btn-next" onclick="shiftView(1)" disabled>&#8594;</button>
+    </div>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">By Month</div>
+    <div class="range-btns" id="month-btns">
+      <button onclick="setAllMonths()">All Months</button>
+      <button onclick="setMonth(1)">Jan</button>
+      <button onclick="setMonth(2)">Feb</button>
+      <button onclick="setMonth(3)">Mar</button>
+      <button onclick="setMonth(4)">Apr</button>
+      <button onclick="setMonth(5)">May</button>
+      <button onclick="setMonth(6)">Jun</button>
+      <button onclick="setMonth(7)">Jul</button>
+      <button onclick="setMonth(8)">Aug</button>
+      <button onclick="setMonth(9)">Sep</button>
+      <button onclick="setMonth(10)">Oct</button>
+      <button onclick="setMonth(11)">Nov</button>
+      <button onclick="setMonth(12)">Dec</button>
+    </div>
+  </div>
+  <div class="chart-wrap"><h2>Differential (&deg;F)</h2><canvas id="chart" height="120"></canvas></div>
+<script>
+const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
+const colorMap = {};
+function labelColor(lbl) { return colorMap[lbl] ?? COLORS[0]; }
+let mode = "recent", rangeDays = 1, activeMonth = null, offsetMs = 0;
+const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const isLocal = /^192\\.168\\./.test(location.hostname);
+let resolution = isLocal ? "max" : isMobile ? "low" : "medium";
+document.getElementById("res").value = resolution;
+const BUCKETS = {
+  recent: {
+    low:    {0.125:10, 1:30,  3:60,  7:120, 30:360},
+    medium: {0.125:3,  1:10,  3:20,  7:30,  30:60 },
+    max:    {0.125:1,  1:2,   3:5,   7:10,  30:20 },
+  },
+  month:  { low: 240, medium: 60, max: 10 },
+  year:   { low: 1440, medium: 360, max: 60 },
+};
+function getBucket() {
+  if (mode === "recent") return BUCKETS.recent[resolution][rangeDays] || 60;
+  return BUCKETS[mode][resolution];
+}
+const activeModes = new Set(['diff']);
+function setSensorMode(mode, btn) {
+  if (activeModes.has(mode)) {
+    activeModes.delete(mode);
+    btn.classList.remove('active');
+  } else {
+    activeModes.add(mode);
+    btn.classList.add('active');
+  }
+  loadChart();
+}
+function isIndoorLabel(l) {
+  const lo = l.toLowerCase();
+  return lo.startsWith('indoor-') || lo.startsWith('inside-');
+}
+function splitDiff(allPts, crossings) {
+  const crossTimes = crossings
+    .map(ev => new Date(ev.ts.replace(' ', 'T')))
+    .sort((a, b) => a - b);
+  if (!crossTimes.length) {
+    return {
+      warmer: allPts.map(p => ({ x: p.x, y: p.y > 0 ? p.y : null })),
+      cooler:  allPts.map(p => ({ x: p.x, y: p.y < 0 ? p.y : null })),
+    };
+  }
+  const pts = [...allPts];
+  for (const ev of crossings) {
+    const t = new Date(ev.ts.replace(' ', 'T'));
+    pts.push({ x: t, y: 0, _crossing: true, _parityTemp: ev.value });
+  }
+  pts.sort((a, b) => a.x - b.x);
+  const beforeFirst = allPts.filter(p => p.x < crossTimes[0]);
+  const initialAvg = beforeFirst.length
+    ? beforeFirst.reduce((s, p) => s + p.y, 0) / beforeFirst.length
+    : 0;
+  const startsWarmer = initialAvg >= 0;
+  const warmer = [], cooler = [];
+  for (const p of pts) {
+    if (p._crossing) {
+      warmer.push({ x: p.x, y: 0, _parity: true, _parityTemp: p._parityTemp });
+      cooler.push({ x: p.x, y: 0, _parityHidden: true });
+      continue;
+    }
+    const nCrossed = crossTimes.filter(t => t <= p.x).length;
+    const isWarmerSide = startsWarmer ? nCrossed % 2 === 0 : nCrossed % 2 !== 0;
+    warmer.push({ x: p.x, y: isWarmerSide ? p.y : null });
+    cooler.push({ x: p.x, y: isWarmerSide ? null : p.y });
+  }
+  return { warmer, cooler };
+}
+function buildSensorDatasets(data, events, isMonth) {
+  const allLabels = [...new Set(data.map(r => r.label).filter(Boolean))];
+  const indoorLabels = allLabels.filter(isIndoorLabel);
+  const datasets = [];
+  function makePoints(rows, labelKey, tsKey) {
+    const byKey = {};
+    for (const row of rows) {
+      const k = isMonth ? `${row[labelKey]} ${row.year}` : row[labelKey];
+      (byKey[k] ??= []).push({ x: new Date(row[tsKey]), y: row.temp_f });
+    }
+    return byKey;
+  }
+  if (activeModes.has('diff')) {
+    const shadeLbl = allLabels.find(l => l.toLowerCase().replace(/[_\\s]/g,'-') === 'outside-shade');
+    if (shadeLbl && indoorLabels.length > 0) {
+      if (isMonth) {
+        const years = [...new Set(data.map(r => r.year).filter(Boolean))].sort();
+        years.forEach((year, yi) => {
+          const shadeMap = {};
+          data.filter(r => r.label === shadeLbl && r.year === year).forEach(r => { shadeMap[r.ts] = r.temp_f; });
+          const indoorMap = {};
+          data.filter(r => indoorLabels.includes(r.label) && r.year === year && r.temp_f != null)
+            .forEach(r => { (indoorMap[r.ts] ??= []).push(r.temp_f); });
+          const allPts = Object.entries(indoorMap)
+            .filter(([ts]) => shadeMap[ts] != null)
+            .map(([ts, vals]) => ({ x: new Date(ts), y: vals.reduce((a,b)=>a+b,0)/vals.length - shadeMap[ts] }))
+            .sort((a,b) => a.x - b.x);
+          const dash = yi > 0 ? [4,3] : [];
+          const { warmer, cooler } = splitDiff(allPts, []);
+          datasets.push({ label: `Degrees warmer inside ${year}`, backgroundColor: 'transparent',
+            data: warmer, borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
+          datasets.push({ label: `Degrees cooler inside ${year}`, backgroundColor: 'transparent',
+            data: cooler, borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
+        });
+      } else {
+        const shadeMap = {};
+        data.filter(r => r.label === shadeLbl && r.temp_f != null).forEach(r => { shadeMap[r.ts] = r.temp_f; });
+        const indoorMap = {};
+        data.filter(r => indoorLabels.includes(r.label) && r.temp_f != null)
+          .forEach(r => { (indoorMap[r.ts] ??= []).push(r.temp_f); });
+        const allPts = Object.entries(indoorMap)
+          .filter(([ts]) => shadeMap[ts] != null)
+          .map(([ts, vals]) => ({ x: new Date(ts), y: vals.reduce((a,b)=>a+b,0)/vals.length - shadeMap[ts] }))
+          .sort((a,b) => a.x - b.x);
+        const ioCrossings = events.filter(e => e.event_type === 'inside_outside_parity');
+        const { warmer, cooler } = splitDiff(allPts, ioCrossings);
+        datasets.push({ label: 'Degrees warmer inside', backgroundColor: 'transparent',
+          data: warmer, borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0 });
+        datasets.push({ label: 'Degrees cooler inside', backgroundColor: 'transparent',
+          data: cooler, borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0 });
+      }
+    }
+  }
+  if (activeModes.has('sun-shade-diff')) {
+    const shadeLbl = allLabels.find(l => l.toLowerCase().replace(/[_\\s]/g,'-') === 'outside-shade');
+    const sunLbl   = allLabels.find(l => l.toLowerCase().replace(/[_\\s]/g,'-') === 'outside-sun');
+    if (shadeLbl && sunLbl) {
+      if (isMonth) {
+        const years = [...new Set(data.map(r => r.year).filter(Boolean))].sort();
+        years.forEach((year, yi) => {
+          const shadeMap = {}, sunMap = {};
+          data.filter(r => r.label === shadeLbl && r.year === year).forEach(r => { shadeMap[r.ts] = r.temp_f; });
+          data.filter(r => r.label === sunLbl   && r.year === year).forEach(r => { sunMap[r.ts]   = r.temp_f; });
+          const allPts = Object.keys(sunMap)
+            .filter(ts => shadeMap[ts] != null)
+            .map(ts => ({ x: new Date(ts), y: sunMap[ts] - shadeMap[ts] }))
+            .sort((a,b) => a.x - b.x);
+          const dash = yi > 0 ? [4,3] : [];
+          const { warmer, cooler } = splitDiff(allPts, []);
+          datasets.push({ label: `Degrees warmer in sun ${year}`, backgroundColor: 'transparent',
+            data: warmer, borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
+          datasets.push({ label: `Degrees cooler in sun ${year}`, backgroundColor: 'transparent',
+            data: cooler, borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: dash });
+        });
+      } else {
+        const shadeMap = {}, sunMap = {};
+        data.filter(r => r.label === shadeLbl && r.temp_f != null).forEach(r => { shadeMap[r.ts] = r.temp_f; });
+        data.filter(r => r.label === sunLbl   && r.temp_f != null).forEach(r => { sunMap[r.ts]   = r.temp_f; });
+        const allPts = Object.keys(sunMap)
+          .filter(ts => shadeMap[ts] != null)
+          .map(ts => ({ x: new Date(ts), y: sunMap[ts] - shadeMap[ts] }))
+          .sort((a,b) => a.x - b.x);
+        const ssCrossings = events.filter(e => e.event_type === 'sun_shade_parity');
+        const { warmer, cooler } = splitDiff(allPts, ssCrossings);
+        datasets.push({ label: 'Degrees warmer in sun', backgroundColor: 'transparent',
+          data: warmer, borderColor: '#e74c3c', borderWidth: 1.5, pointRadius: 0, tension: 0 });
+        datasets.push({ label: 'Degrees cooler in sun', backgroundColor: 'transparent',
+          data: cooler, borderColor: '#2980b9', borderWidth: 1.5, pointRadius: 0, tension: 0 });
+      }
+    }
+  }
+  return datasets;
+}
+function localISO(d) {
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+async function loadColors() {
+  const data = await fetch("/api/current").then(r => r.json());
+  data.map(s => s.label).filter(Boolean).sort()
+    .forEach((lbl, i) => { colorMap[lbl] = COLORS[i % COLORS.length]; });
+}
+function shiftView(dir) {
+  offsetMs += dir * rangeDays * 86400000;
+  if (offsetMs > 0) offsetMs = 0;
+  loadChart();
+}
+function setRange(days) {
+  mode = "recent"; rangeDays = days; offsetMs = 0;
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b =>
+    b.classList.toggle("active", parseFloat(b.dataset.days) === days));
+  document.querySelectorAll("#month-btns button").forEach(b => b.classList.remove("active"));
+  loadChart();
+}
+function setAllMonths() {
+  mode = "year";
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll("#month-btns button").forEach((b,i) =>
+    b.classList.toggle("active", i === 0));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
+  loadChart();
+}
+function setMonth(m) {
+  mode = "month"; activeMonth = m;
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll("#month-btns button").forEach((b,i) =>
+    b.classList.toggle("active", i === m));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
+  loadChart();
+}
+Chart.Interaction.modes.nearestXPerDataset = function(chart, e, options, useFinalPosition) {
+  const pos = Chart.helpers.getRelativePosition(e, chart);
+  const items = [];
+  chart.data.datasets.forEach((_, datasetIndex) => {
+    if (!chart.isDatasetVisible(datasetIndex)) return;
+    const meta = chart.getDatasetMeta(datasetIndex);
+    let nearest = null, nearestDist = Infinity;
+    meta.data.forEach((element, index) => {
+      const { x } = element.getProps(['x'], useFinalPosition);
+      const dist = Math.abs(x - pos.x);
+      if (dist < nearestDist) { nearestDist = dist; nearest = { element, datasetIndex, index }; }
+    });
+    if (nearest) items.push(nearest);
+  });
+  return items;
+};
+const chart = new Chart(document.getElementById("chart"), {
+  type: "line", data: { datasets: [] },
+  options: {
+    animation: false, parsing: false,
+    interaction: { mode: "nearestXPerDataset", intersect: false },
+    plugins: {
+      legend: { labels: { color: "#4a6080" } },
+      tooltip: {
+        enabled: false,
+        external: function({ chart, tooltip }) {
+          let el = document.getElementById('chartjs-tt');
+          if (!el) {
+            el = document.createElement('div');
+            el.id = 'chartjs-tt';
+            el.style.cssText = 'position:absolute;pointer-events:none;background:rgba(0,0,0,.75);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;font-family:system-ui,sans-serif;white-space:nowrap;z-index:10;';
+            chart.canvas.parentNode.style.position = 'relative';
+            chart.canvas.parentNode.appendChild(el);
+          }
+          if (tooltip.opacity === 0) { el.style.display = 'none'; return; }
+          const title = (tooltip.title || [])[0] || '';
+          let html = title ? '<div style="font-weight:600;margin-bottom:3px;">' + title + '</div>' : '';
+          for (const item of (tooltip.dataPoints || [])) {
+            const raw = item.raw;
+            if (!raw || raw._parityHidden) continue;
+            if (raw._parity) {
+              const temp = raw._parityTemp != null ? raw._parityTemp.toFixed(1) + '\\u00b0F' : '';
+              const lbl = '\\u2696\\ufe0f Parity' + (temp ? ': ' + temp : '');
+              html += '<div style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:#b06ed0;border:1px solid #b06ed0;flex-shrink:0;"></span><span style="color:#b06ed0;font-weight:bold;">' + lbl + '</span></div>';
+              continue;
+            }
+            if (raw.y == null) continue;
+            const color = item.dataset.borderColor || '#ccc';
+            const lbl = (item.dataset.label || '') + ': ' + Math.abs(raw.y).toFixed(1) + '\\u00b0F';
+            html += '<div style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:' + color + ';border:1px solid ' + color + ';flex-shrink:0;"></span><span>' + lbl + '</span></div>';
+          }
+          el.innerHTML = html;
+          el.style.display = 'block';
+          const pw = chart.canvas.parentNode.offsetWidth;
+          const tw = el.offsetWidth || 160;
+          el.style.left = (tooltip.caretX + tw + 14 > pw ? tooltip.caretX - tw - 4 : tooltip.caretX + 14) + 'px';
+          el.style.top = Math.max(0, tooltip.caretY - 20) + 'px';
+        }
+      }
+    },
+    scales: {
+      x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" }, ticks: { color: "#7a90a8", maxTicksLimit: 25 }, grid: { color: "#e8eef4" } },
+      y: { ticks: { color: "#7a90a8", callback: v => (+v).toFixed(1) + "\\u00b0F" }, grid: { color: ctx => ctx.tick.value === 0 ? "#aabbc8" : "#e8eef4" } }
+    }
+  }
+});
+async function loadChart() {
+  if (mode === "recent") {
+    const xMax = new Date(Date.now() + offsetMs);
+    const xMin = new Date(xMax - rangeDays * 86400000);
+    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
+    const [data, events] = await Promise.all([
+      fetch(`/api/history?${params}`).then(r => r.json()),
+      fetch(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`).then(r => r.json()),
+    ]);
+    chart.data.datasets = buildSensorDatasets(data, events, false);
+    chart.options.scales.x.min = xMin;
+    chart.options.scales.x.max = xMax;
+    if (rangeDays === 0.125) {
+      chart.options.scales.x.time.unit = "minute";
+      chart.options.scales.x.ticks.stepSize = 30;
+    } else if (rangeDays === 1) {
+      chart.options.scales.x.time.unit = "hour";
+      chart.options.scales.x.ticks.stepSize = 1;
+    } else {
+      chart.options.scales.x.time.unit = "day";
+      chart.options.scales.x.ticks.stepSize = 1;
+    }
+    const peek = await fetch(`/api/history?end=${localISO(xMin)}&limit=1&bucket_minutes=${getBucket()}`).then(r => r.json());
+    document.getElementById('btn-prev').disabled = peek.length === 0;
+    document.getElementById('btn-next').disabled = offsetMs >= 0;
+  } else if (mode === "month") {
+    const data = await fetch(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
+    chart.data.datasets = buildSensorDatasets(data, [], true);
+    const xMin = new Date(2000, activeMonth - 1, 1);
+    const xMax = new Date(2000, activeMonth, 0, 23, 59, 59);
+    chart.options.scales.x.min = xMin;
+    chart.options.scales.x.max = xMax;
+    chart.options.scales.x.time.unit = "day";
+  } else {
+    const data = await fetch(`/api/history/year?bucket_minutes=${getBucket()}`).then(r => r.json());
+    chart.data.datasets = buildSensorDatasets(data, [], true);
+    chart.options.scales.x.min = new Date(2000, 0, 1);
+    chart.options.scales.x.max = new Date(2000, 11, 31, 23, 59, 59);
+    chart.options.scales.x.time.unit = "month";
+  }
+  chart.update();
+}
+loadColors().then(loadChart);
+setInterval(() => loadColors().then(loadChart), 30000);
+</script>
+</body>
+</html>"""
+
 _TEMP_PAGE = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -810,8 +1206,6 @@ _TEMP_PAGE = """\
       <button onclick="setSensorMode('outside-sun', this)" id="btn-outside-sun">Outside (sun)</button>
       <button onclick="setSensorMode('outside-shade', this)" id="btn-outside-shade" class="active">Outside (shade)</button>
       <button onclick="setSensorMode('indoor-avg', this)" id="btn-indoor-avg" class="active">Indoor average</button>
-      <button onclick="setSensorMode('diff', this)" id="btn-diff">Inside/outside difference</button>
-      <button onclick="setSensorMode('sun-shade-diff', this)" id="btn-sun-shade-diff">Shade/sun differential</button>
     </div>
   </div>
   <div class="btn-group">
@@ -1200,29 +1594,39 @@ const chart = new Chart(document.getElementById("chart"), {
     plugins: {
       legend: { labels: { color: "#4a6080" } },
       tooltip: {
-        callbacks: {
-          label: function(ctx) {
-            const raw = ctx.raw;
-            if (!raw) return null;
-            if (raw._parityHidden) return null;
-            if (raw._parity) {
-              const temp = raw._parityTemp != null ? raw._parityTemp.toFixed(1) + "\\u00b0F" : "";
-              return "\\u2696\\ufe0f Parity" + (temp ? ": " + temp : "");
-            }
-            if (raw.y == null) return null;
-            return (ctx.dataset.label || "") + ": " + Math.abs(raw.y).toFixed(1) + "\\u00b0F";
-          },
-          labelColor: function(ctx) {
-            if (ctx.raw && ctx.raw._parity)
-              return { borderColor: "#8e44ad", backgroundColor: "#8e44ad" };
-            return { borderColor: ctx.dataset.borderColor, backgroundColor: ctx.dataset.borderColor };
-          },
-          labelTextColor: function(ctx) {
-            return (ctx.raw && ctx.raw._parity) ? "#8e44ad" : undefined;
-          },
-          labelFont: function(ctx) {
-            if (ctx.raw && ctx.raw._parity) return { weight: "bold" };
+        enabled: false,
+        external: function({ chart, tooltip }) {
+          let el = document.getElementById('chartjs-tt');
+          if (!el) {
+            el = document.createElement('div');
+            el.id = 'chartjs-tt';
+            el.style.cssText = 'position:absolute;pointer-events:none;background:rgba(0,0,0,.75);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;font-family:system-ui,sans-serif;white-space:nowrap;z-index:10;';
+            chart.canvas.parentNode.style.position = 'relative';
+            chart.canvas.parentNode.appendChild(el);
           }
+          if (tooltip.opacity === 0) { el.style.display = 'none'; return; }
+          const title = (tooltip.title || [])[0] || '';
+          let html = title ? '<div style="font-weight:600;margin-bottom:3px;">' + title + '</div>' : '';
+          for (const item of (tooltip.dataPoints || [])) {
+            const raw = item.raw;
+            if (!raw || raw._parityHidden) continue;
+            if (raw._parity) {
+              const temp = raw._parityTemp != null ? raw._parityTemp.toFixed(1) + '\\u00b0F' : '';
+              const lbl = '\\u2696\\ufe0f Parity' + (temp ? ': ' + temp : '');
+              html += '<div style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:#b06ed0;border:1px solid #b06ed0;flex-shrink:0;"></span><span style="color:#b06ed0;font-weight:bold;">' + lbl + '</span></div>';
+              continue;
+            }
+            if (raw.y == null) continue;
+            const color = item.dataset.borderColor || '#ccc';
+            const lbl = (item.dataset.label || '') + ': ' + Math.abs(raw.y).toFixed(1) + '\\u00b0F';
+            html += '<div style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:' + color + ';border:1px solid ' + color + ';flex-shrink:0;"></span><span>' + lbl + '</span></div>';
+          }
+          el.innerHTML = html;
+          el.style.display = 'block';
+          const pw = chart.canvas.parentNode.offsetWidth;
+          const tw = el.offsetWidth || 160;
+          el.style.left = (tooltip.caretX + tw + 14 > pw ? tooltip.caretX - tw - 4 : tooltip.caretX + 14) + 'px';
+          el.style.top = Math.max(0, tooltip.caretY - 20) + 'px';
         }
       }
     },
@@ -1321,40 +1725,7 @@ async function loadChart() {
 
 @app.get("/chart/differential")
 def chart_differential():
-    return _chart_page(
-        "Inside / Outside Differential",
-        '<div class="chart-wrap"><h2>Inside \u2212 Outside (\u00b0F)</h2><canvas id="chart" height="120"></canvas></div>',
-        """
-const chart = new Chart(document.getElementById("chart"), {
-  type: "line", data: { datasets: [] },
-  options: {
-    animation: false, parsing: false,
-    interaction: { mode: "index", intersect: false },
-    plugins: { legend: { display: false } },
-    scales: {
-      x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" }, ticks: { color: "#7a90a8", maxTicksLimit: 8 }, grid: { color: "#e8eef4" } },
-      y: { ticks: { color: "#7a90a8", callback: v => (+v).toFixed(1) + "\u00b0F" }, grid: { color: ctx => ctx.tick.value === 0 ? "#aabbc8" : "#e8eef4" } }
-    }
-  }
-});
-async function loadChart() {
-""" + _HISTORY_FETCH + """
-  const labels = [...new Set(data.map(r => r.label))];
-  const insideLabel  = labels.find(l => l && l.toLowerCase() === "inside");
-  const outsideLabel = labels.find(l => l && l.toLowerCase() === "outside");
-  if (!insideLabel || !outsideLabel) { chart.data.datasets = []; chart.update(); return; }
-  const outsideMap = new Map();
-  for (const row of data)
-    if (row.label === outsideLabel && row.temp_f != null) outsideMap.set(row.ts, row.temp_f);
-  const diffData = [];
-  for (const row of data)
-    if (row.label === insideLabel && row.temp_f != null && outsideMap.has(row.ts))
-      diffData.push({ x: new Date(row.ts), y: Math.round((row.temp_f - outsideMap.get(row.ts)) * 10) / 10 });
-  diffData.sort((a,b) => a.x - b.x);
-  chart.data.datasets = [{ label: "Inside \u2212 Outside", data: diffData, borderColor: "#9b4dca", backgroundColor: "transparent", borderWidth: 1.5, pointRadius: 0, tension: 0 }];
-""" + _AXIS_UPDATE + """
-}""",
-    )
+    return Response(_DIFF_PAGE, mimetype="text/html")
 
 
 @app.get("/api/events")
@@ -1491,7 +1862,7 @@ def index():
   <div class="chart-links">
     <a href="/chart/temperature" class="chart-link"><span class="cl-title">Temperature</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/humidity"    class="chart-link"><span class="cl-title">Humidity</span><span class="cl-arrow">&#8594;</span></a>
-    <a href="/chart/differential" class="chart-link"><span class="cl-title">Inside / Outside Differential</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/chart/differential" class="chart-link"><span class="cl-title">Differentials</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/events"            class="chart-link"><span class="cl-title">Temperature Events</span><span class="cl-arrow">&#8594;</span></a>
   </div>
 

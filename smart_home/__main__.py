@@ -868,6 +868,8 @@ def monitor(duration, verbose, db, no_db):
 
     # latest reading per address, updated on every advertisement
     latest_reading: dict[str, object] = {}
+    # high-res buffer: label -> [(epoch_time, temp_f), ...] kept for ~60 seconds
+    high_res_buffer: dict[str, list] = {}
 
     def on_reading(reading):
         db_label = label_map.get(reading.address)
@@ -875,9 +877,14 @@ def monitor(duration, verbose, db, no_db):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         click.echo(f"[{ts}] {reading}")
         seen.add(reading.address)
-        last_seen[reading.address] = datetime.datetime.now()
+        now = datetime.datetime.now()
+        last_seen[reading.address] = now
         if db_label:
             latest_reading[reading.address] = reading
+            if reading.temp_f is not None:
+                high_res_buffer.setdefault(db_label, []).append(
+                    (now.timestamp(), reading.temp_f)
+                )
 
     async def snapshot_loop():
         """Once per minute, write the latest reading for every sensor to the DB
@@ -965,7 +972,13 @@ def monitor(duration, verbose, db, no_db):
         while True:
             if conn:
                 try:
-                    n = detect_and_insert_events(conn)
+                    # Prune buffer entries older than 60 seconds
+                    cutoff = datetime.datetime.now().timestamp() - 60.0
+                    for lbl in list(high_res_buffer):
+                        high_res_buffer[lbl] = [
+                            (t, v) for t, v in high_res_buffer[lbl] if t >= cutoff
+                        ]
+                    n = detect_and_insert_events(conn, high_res_buffer)
                     if n:
                         ts = datetime.datetime.now().strftime("%H:%M:%S")
                         click.echo(f"[{ts}] Temperature event(s) detected: {n}")
