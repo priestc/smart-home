@@ -168,15 +168,16 @@ def history():
             SELECT
                 strftime('%Y-%m-%d %H:%M:%S', CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs}, 'unixepoch') AS ts,
                 label,
-                ROUND(AVG(temp_f), 2)  AS temp_f,
+                ROUND(AVG(temp_f), 2)   AS temp_f,
                 ROUND(AVG(humidity), 2) AS humidity,
-                ROUND(AVG(rssi), 0)    AS rssi
+                ROUND(AVG(rssi), 0)     AS rssi,
+                ROUND(AVG(battery), 0)  AS battery
             FROM readings{where_sql}
             GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, label
             ORDER BY ts ASC LIMIT ?
         """
     else:
-        sql = f"SELECT ts, label, temp_f, humidity, rssi FROM readings{where_sql} ORDER BY ts ASC"
+        sql = f"SELECT ts, label, temp_f, humidity, rssi, battery FROM readings{where_sql} ORDER BY ts ASC"
 
     if bucket > 1:
         params.append(limit)
@@ -1728,6 +1729,331 @@ def chart_differential():
     return Response(_DIFF_PAGE, mimetype="text/html")
 
 
+_SENSORS_PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sensors &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; color: #1a2535; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1.5rem; }
+    .nav a { font-size: .85rem; color: #2e7dd4; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .chart-wrap { background: #fff; border-radius: 12px; padding: 1.4rem 1.4rem 1rem; margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .chart-wrap h2 { font-size: 0.85rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: 1rem; }
+    .btn-group { margin-bottom: 1.2rem; }
+    .btn-group-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .4rem; }
+    .range-btns { display: flex; gap: .4rem; flex-wrap: wrap; }
+    .range-btns button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s; }
+    .range-btns button:hover { background: #f0f4f8; border-color: #aabbc8; }
+    .range-btns button.active { background: #e07820; color: #fff; border-color: #e07820; }
+    .range-btns button:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
+    .res-row { display: flex; align-items: center; gap: .6rem; margin-bottom: 1.2rem; }
+    .res-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+    .res-row select { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Sensors</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div class="res-row">
+    <label for="res">Resolution</label>
+    <select id="res" onchange="resolution=this.value; loadChart()">
+      <option value="low">Low</option>
+      <option value="medium">Medium</option>
+      <option value="max">Max</option>
+    </select>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">Battery</div>
+    <div class="range-btns" id="battery-btns"></div>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">Signal</div>
+    <div class="range-btns">
+      <button onclick="toggleRssi(this)" id="btn-rssi">RSSI</button>
+    </div>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">Most Recent</div>
+    <div class="range-btns" id="recent-btns">
+      <button id="btn-prev" onclick="shiftView(-1)">&#8592;</button>
+      <button onclick="setRange(0.125)" data-days="0.125">3h</button>
+      <button onclick="setRange(1)" data-days="1" class="active">24h</button>
+      <button onclick="setRange(3)" data-days="3">3d</button>
+      <button onclick="setRange(7)" data-days="7">7d</button>
+      <button onclick="setRange(30)" data-days="30">30d</button>
+      <button id="btn-next" onclick="shiftView(1)" disabled>&#8594;</button>
+    </div>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">By Month</div>
+    <div class="range-btns" id="month-btns">
+      <button onclick="setAllMonths()">All Months</button>
+      <button onclick="setMonth(1)">Jan</button>
+      <button onclick="setMonth(2)">Feb</button>
+      <button onclick="setMonth(3)">Mar</button>
+      <button onclick="setMonth(4)">Apr</button>
+      <button onclick="setMonth(5)">May</button>
+      <button onclick="setMonth(6)">Jun</button>
+      <button onclick="setMonth(7)">Jul</button>
+      <button onclick="setMonth(8)">Aug</button>
+      <button onclick="setMonth(9)">Sep</button>
+      <button onclick="setMonth(10)">Oct</button>
+      <button onclick="setMonth(11)">Nov</button>
+      <button onclick="setMonth(12)">Dec</button>
+    </div>
+  </div>
+  <div class="chart-wrap"><h2>Battery (%)</h2><canvas id="chart-battery" height="80"></canvas></div>
+  <div class="chart-wrap" id="rssi-wrap" style="display:none"><h2>RSSI (dBm)</h2><canvas id="chart-rssi" height="80"></canvas></div>
+<script>
+const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
+const colorMap = {};
+let mode = "recent", rangeDays = 1, activeMonth = null, offsetMs = 0;
+const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const isLocal = /^192\\.168\\./.test(location.hostname);
+let resolution = isLocal ? "max" : isMobile ? "low" : "medium";
+document.getElementById("res").value = resolution;
+const BUCKETS = {
+  recent: {
+    low:    {0.125:10, 1:30,  3:60,  7:120, 30:360},
+    medium: {0.125:3,  1:10,  3:20,  7:30,  30:60 },
+    max:    {0.125:1,  1:2,   3:5,   7:10,  30:20 },
+  },
+  month:  { low: 240, medium: 60, max: 10 },
+  year:   { low: 1440, medium: 360, max: 60 },
+};
+function getBucket() {
+  if (mode === "recent") return BUCKETS.recent[resolution][rangeDays] || 60;
+  return BUCKETS[mode][resolution];
+}
+
+const activeBattery = new Set();
+let showRssi = false;
+
+function toggleBattery(lbl, btn) {
+  if (activeBattery.has(lbl)) { activeBattery.delete(lbl); btn.classList.remove('active'); }
+  else { activeBattery.add(lbl); btn.classList.add('active'); }
+  loadChart();
+}
+function toggleRssi(btn) {
+  showRssi = !showRssi;
+  btn.classList.toggle('active', showRssi);
+  document.getElementById('rssi-wrap').style.display = showRssi ? '' : 'none';
+  loadChart();
+}
+
+function shiftView(dir) {
+  offsetMs += dir * rangeDays * 86400000;
+  if (offsetMs > 0) offsetMs = 0;
+  loadChart();
+}
+function setRange(days) {
+  mode = "recent"; rangeDays = days; offsetMs = 0;
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b =>
+    b.classList.toggle("active", parseFloat(b.dataset.days) === days));
+  document.querySelectorAll("#month-btns button").forEach(b => b.classList.remove("active"));
+  loadChart();
+}
+function setAllMonths() {
+  mode = "year";
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll("#month-btns button").forEach((b,i) => b.classList.toggle("active", i === 0));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
+  loadChart();
+}
+function setMonth(m) {
+  mode = "month"; activeMonth = m;
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll("#month-btns button").forEach((b,i) => b.classList.toggle("active", i === m));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
+  loadChart();
+}
+
+function makeTooltip(valueFormatter) {
+  return {
+    enabled: false,
+    external: function({ chart, tooltip }) {
+      const id = 'tt-' + chart.canvas.id;
+      let el = document.getElementById(id);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = id;
+        el.style.cssText = 'position:absolute;pointer-events:none;background:rgba(0,0,0,.75);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;font-family:system-ui,sans-serif;white-space:nowrap;z-index:10;';
+        chart.canvas.parentNode.style.position = 'relative';
+        chart.canvas.parentNode.appendChild(el);
+      }
+      if (tooltip.opacity === 0) { el.style.display = 'none'; return; }
+      const title = (tooltip.title || [])[0] || '';
+      let html = title ? '<div style="font-weight:600;margin-bottom:3px;">' + title + '</div>' : '';
+      for (const item of (tooltip.dataPoints || [])) {
+        if (item.raw == null || item.raw.y == null) continue;
+        const color = item.dataset.borderColor || '#ccc';
+        html += '<div style="display:flex;align-items:center;gap:5px;">' +
+          '<span style="display:inline-block;width:10px;height:10px;background:' + color + ';border:1px solid ' + color + ';flex-shrink:0;"></span>' +
+          '<span>' + (item.dataset.label || '') + ': ' + valueFormatter(item.raw.y) + '</span></div>';
+      }
+      el.innerHTML = html;
+      el.style.display = 'block';
+      const pw = chart.canvas.parentNode.offsetWidth;
+      const tw = el.offsetWidth || 160;
+      el.style.left = (tooltip.caretX + tw + 14 > pw ? tooltip.caretX - tw - 4 : tooltip.caretX + 14) + 'px';
+      el.style.top = Math.max(0, tooltip.caretY - 20) + 'px';
+    }
+  };
+}
+
+Chart.Interaction.modes.nearestXPerDataset = function(chart, e, options, useFinalPosition) {
+  const pos = Chart.helpers.getRelativePosition(e, chart);
+  const items = [];
+  chart.data.datasets.forEach((_, di) => {
+    if (!chart.isDatasetVisible(di)) return;
+    const meta = chart.getDatasetMeta(di);
+    let nearest = null, nearestDist = Infinity;
+    meta.data.forEach((el, idx) => {
+      const dist = Math.abs(el.getProps(['x'], useFinalPosition).x - pos.x);
+      if (dist < nearestDist) { nearestDist = dist; nearest = { element: el, datasetIndex: di, index: idx }; }
+    });
+    if (nearest) items.push(nearest);
+  });
+  return items;
+};
+
+const batteryChart = new Chart(document.getElementById("chart-battery"), {
+  type: "line", data: { datasets: [] },
+  options: {
+    animation: false, parsing: false,
+    interaction: { mode: "nearestXPerDataset", intersect: false },
+    plugins: { legend: { labels: { color: "#4a6080" } }, tooltip: makeTooltip(v => (+v).toFixed(0) + "%") },
+    scales: {
+      x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" }, ticks: { color: "#7a90a8", maxTicksLimit: 25 }, grid: { color: "#e8eef4" } },
+      y: { min: 0, max: 100, ticks: { color: "#7a90a8", callback: v => v + "%" }, grid: { color: "#e8eef4" } }
+    }
+  }
+});
+
+const rssiChart = new Chart(document.getElementById("chart-rssi"), {
+  type: "line", data: { datasets: [] },
+  options: {
+    animation: false, parsing: false,
+    interaction: { mode: "nearestXPerDataset", intersect: false },
+    plugins: { legend: { labels: { color: "#4a6080" } }, tooltip: makeTooltip(v => (+v).toFixed(0) + " dBm") },
+    scales: {
+      x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" }, ticks: { color: "#7a90a8", maxTicksLimit: 25 }, grid: { color: "#e8eef4" } },
+      y: { ticks: { color: "#7a90a8", callback: v => v + " dBm" }, grid: { color: "#e8eef4" } }
+    }
+  }
+});
+
+function localISO(d) {
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+async function loadSensors() {
+  const data = await fetch("/api/current").then(r => r.json());
+  const labels = data.map(s => s.label).filter(Boolean).sort();
+  labels.forEach((lbl, i) => { colorMap[lbl] = COLORS[i % COLORS.length]; });
+
+  const btnsEl = document.getElementById('battery-btns');
+  const existing = [...btnsEl.querySelectorAll('button')].map(b => b.dataset.label);
+  if (JSON.stringify(existing) !== JSON.stringify(labels)) {
+    btnsEl.innerHTML = '';
+    labels.forEach(lbl => {
+      activeBattery.add(lbl);
+      const btn = document.createElement('button');
+      btn.dataset.label = lbl;
+      btn.textContent = lbl;
+      btn.className = 'active';
+      btn.onclick = () => toggleBattery(lbl, btn);
+      btnsEl.appendChild(btn);
+    });
+  }
+}
+
+async function loadChart() {
+  let data;
+  if (mode === "recent") {
+    const xMax = new Date(Date.now() + offsetMs);
+    const xMin = new Date(xMax - rangeDays * 86400000);
+    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
+    data = await fetch(`/api/history?${params}`).then(r => r.json());
+    batteryChart.options.scales.x.min = xMin;
+    batteryChart.options.scales.x.max = xMax;
+    rssiChart.options.scales.x.min = xMin;
+    rssiChart.options.scales.x.max = xMax;
+    const unit = rangeDays === 0.125 ? "minute" : rangeDays === 1 ? "hour" : "day";
+    const step = rangeDays === 0.125 ? 30 : 1;
+    batteryChart.options.scales.x.time.unit = unit;
+    batteryChart.options.scales.x.ticks.stepSize = step;
+    rssiChart.options.scales.x.time.unit = unit;
+    rssiChart.options.scales.x.ticks.stepSize = step;
+    const peek = await fetch(`/api/history?end=${localISO(xMin)}&limit=1&bucket_minutes=${getBucket()}`).then(r => r.json());
+    document.getElementById('btn-prev').disabled = peek.length === 0;
+    document.getElementById('btn-next').disabled = offsetMs >= 0;
+  } else if (mode === "month") {
+    data = await fetch(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
+    const xMin = new Date(2000, activeMonth - 1, 1), xMax = new Date(2000, activeMonth, 0, 23, 59, 59);
+    batteryChart.options.scales.x.min = rssiChart.options.scales.x.min = xMin;
+    batteryChart.options.scales.x.max = rssiChart.options.scales.x.max = xMax;
+    batteryChart.options.scales.x.time.unit = rssiChart.options.scales.x.time.unit = "day";
+  } else {
+    data = await fetch(`/api/history/year?bucket_minutes=${getBucket()}`).then(r => r.json());
+    batteryChart.options.scales.x.min = rssiChart.options.scales.x.min = new Date(2000, 0, 1);
+    batteryChart.options.scales.x.max = rssiChart.options.scales.x.max = new Date(2000, 11, 31, 23, 59, 59);
+    batteryChart.options.scales.x.time.unit = rssiChart.options.scales.x.time.unit = "month";
+  }
+
+  const allLabels = [...new Set(data.map(r => r.label).filter(Boolean))].sort();
+  const isMonth = mode !== "recent";
+
+  // Battery datasets
+  batteryChart.data.datasets = allLabels
+    .filter(lbl => activeBattery.has(lbl))
+    .map(lbl => {
+      const color = colorMap[lbl] || COLORS[0];
+      const pts = data
+        .filter(r => r.label === lbl && r.battery != null)
+        .map(r => ({ x: new Date(r.ts), y: r.battery }))
+        .sort((a, b) => a.x - b.x);
+      return { label: lbl, data: pts, borderColor: color, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0 };
+    });
+  batteryChart.update();
+
+  // RSSI datasets
+  if (showRssi) {
+    rssiChart.data.datasets = allLabels.map(lbl => {
+      const color = colorMap[lbl] || COLORS[0];
+      const pts = data
+        .filter(r => r.label === lbl && r.rssi != null)
+        .map(r => ({ x: new Date(r.ts), y: r.rssi }))
+        .sort((a, b) => a.x - b.x);
+      return { label: lbl, data: pts, borderColor: color, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0 };
+    });
+    rssiChart.update();
+  }
+}
+
+loadSensors().then(loadChart);
+setInterval(() => loadSensors().then(loadChart), 30000);
+</script>
+</body>
+</html>"""
+
+
+@app.get("/chart/sensors")
+def chart_sensors():
+    return Response(_SENSORS_PAGE, mimetype="text/html")
+
+
 @app.get("/api/events")
 def events_api():
     """Recent temperature parity events."""
@@ -1863,6 +2189,7 @@ def index():
     <a href="/chart/temperature" class="chart-link"><span class="cl-title">Temperature</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/humidity"    class="chart-link"><span class="cl-title">Humidity</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/differential" class="chart-link"><span class="cl-title">Differentials</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/chart/sensors"     class="chart-link"><span class="cl-title">Sensors</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/events"            class="chart-link"><span class="cl-title">Temperature Events</span><span class="cl-arrow">&#8594;</span></a>
   </div>
 
