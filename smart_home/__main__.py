@@ -869,6 +869,48 @@ def monitor(duration, verbose, db, no_db):
                     (now.timestamp(), reading.temp_f)
                 )
 
+    async def _backfill_pvvx(
+        db_conn,
+        address: str,
+        label: str,
+        offline_start: datetime.datetime,
+        online_at: datetime.datetime,
+    ) -> None:
+        """Fetch PVVX sensor history and backfill the DB for the offline period."""
+        log_ts = datetime.datetime.now().strftime("%H:%M:%S")
+        click.echo(f"[{log_ts}] Backfilling PVVX history for {label} ({address})...")
+        records = await _pvvx.read_pvvx_history(address)
+        if not records:
+            click.echo(f"[{log_ts}] No PVVX history returned for {label}")
+            return
+
+        # Filter to records within the offline window
+        start_ts = offline_start.strftime("%Y-%m-%d %H:%M:%S")
+        end_ts   = online_at.strftime("%Y-%m-%d %H:%M:%S")
+        in_window = [r for r in records if start_ts <= r["ts"] <= end_ts]
+        if not in_window:
+            click.echo(f"[{log_ts}] PVVX history: no records in offline window for {label}")
+            return
+
+        # Delete the null placeholder rows that were inserted during the outage
+        db_conn.execute(
+            "DELETE FROM readings WHERE label=? AND ts>=? AND ts<=? AND temp_f IS NULL",
+            (label, start_ts, end_ts),
+        )
+
+        # Insert history records (convert temp_c to temp_f)
+        inserted = 0
+        for r in in_window:
+            temp_f = round(r["temp_c"] * 9 / 5 + 32, 2)
+            cur = db_conn.execute(
+                "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity, battery) VALUES (?,?,?,?,?,?)",
+                (r["ts"], address, label, temp_f, r["humidity"], r["battery"]),
+            )
+            inserted += cur.rowcount
+        db_conn.commit()
+        log_ts = datetime.datetime.now().strftime("%H:%M:%S")
+        click.echo(f"[{log_ts}] PVVX backfill for {label}: {inserted} rows inserted ({len(in_window)} in window, {len(records)} total)")
+
     async def snapshot_loop():
         """Once per minute, write the latest reading for every sensor to the DB
         using a single shared timestamp so all readings align in the database."""
@@ -921,6 +963,11 @@ def monitor(duration, verbose, db, no_db):
                         )
                         _push.send_notification(title="Sensor Online", body=f"{label} is back online")
                         click.echo(f"[{log_ts}] Sensor back online: {label}")
+                        # Backfill PVVX history for the offline period
+                        if addr in pvvx_addresses and offline_row:
+                            asyncio.get_running_loop().create_task(
+                                _backfill_pvvx(conn, addr, label, offline_dt, now_dt)
+                            )
                     # Battery check
                     reading = latest_reading.get(addr)
                     if reading and reading.battery is not None:
