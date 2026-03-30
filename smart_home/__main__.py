@@ -1191,6 +1191,65 @@ def gatt_dump(sensor, mac_address):
     asyncio.run(dump_gatt(address))
 
 
+@main.command("pvvx-history")
+@click.argument("sensor")
+@click.option("--count", "-n", type=int, default=20, help="Number of most-recent records to show (default: 20). 0 = all.")
+def pvvx_history(sensor, count):
+    """Read and display PVVX internal history for a sensor.
+
+    SENSOR can be a label name (e.g. 'outside-sun') or a MAC address.
+    Shows timestamps and the interval between records so you can verify
+    the sensor's snapshot frequency.
+    """
+    label_map = _labels.load()
+    if len(sensor) == 17 and sensor.count(":") == 5:
+        address = sensor.upper()
+        label = label_map.get(address, address)
+    else:
+        match = next(
+            (addr for addr, lbl in label_map.items() if lbl.lower() == sensor.lower()),
+            None,
+        )
+        if match is None:
+            click.echo(f"No sensor found with label {sensor!r}.")
+            click.echo("Known labels: " + ", ".join(sorted(label_map.values())))
+            return
+        address = match
+        label = sensor
+        click.echo(f"Resolved {sensor!r} → {address}")
+
+    click.echo(f"Reading PVVX history for {label} ({address})...")
+    records = asyncio.run(_pvvx.read_pvvx_history(address))
+
+    if not records:
+        click.echo("No history records returned (sensor not found or not PVVX firmware).")
+        return
+
+    # Sort by timestamp
+    records.sort(key=lambda r: r["ts"])
+
+    click.echo(f"Total records in sensor: {len(records)}")
+    click.echo(f"Oldest: {records[0]['ts']}   Newest: {records[-1]['ts']}")
+    click.echo()
+
+    # Show the requested tail (most recent)
+    subset = records if count == 0 else records[-count:]
+    import datetime as _dt
+    prev_ts = None
+    click.echo(f"{'Timestamp':<22}  {'Temp':>7}  {'Hum':>6}  {'Bat':>4}  {'Interval':>10}")
+    click.echo("-" * 60)
+    for r in subset:
+        ts_dt = _dt.datetime.strptime(r["ts"], "%Y-%m-%d %H:%M:%S")
+        if prev_ts is not None:
+            gap = int((ts_dt - prev_ts).total_seconds())
+            interval = f"{gap}s"
+        else:
+            interval = "—"
+        temp_f = r["temp_c"] * 9 / 5 + 32
+        click.echo(f"{r['ts']:<22}  {temp_f:>6.1f}F  {r['humidity']:>5.1f}%  {r['battery']:>3}%  {interval:>10}")
+        prev_ts = ts_dt
+
+
 @main.command("scan-all")
 @click.option("--timeout", "-t", type=float, default=15.0,
               help="Seconds to scan (default: 15).")
