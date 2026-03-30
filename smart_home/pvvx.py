@@ -12,7 +12,6 @@ _PVVX_FILE  = _CONFIG_DIR / "pvvx_devices.json"
 _PVVX_CHAR      = "00001f1f-0000-1000-8000-00805f9b34fb"  # PVVX control/history characteristic
 _CMD_SYNC_TIME  = 0x23
 _CMD_GET_MEMO   = 0x33  # request last N history records; second byte = count (max 255)
-_MEMO_BLOCK_ID  = 0x35  # block ID in each history notification
 
 
 def load_addresses() -> set[str]:
@@ -54,38 +53,31 @@ async def read_pvvx_history(
             print(f"  [pvvx] {msg}")
 
     address = address.upper()
-    records: list[dict] = []
-    done = asyncio.Event()
+    # Raw records collect (vbat_mv, temp_c, humidity, boot_minutes).
+    # Timestamps are reconstructed after all records arrive using relative offsets.
+    raw_records: list[tuple[int, float, float, int]] = []  # (vbat_mv, temp_c, humidity, boot_min)
+    last_activity: list[float] = [0.0]
     raw_bytes_received: list[int] = [0]
 
     def handle_notification(sender, data: bytearray):
+        last_activity[0] = time.monotonic()
         raw_bytes_received[0] += len(data)
         _log(f"notification {len(data)} bytes: {data.hex()}")
-        if len(data) < 2 or data[0] != _MEMO_BLOCK_ID:
+        # The first response is a 2-byte echo of the command — skip it.
+        # Records are 14 bytes with the following layout (all little-endian):
+        #   0:    uint8  command echo (0x33)
+        #   1-2:  uint16 battery voltage in mV
+        #   3-4:  int16  temperature * 100 (°C)
+        #   5-6:  uint16 humidity * 100 (%)
+        #   7-8:  uint16 minutes since device boot (increments by recording interval)
+        #   9-13: (other fields, unused)
+        if len(data) < 14 or data[0] != _CMD_GET_MEMO:
             return
-        if len(data) < 13:
-            # Short packet = end-of-memo signal
-            _log("End-of-memo signal received.")
-            done.set()
-            return
-        # Record format (offsets from start of notification):
-        # 0:    uint8  block ID (0x35)
-        # 1-2:  uint16 record count/index
-        # 3-6:  uint32 unix timestamp
-        # 7-8:  int16  temp * 100 (°C)
-        # 9-10: uint16 humi * 100 (%)
-        # 11-12:uint16 battery voltage (mV)
-        _cnt  = struct.unpack_from("<H", data, 1)[0]
-        unix_ts = struct.unpack_from("<I", data, 3)[0]
-        raw_temp = struct.unpack_from("<h", data, 7)[0]
-        raw_humi = struct.unpack_from("<H", data, 9)[0]
-        vbat_mv  = struct.unpack_from("<H", data, 11)[0]
-        if unix_ts == 0:
-            return
-        temp_c   = raw_temp / 100.0
-        humidity = raw_humi / 100.0
-        ts_str   = datetime.datetime.fromtimestamp(unix_ts).strftime("%Y-%m-%d %H:%M:%S")
-        records.append({"ts": ts_str, "temp_c": temp_c, "humidity": humidity, "vbat_mv": vbat_mv})
+        vbat_mv  = struct.unpack_from("<H", data, 1)[0]
+        raw_temp = struct.unpack_from("<h", data, 3)[0]
+        raw_humi = struct.unpack_from("<H", data, 5)[0]
+        boot_min = struct.unpack_from("<H", data, 7)[0]
+        raw_records.append((vbat_mv, raw_temp / 100.0, raw_humi / 100.0, boot_min))
 
     # Scan first so BlueZ caches the device
     device = None
@@ -125,19 +117,35 @@ async def read_pvvx_history(
             # Subscribe to notifications
             _log(f"Subscribing to notifications on {_PVVX_CHAR}")
             await client.start_notify(_PVVX_CHAR, handle_notification)
-            # Request history: [0x33, count] — sensor streams newest-first, ends with short packet
+            # Request history: [0x33, count] — sensor streams records, ends when idle
             memo_cmd = bytes([_CMD_GET_MEMO, min(count, 255)])
             _log(f"Sending GetMemo: {memo_cmd.hex()} (requesting {min(count, 255)} records)")
             await client.write_gatt_char(_PVVX_CHAR, memo_cmd, response=False)
-            # Wait for end-of-memo signal, with idle_timeout fallback
-            try:
-                await asyncio.wait_for(done.wait(), timeout=idle_timeout + len(records) * 0.1 + 10)
-            except asyncio.TimeoutError:
-                _log(f"Timeout waiting for end-of-memo (got {len(records)} records so far)")
-            _log(f"Total bytes received: {raw_bytes_received[0]}, records parsed: {len(records)}")
+            # Wait until no new notifications for idle_timeout seconds
+            last_activity[0] = time.monotonic()
+            while True:
+                await asyncio.sleep(0.5)
+                if time.monotonic() - last_activity[0] >= idle_timeout:
+                    break
+            _log(f"Total bytes received: {raw_bytes_received[0]}, raw records: {len(raw_records)}")
             await client.stop_notify(_PVVX_CHAR)
     except (BleakError, asyncio.TimeoutError, Exception) as e:
         _log(f"Connection/GATT error: {type(e).__name__}: {e}")
         return []
 
+    if not raw_records:
+        return []
+
+    # Reconstruct absolute timestamps from "minutes since device boot".
+    # Records are sent oldest-first; the last record is the most recent (~now).
+    # boot_min increments by 1 per recording interval (1 minute here).
+    newest_boot_min = raw_records[-1][3]
+    query_epoch = time.time()
+    records = []
+    for vbat_mv, temp_c, humidity, boot_min in raw_records:
+        offset_secs = (newest_boot_min - boot_min) * 60
+        ts_str = datetime.datetime.fromtimestamp(query_epoch - offset_secs).strftime("%Y-%m-%d %H:%M:%S")
+        records.append({"ts": ts_str, "temp_c": temp_c, "humidity": humidity, "vbat_mv": vbat_mv})
+
+    _log(f"Reconstructed {len(records)} records, oldest: {records[0]['ts']}, newest: {records[-1]['ts']}")
     return records
