@@ -39,6 +39,7 @@ async def read_pvvx_history(
     address: str,
     timeout: float = 30.0,
     idle_timeout: float = 5.0,
+    verbose: bool = False,
 ) -> list[dict]:
     """Connect to a PVVX sensor, sync its clock, and read all stored history records.
 
@@ -47,12 +48,19 @@ async def read_pvvx_history(
     """
     from bleak import BleakClient, BleakError, BleakScanner
 
+    def _log(msg):
+        if verbose:
+            print(f"  [pvvx] {msg}")
+
     address = address.upper()
     records: list[dict] = []
     last_activity: list[float] = [0.0]  # mutable container so closure can update it
+    raw_bytes_received: list[int] = [0]
 
     def handle_notification(sender, data: bytearray):
         last_activity[0] = time.monotonic()
+        raw_bytes_received[0] += len(data)
+        _log(f"notification {len(data)} bytes: {data.hex()}")
         # Each notification may carry multiple 9-byte history records
         offset = 0
         while offset + 9 <= len(data):
@@ -69,6 +77,7 @@ async def read_pvvx_history(
 
     # Scan first so BlueZ caches the device
     device = None
+    _log(f"Scanning for {address} (up to 15s)...")
     try:
         async with BleakScanner() as scanner:
             deadline = asyncio.get_running_loop().time() + 15.0
@@ -80,24 +89,32 @@ async def read_pvvx_history(
                 if device:
                     break
                 await asyncio.sleep(0.5)
-    except (BleakError, Exception):
+    except (BleakError, Exception) as e:
+        _log(f"Scan error: {type(e).__name__}: {e}")
         return []
 
     if device is None:
+        _log("Device not found during scan.")
         return []
 
+    _log(f"Found: {device.name} — connecting...")
     try:
         async with BleakClient(device, timeout=timeout) as client:
+            _log("Connected. Services available:")
+            if verbose:
+                for svc in client.services:
+                    for ch in svc.characteristics:
+                        print(f"    {ch.uuid}  [{','.join(ch.properties)}]")
             # Sync RTC on the sensor
             now_epoch = int(time.time())
-            await client.write_gatt_char(
-                _PVVX_CHAR,
-                bytes([_CMD_SYNC_TIME]) + struct.pack("<I", now_epoch),
-                response=False,
-            )
+            sync_cmd = bytes([_CMD_SYNC_TIME]) + struct.pack("<I", now_epoch)
+            _log(f"Sending clock sync: {sync_cmd.hex()}")
+            await client.write_gatt_char(_PVVX_CHAR, sync_cmd, response=False)
             # Subscribe to notifications
+            _log(f"Subscribing to notifications on {_PVVX_CHAR}")
             await client.start_notify(_PVVX_CHAR, handle_notification)
             # Request full history dump
+            _log(f"Sending history request: {bytes([_CMD_GET_HIST]).hex()}")
             await client.write_gatt_char(_PVVX_CHAR, bytes([_CMD_GET_HIST]), response=False)
             # Poll until no new notifications arrive for idle_timeout seconds
             last_activity[0] = time.monotonic()
@@ -105,8 +122,10 @@ async def read_pvvx_history(
                 await asyncio.sleep(0.5)
                 if time.monotonic() - last_activity[0] >= idle_timeout:
                     break
+            _log(f"Idle timeout reached. Total bytes received: {raw_bytes_received[0]}, records parsed: {len(records)}")
             await client.stop_notify(_PVVX_CHAR)
-    except (BleakError, asyncio.TimeoutError, Exception):
+    except (BleakError, asyncio.TimeoutError, Exception) as e:
+        _log(f"Connection/GATT error: {type(e).__name__}: {e}")
         return []
 
     return records

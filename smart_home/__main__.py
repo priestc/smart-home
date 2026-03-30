@@ -1194,7 +1194,8 @@ def gatt_dump(sensor, mac_address):
 @main.command("pvvx-history")
 @click.argument("sensor")
 @click.option("--count", "-n", type=int, default=20, help="Number of most-recent records to show (default: 20). 0 = all.")
-def pvvx_history(sensor, count):
+@click.option("--verbose", "-v", is_flag=True, help="Show raw BLE communication details.")
+def pvvx_history(sensor, count, verbose):
     """Read and display PVVX internal history for a sensor.
 
     SENSOR can be a label name (e.g. 'outside-sun') or a MAC address.
@@ -1219,7 +1220,7 @@ def pvvx_history(sensor, count):
         click.echo(f"Resolved {sensor!r} → {address}")
 
     click.echo(f"Reading PVVX history for {label} ({address})...")
-    records = asyncio.run(_pvvx.read_pvvx_history(address))
+    records = asyncio.run(_pvvx.read_pvvx_history(address, verbose=verbose))
 
     if not records:
         click.echo("No history records returned (sensor not found or not PVVX firmware).")
