@@ -879,7 +879,14 @@ def monitor(duration, verbose, db, no_db):
         """Fetch PVVX sensor history and backfill the DB for the offline period."""
         log_ts = datetime.datetime.now().strftime("%H:%M:%S")
         click.echo(f"[{log_ts}] Backfilling PVVX history for {label} ({address})...")
-        records = await _pvvx.read_pvvx_history(address)
+        scanner = scanner_ref[0] if scanner_ref else None
+        if scanner:
+            await scanner.stop()
+        try:
+            records = await _pvvx.read_pvvx_history(address)
+        finally:
+            if scanner:
+                await scanner.start()
         if not records:
             click.echo(f"[{log_ts}] No PVVX history returned for {label}")
             return
@@ -1219,8 +1226,23 @@ def pvvx_history(sensor, count, verbose):
         label = sensor
         click.echo(f"Resolved {sensor!r} → {address}")
 
-    click.echo(f"Reading PVVX history for {label} ({address})...")
-    records = asyncio.run(_pvvx.read_pvvx_history(address, verbose=verbose))
+    import subprocess as _sp
+
+    # Stop the monitor service if it's running (it holds the BLE adapter)
+    svc_was_running = _sp.run(
+        ["sudo", "-n", "systemctl", "is-active", "--quiet", "smart-home.service"]
+    ).returncode == 0
+    if svc_was_running:
+        click.echo("Stopping smart-home.service...")
+        _sp.run(["sudo", "-n", "systemctl", "stop", "smart-home.service"], check=True)
+
+    try:
+        click.echo(f"Reading PVVX history for {label} ({address})...")
+        records = asyncio.run(_pvvx.read_pvvx_history(address, verbose=verbose))
+    finally:
+        if svc_was_running:
+            click.echo("Restarting smart-home.service...")
+            _sp.run(["sudo", "-n", "systemctl", "start", "smart-home.service"])
 
     if not records:
         click.echo("No history records returned (sensor not found or not PVVX firmware).")
