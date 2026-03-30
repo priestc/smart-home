@@ -28,10 +28,30 @@ async def read_batteries(addresses: list[str]) -> dict[str, int | None]:
 
 
 async def dump_gatt(address: str, timeout: float = 20.0) -> None:
-    """Connect directly to ADDRESS and print all GATT services and characteristics."""
-    print(f"  Connecting to {address} (timeout={timeout}s)...")
+    """Scan for ADDRESS then connect and print all GATT services and characteristics."""
+    from bleak import BleakScanner
+    address = address.upper()
+    print(f"  Scanning for {address} (up to 15s)...")
+    device = None
+    # Scan until we see the device advertise (needed so BlueZ caches it)
+    async with BleakScanner() as scanner:
+        deadline = asyncio.get_event_loop().time() + 15.0
+        while asyncio.get_event_loop().time() < deadline:
+            found = scanner.discovered_devices_and_advertisement_data
+            for dev, _ in found.values():
+                if dev.address.upper() == address:
+                    device = dev
+                    break
+            if device:
+                break
+            await asyncio.sleep(0.5)
+
+    if device is None:
+        print(f"  Device not found. Make sure it is nearby and advertising.")
+        return
+    print(f"  Found: {device.name} — connecting...")
     try:
-        async with BleakClient(address, timeout=timeout) as client:
+        async with BleakClient(device, timeout=timeout) as client:
             print(f"  Connected. Services:")
             for service in client.services:
                 print(f"    Service: {service.uuid}  ({service.description})")
