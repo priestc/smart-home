@@ -27,17 +27,11 @@ async def read_batteries(addresses: list[str]) -> dict[str, int | None]:
     return out
 
 
-async def dump_gatt(address: str, timeout: float = 15.0) -> None:
-    """Scan for device then connect and print all GATT services and characteristics."""
-    from bleak import BleakScanner
-    print(f"  Scanning to locate device (10s)...")
-    device = await BleakScanner.find_device_by_address(address, timeout=10.0)
-    if device is None:
-        print(f"  Device not found during scan. Make sure it's nearby and not connected to another device.")
-        return
-    print(f"  Found: {device.name} — attempting connection...")
+async def dump_gatt(address: str, timeout: float = 20.0) -> None:
+    """Connect directly to ADDRESS and print all GATT services and characteristics."""
+    print(f"  Connecting to {address} (timeout={timeout}s)...")
     try:
-        async with BleakClient(device, timeout=timeout) as client:
+        async with BleakClient(address, timeout=timeout) as client:
             print(f"  Connected. Services:")
             for service in client.services:
                 print(f"    Service: {service.uuid}  ({service.description})")
@@ -49,7 +43,6 @@ async def dump_gatt(address: str, timeout: float = 15.0) -> None:
                             val = await client.read_gatt_char(char.uuid)
                             print(f"        value: {val.hex()}  {list(val)}")
                         except Exception as e:
-                            print(f"        read error: {e}")
+                            print(f"        read error: {type(e).__name__}: {e}")
     except Exception as e:
-        print(f"  Connection failed: {e}")
-        print(f"  The device may use non-connectable advertising (common on Govee sensors).")
+        print(f"  Connection failed: {type(e).__name__}: {e}")
