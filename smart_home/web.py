@@ -2456,6 +2456,7 @@ def index():
     <a href="/events"            class="chart-link"><span class="cl-title">Temperature Events</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/process-stats"     class="chart-link"><span class="cl-title">Process Stats</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/camera"            class="chart-link"><span class="cl-title">Camera Zones</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
   </div>
 
   <div id="events-wrap" style="display:none">
@@ -2950,6 +2951,149 @@ init();
 @app.get("/camera")
 def camera_page():
     return Response(_CAMERA_PAGE, mimetype="text/html")
+
+
+# ---------------------------------------------------------------------------
+# Garage door
+# ---------------------------------------------------------------------------
+
+@app.get("/api/garage")
+def api_garage_list():
+    from smart_home import garage as _garage
+    return jsonify(_garage.load_config())
+
+
+@app.get("/api/garage/<name>/status")
+def api_garage_status(name):
+    from smart_home import garage as _garage
+    garages = _garage.load_config()
+    g = next((x for x in garages if x["name"] == name), None)
+    if g is None:
+        return ("Not found", 404)
+    try:
+        status = _garage.get_status(g["ip"])
+        return jsonify({"ok": True, "output": status.get("output", False)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.post("/api/garage/<name>/trigger")
+def api_garage_trigger(name):
+    from smart_home import garage as _garage
+    garages = _garage.load_config()
+    g = next((x for x in garages if x["name"] == name), None)
+    if g is None:
+        return ("Not found", 404)
+    try:
+        _garage.trigger(g["ip"], g.get("pulse_seconds", 0.5))
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+_GARAGE_PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Garage &mdash; Smart Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; color: #1a2535; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1.5rem; }
+    .nav a { font-size: .85rem; color: #2e7dd4; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .doors { display: flex; gap: 1.2rem; flex-wrap: wrap; }
+    .door-card { background: #fff; border-radius: 16px; padding: 1.8rem 2rem;
+                 box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05);
+                 display: flex; flex-direction: column; align-items: center; gap: 1.2rem;
+                 min-width: 220px; }
+    .door-name { font-size: 1rem; font-weight: 700; color: #1a2535; text-transform: uppercase;
+                 letter-spacing: .06em; }
+    .door-icon { font-size: 3.5rem; line-height: 1; }
+    .door-status { font-size: .82rem; color: #7a90a8; min-height: 1.2em; }
+    .trigger-btn { background: #e07820; color: #fff; border: none; border-radius: 10px;
+                   padding: .75rem 2rem; font-size: 1rem; font-weight: 700; cursor: pointer;
+                   letter-spacing: .02em; transition: background .15s, transform .1s;
+                   width: 100%; }
+    .trigger-btn:hover { background: #c86a18; }
+    .trigger-btn:active { transform: scale(.97); }
+    .trigger-btn:disabled { background: #aabbc8; cursor: default; }
+    .last-triggered { font-size: .75rem; color: #aabbc8; text-align: center; min-height: 1em; }
+    #no-garages { color: #7a90a8; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <h1>Garage Door</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div id="no-garages" style="display:none">
+    No garage doors configured. Run <code>smart-home configure-garage</code> on the server.
+  </div>
+  <div class="doors" id="doors"></div>
+<script>
+const lastTriggered = {};
+
+async function trigger(name, btn, lastEl) {
+  if (!confirm(`Trigger "${name}"?`)) return;
+  btn.disabled = true;
+  btn.textContent = "Triggering…";
+  try {
+    const r = await fetch(`/api/garage/${encodeURIComponent(name)}/trigger`, { method: "POST" });
+    const data = await r.json();
+    if (data.ok) {
+      lastTriggered[name] = new Date();
+      lastEl.textContent = "Triggered at " + new Date().toLocaleTimeString();
+    } else {
+      alert("Error: " + (data.error || "unknown"));
+    }
+  } catch(e) {
+    alert("Network error: " + e);
+  }
+  btn.disabled = false;
+  btn.textContent = "Trigger";
+}
+
+async function load() {
+  const garages = await fetch("/api/garage").then(r => r.json());
+  const el = document.getElementById("doors");
+  if (!garages.length) {
+    document.getElementById("no-garages").style.display = "";
+    return;
+  }
+  el.innerHTML = garages.map(g => `
+    <div class="door-card">
+      <div class="door-name">${g.name}</div>
+      <div class="door-icon">&#127968;</div>
+      <div class="door-status" id="status-${g.name}">Checking…</div>
+      <button class="trigger-btn" id="btn-${g.name}" onclick="trigger('${g.name}', this, document.getElementById('last-${g.name}'))">Trigger</button>
+      <div class="last-triggered" id="last-${g.name}"></div>
+    </div>`).join("");
+
+  for (const g of garages) {
+    fetch(`/api/garage/${encodeURIComponent(g.name)}/status`)
+      .then(r => r.json())
+      .then(data => {
+        const el = document.getElementById(`status-${g.name}`);
+        if (data.ok) {
+          el.textContent = "Shelly switch: " + (data.output ? "ON" : "off");
+        } else {
+          el.textContent = "⚠️ " + (data.error || "unreachable");
+        }
+      });
+  }
+}
+
+load();
+</script>
+</body>
+</html>"""
+
+
+@app.get("/garage")
+def garage_page():
+    return Response(_GARAGE_PAGE, mimetype="text/html")
 
 
 def run(db_path: str, host: str, port: int, debug: bool) -> None:

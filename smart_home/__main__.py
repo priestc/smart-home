@@ -15,6 +15,7 @@ from smart_home import pvvx as _pvvx
 from smart_home import presence as _presence
 from smart_home import push as _push
 from smart_home import camera as _camera
+from smart_home import garage as _garage
 from smart_home.battery import dump_gatt
 from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading
 
@@ -635,6 +636,41 @@ def configure_camera():
 
     _camera.save_config(cameras)
     click.echo("\nDone. Define motion zones at: http://<your-server>:5000/camera")
+
+
+@main.command("configure-garage")
+def configure_garage():
+    """Add or update a Shelly Gen3 garage door switch.
+
+    The Shelly should already be wired to the garage door button terminals.
+    Run this command to register its IP address and test the connection.
+    """
+    click.echo("\nGarage Door Setup\n")
+    name = click.prompt("Name (e.g. 'garage', 'left-bay')").strip()
+    ip   = click.prompt("Shelly IP address").strip()
+    pulse = click.prompt("Pulse duration in seconds", default=0.5, type=float)
+
+    click.echo(f"Testing connection to http://{ip}/...")
+    try:
+        status = _garage.get_status(ip)
+        state = "ON" if status.get("output") else "OFF"
+        click.echo(f"✓ Connected. Switch is currently {state}.")
+    except Exception as e:
+        click.echo(f"⚠️  Could not reach Shelly: {e}")
+        click.echo("   Saved anyway — check the IP and try again.")
+
+    garages = _garage.load_config()
+    existing = next((g for g in garages if g["name"] == name), None)
+    if existing:
+        existing["ip"] = ip
+        existing["pulse_seconds"] = pulse
+        click.echo(f"Updated '{name}'.")
+    else:
+        garages.append({"name": name, "ip": ip, "pulse_seconds": pulse})
+        click.echo(f"Added '{name}'.")
+
+    _garage.save_config(garages)
+    click.echo(f"\nDone. Control it at: http://<your-server>:5000/garage")
 
 
 @main.command("test-push")
