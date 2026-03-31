@@ -1735,7 +1735,7 @@ _SENSORS_PAGE = """\
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sensors &mdash; Smart Home</title>
+  <title>Sensor Battery Life &mdash; Smart Home</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
   <style>
@@ -1760,7 +1760,7 @@ _SENSORS_PAGE = """\
   </style>
 </head>
 <body>
-  <h1>Sensors</h1>
+  <h1>Sensor Battery Life</h1>
   <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="res-row">
     <label for="res">Resolution</label>
@@ -2425,7 +2425,7 @@ def index():
     <a href="/chart/temperature" class="chart-link"><span class="cl-title">Temperature</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/humidity"    class="chart-link"><span class="cl-title">Humidity</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/differential" class="chart-link"><span class="cl-title">Differentials</span><span class="cl-arrow">&#8594;</span></a>
-    <a href="/chart/sensors"     class="chart-link"><span class="cl-title">Sensors</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/chart/sensors"     class="chart-link"><span class="cl-title">Sensor Battery Life</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/signal"      class="chart-link"><span class="cl-title">Signal Strength</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/events"            class="chart-link"><span class="cl-title">Temperature Events</span><span class="cl-arrow">&#8594;</span></a>
   </div>
