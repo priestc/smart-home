@@ -2090,7 +2090,7 @@ _SIGNAL_PAGE = """\
       3 hour moving average
     </label>
   </div>
-  <div class="chart-wrap"><h2>RSSI (dBm)</h2><canvas id="chart" height="120"></canvas></div>
+  <div class="chart-wrap"><h2>RSSI (dBm) <small style="font-size:0.55em;color:#7a90a8;font-weight:normal">higher is better</small></h2><canvas id="chart" height="120"></canvas></div>
 <script>
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
 const colorMap = {};
