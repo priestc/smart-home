@@ -573,20 +573,56 @@ def configure_camera():
     use_ip = click.confirm("Build RTSP URL from IP address and credentials?", default=True)
     if use_ip:
         ip = click.prompt("Camera IP address (e.g. 192.168.1.100)").strip()
+
+        # Probe common ports before asking for credentials
+        PROBE_PORTS = [80, 443, 554, 8080, 8554, 37777]
+        click.echo(f"Probing {ip} for open ports {PROBE_PORTS}...")
+        open_ports = _camera.probe_ports(ip, PROBE_PORTS)
+        if not open_ports:
+            click.echo(f"⚠️  No response on any port — is {ip} reachable and powered on?")
+        else:
+            click.echo(f"   Open ports: {open_ports}")
+            if 554 not in open_ports and 8554 not in open_ports:
+                click.echo("   ⚠️  Neither 554 nor 8554 is open — RTSP may be disabled on this camera.")
+                click.echo("      Check the camera's app/web settings and enable RTSP streaming.")
+            if 80 in open_ports or 8080 in open_ports:
+                web_port = 80 if 80 in open_ports else 8080
+                click.echo(f"   ℹ️  Web interface may be at http://{ip}:{web_port}/")
+
         username = click.prompt("Username", default="admin").strip()
         password = click.prompt("Password", hide_input=True)
-        rtsp_url = _camera.build_rtsp_url(ip, username, password, subtype=1)
-        click.echo(f"RTSP URL: {rtsp_url}")
+
+        # Try subtype=1 first (sub stream), fall back to subtype=0 (main stream)
+        rtsp_port = 554 if (not open_ports or 554 in open_ports) else (8554 if 8554 in open_ports else 554)
+        rtsp_url = _camera.build_rtsp_url(ip, username, password, port=rtsp_port, subtype=1)
+        click.echo(f"\nRTSP URL (sub stream):  {rtsp_url}")
     else:
+        ip = None
         rtsp_url = click.prompt("Full RTSP URL").strip()
 
     click.echo("Testing connection (grabbing a frame)...")
-    frame = _camera.get_snapshot_jpeg(rtsp_url)
-    if frame is None:
-        click.echo("⚠️  Could not grab a frame — check the URL and credentials.")
-        click.echo("   Camera will be saved anyway; you can fix the URL and re-run.")
+    jpeg, err = _camera.get_snapshot_jpeg(rtsp_url)
+    if jpeg is None:
+        click.echo(f"⚠️  Sub stream failed: {err}")
+        if use_ip:
+            # Try main stream as fallback
+            rtsp_url_main = _camera.build_rtsp_url(ip, username, password, port=rtsp_port, subtype=0)
+            click.echo(f"   Trying main stream: {rtsp_url_main}")
+            jpeg, err = _camera.get_snapshot_jpeg(rtsp_url_main)
+            if jpeg is None:
+                click.echo(f"⚠️  Main stream also failed: {err}")
+                click.echo("\nPossible causes:")
+                click.echo("  • RTSP is disabled — enable it in the camera's settings (often under 'Video' or 'Network')")
+                click.echo("  • Wrong credentials")
+                click.echo("  • Camera uses a non-standard RTSP path")
+                click.echo("\nCamera will be saved anyway. Fix the issue and re-run configure-camera.")
+            else:
+                click.echo(f"✓ Main stream works ({len(jpeg)//1024} KB). Saving main-stream URL.")
+                rtsp_url = rtsp_url_main
+        else:
+            click.echo("   Camera will be saved anyway; you can fix the URL and re-run.")
     else:
-        click.echo(f"✓ Connected ({len(frame)//1024} KB snapshot).")
+        click.echo(f"✓ Connected ({len(jpeg)//1024} KB snapshot).")
 
     cameras = _camera.load_config()
     existing = next((c for c in cameras if c["name"] == name), None)

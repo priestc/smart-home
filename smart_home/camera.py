@@ -25,26 +25,48 @@ def save_config(cameras: list[dict]) -> None:
         json.dump(cameras, f, indent=2)
 
 
-def build_rtsp_url(ip: str, username: str, password: str, subtype: int = 1) -> str:
+def build_rtsp_url(ip: str, username: str, password: str, port: int = 554, subtype: int = 1) -> str:
     """Build a standard Amcrest RTSP URL. subtype=0 is main stream, 1 is sub stream."""
-    return f"rtsp://{username}:{password}@{ip}:554/cam/realmonitor?channel=1&subtype={subtype}"
+    return f"rtsp://{username}:{password}@{ip}:{port}/cam/realmonitor?channel=1&subtype={subtype}"
 
 
-def get_snapshot_jpeg(rtsp_url: str) -> bytes | None:
-    """Capture a single JPEG frame from the stream. Returns None on failure."""
+def probe_ports(ip: str, ports: list[int], timeout: float = 2.0) -> list[int]:
+    """Return list of TCP ports that are open on ip."""
+    import socket
+    open_ports = []
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            try:
+                s.connect((ip, port))
+                open_ports.append(port)
+            except (ConnectionRefusedError, OSError):
+                pass
+    return open_ports
+
+
+def get_snapshot_jpeg(rtsp_url: str) -> tuple[bytes | None, str | None]:
+    """Capture a single JPEG frame from the stream.
+    Returns (jpeg_bytes, None) on success or (None, error_message) on failure.
+    """
     try:
         import cv2
     except ImportError:
-        return None
+        return None, "opencv-python-headless is not installed"
+    import os
+    # Suppress verbose FFmpeg/OpenCV output — we'll surface errors ourselves
+    os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
     cap = cv2.VideoCapture(rtsp_url)
     if not cap.isOpened():
-        return None
+        return None, "VideoCapture could not open the URL"
     ret, frame = cap.read()
     cap.release()
     if not ret:
-        return None
+        return None, "Stream opened but no frame could be read"
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-    return bytes(buf) if ok else None
+    if not ok:
+        return None, "JPEG encode failed"
+    return bytes(buf), None
 
 
 class CameraWatcher:
