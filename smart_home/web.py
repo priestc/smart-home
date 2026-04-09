@@ -1249,7 +1249,7 @@ const colorMap = {};
 function labelColor(lbl) { return colorMap[lbl] ?? COLORS[0]; }
 let mode = "recent", rangeDays = 1, activeMonth = null, offsetMs = 0;
 const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-const isLocal = /^192\\.168\\./.test(location.hostname);
+const isLocal = /^192\\.168\\./.test(location.hostname) || /\\.local$/.test(location.hostname);
 let resolution = isLocal ? "max" : isMobile ? "low" : "medium";
 document.getElementById("res").value = resolution;
 const BUCKETS = {
