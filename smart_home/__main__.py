@@ -853,6 +853,41 @@ def monitor(duration, verbose, db, no_db):
     presence_addr_map: dict[str, str] = {}  # MAC address -> ble_name (for nameless adverts)
     PRESENCE_TIMEOUT = datetime.timedelta(minutes=5)
 
+    # Tracks which presence devices have already had their auto-open fired this
+    # "home" episode. Reset to empty when the device goes "away" again.
+    _auto_open_done: set[str] = set()
+
+    async def _auto_open_on_arrival(ble_name: str, label: str) -> None:
+        """Triggered immediately when a presence device is first seen after being away."""
+        loop = asyncio.get_running_loop()
+        log_ts = datetime.datetime.now().strftime("%H:%M:%S")
+        click.echo(f"[{log_ts}] Presence: {label} first seen — checking auto-open garages")
+        for g in _garage.load_config():
+            if not g.get("auto"):
+                continue
+            name, ip, pulse = g["name"], g["ip"], g.get("pulse_seconds", 0.5)
+            try:
+                status = await loop.run_in_executor(None, _garage.get_status, ip)
+                if status.get("door_closed") is True:
+                    await loop.run_in_executor(None, _garage.trigger, ip, pulse)
+                    log_ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    click.echo(f"[{log_ts}] Auto-opened garage '{name}' ({label} arrived)")
+            except Exception as e:
+                click.echo(f"[{log_ts}] Auto-open failed for '{name}': {e}")
+
+    def _fire_auto_open(ble_name: str) -> None:
+        """Fire the auto-open task once per arrival episode."""
+        if presence_state.get(ble_name, {}).get("status") != "away":
+            return
+        if ble_name in _auto_open_done:
+            return
+        _auto_open_done.add(ble_name)
+        label = presence_devices.get(ble_name, ble_name)
+        try:
+            asyncio.get_running_loop().create_task(_auto_open_on_arrival(ble_name, label))
+        except RuntimeError:
+            _auto_open_done.discard(ble_name)
+
     def on_device(device, adv):
         ble_name = device.name or adv.local_name or ""
         now = datetime.datetime.now()
@@ -861,6 +896,7 @@ def monitor(duration, verbose, db, no_db):
         if ble_name and ble_name in presence_devices:
             presence_addr_map[device.address] = ble_name
             presence_last_seen[ble_name] = now
+            _fire_auto_open(ble_name)
             if verbose:
                 click.echo(f"[presence] {ble_name!r} seen (by name, addr={device.address})")
             return
@@ -869,6 +905,7 @@ def monitor(duration, verbose, db, no_db):
         matched_name = presence_addr_map.get(device.address)
         if matched_name:
             presence_last_seen[matched_name] = now
+            _fire_auto_open(matched_name)
             if verbose:
                 click.echo(f"[presence] {matched_name!r} seen (by addr={device.address})")
             return
@@ -914,6 +951,7 @@ def monitor(duration, verbose, db, no_db):
                     ts = now.strftime("%H:%M:%S")
                     click.echo(f"[{ts}] Presence: {label} is {new_status}")
                     if new_status == "away":
+                        _auto_open_done.discard(ble_name)
                         _push.send_notification(
                             title="Left home",
                             body=f"{label} left home",
@@ -927,16 +965,6 @@ def monitor(duration, verbose, db, no_db):
                                         click.echo(f"[{ts}] Auto-closed garage '{g['name']}' ({label} left)")
                                 except Exception as e:
                                     click.echo(f"[{ts}] Auto-close failed for '{g['name']}': {e}")
-                    elif new_status == "home":
-                        for g in _garage.load_config():
-                            if g.get("auto"):
-                                try:
-                                    door_status = _garage.get_status(g["ip"])
-                                    if door_status.get("door_closed") is True:
-                                        _garage.trigger(g["ip"], g.get("pulse_seconds", 0.5))
-                                        click.echo(f"[{ts}] Auto-opened garage '{g['name']}' ({label} arrived)")
-                                except Exception as e:
-                                    click.echo(f"[{ts}] Auto-open failed for '{g['name']}': {e}")
                     _presence.append_history({
                         "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
                         "ble_name": ble_name,
