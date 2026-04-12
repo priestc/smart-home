@@ -39,6 +39,15 @@ def open_db(path: str) -> sqlite3.Connection:
             mem_mb      REAL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS garage_events (
+            id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts    TEXT NOT NULL,
+            name  TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('open','closed'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS garage_events_name_ts ON garage_events (name, ts DESC)")
     conn.commit()
     return conn
 

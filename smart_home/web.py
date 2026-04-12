@@ -2991,7 +2991,18 @@ def api_garage_status(name):
         return ("Not found", 404)
     try:
         status = _garage.get_status(g["ip"])
-        return jsonify({"ok": True, "output": status.get("output", False), "door_closed": status.get("door_closed")})
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT ts FROM garage_events WHERE name=? AND state='open' ORDER BY ts DESC LIMIT 1",
+                (name,),
+            ).fetchone()
+        last_opened = row["ts"] if row else None
+        return jsonify({
+            "ok": True,
+            "output": status.get("output", False),
+            "door_closed": status.get("door_closed"),
+            "last_opened": last_opened,
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -3115,7 +3126,12 @@ function applyStatus(name, data) {
   } else if (data.door_closed === false) {
     stateEl.textContent = "OPEN";
     stateEl.className = "door-state open";
-    if (!openSince[name]) openSince[name] = Date.now();
+    if (data.last_opened) {
+      // Server timestamp is local time ("YYYY-MM-DD HH:MM:SS"); parse as local
+      openSince[name] = new Date(data.last_opened.replace(" ", "T")).getTime();
+    } else if (!openSince[name]) {
+      openSince[name] = Date.now();
+    }
   } else {
     stateEl.textContent = "UNKNOWN";
     stateEl.className = "door-state unknown";

@@ -1386,6 +1386,38 @@ def monitor(duration, verbose, db, no_db):
                     click.echo(f"[{ts}] Event check failed: {e}")
             await asyncio.sleep(60)
 
+    garages_cfg = _garage.load_config()
+    _door_states: dict[str, bool | None] = {}  # name -> door_closed (True=closed, False=open)
+
+    async def garage_door_loop():
+        """Poll Shelly garage doors every 15s; log open/closed transitions to garage_events."""
+        if not garages_cfg or not conn:
+            return
+        while True:
+            now = datetime.datetime.now()
+            ts = now.strftime("%Y-%m-%d %H:%M:%S")
+            log_ts = now.strftime("%H:%M:%S")
+            for g in garages_cfg:
+                name = g["name"]
+                try:
+                    status = _garage.get_status(g["ip"])
+                    door_closed = status.get("door_closed")
+                    if door_closed is None:
+                        continue
+                    prev = _door_states.get(name)
+                    if prev != door_closed:
+                        _door_states[name] = door_closed
+                        state_str = "closed" if door_closed else "open"
+                        conn.execute(
+                            "INSERT INTO garage_events (ts, name, state) VALUES (?,?,?)",
+                            (ts, name, state_str),
+                        )
+                        conn.commit()
+                        click.echo(f"[{log_ts}] Garage '{name}': {state_str}")
+                except Exception as e:
+                    click.echo(f"[{log_ts}] Garage poll failed for '{name}': {e}")
+            await asyncio.sleep(15)
+
     cameras_cfg = _camera.load_config()
     camera_watchers: list[_camera.CameraWatcher] = []
     for cam in cameras_cfg:
@@ -1422,7 +1454,7 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
-        extra = [snapshot_loop(), check_events_loop(), process_stats_loop()]
+        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop()]
         if cameras_cfg:
             extra.append(camera_watch_loop())
         if presence_devices:
