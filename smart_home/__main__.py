@@ -872,6 +872,10 @@ def monitor(duration, verbose, db, no_db):
                     await loop.run_in_executor(None, _garage.trigger, ip, pulse)
                     log_ts = datetime.datetime.now().strftime("%H:%M:%S")
                     click.echo(f"[{log_ts}] Auto-opened garage '{name}' ({label} arrived)")
+                    _push.send_notification(
+                        title="Garage opening",
+                        body=f"Auto-opening '{name}' — {label} arrived",
+                    )
             except Exception as e:
                 click.echo(f"[{log_ts}] Auto-open failed for '{name}': {e}")
 
