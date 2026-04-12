@@ -66,11 +66,21 @@ def discover(subnet: str | None = None) -> list[dict]:
 
 
 def get_status(ip: str) -> dict:
-    """Return Shelly Gen3 Switch.GetStatus dict, e.g. {'output': False, 'apower': 0.0, ...}"""
+    """Return combined status from Shelly.GetStatus.
+
+    Returns dict with:
+      'output'     - bool, whether the relay switch is currently on
+      'door_closed'- bool, True = door closed, False = door open
+                     (input:0 state: True when magnetic contact is closed = door shut)
+    """
     import httpx
-    resp = httpx.get(f"http://{ip}/rpc/Switch.GetStatus?id=0", timeout=5)
+    resp = httpx.get(f"http://{ip}/rpc/Shelly.GetStatus", timeout=5)
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    return {
+        "output":      data.get("switch:0", {}).get("output", False),
+        "door_closed": data.get("input:0",  {}).get("state",  None),
+    }
 
 
 def trigger(ip: str, pulse_seconds: float = 0.5) -> None:

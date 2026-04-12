@@ -2991,7 +2991,7 @@ def api_garage_status(name):
         return ("Not found", 404)
     try:
         status = _garage.get_status(g["ip"])
-        return jsonify({"ok": True, "output": status.get("output", False)})
+        return jsonify({"ok": True, "output": status.get("output", False), "door_closed": status.get("door_closed")})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -3027,12 +3027,15 @@ _GARAGE_PAGE = """\
     .doors { display: flex; gap: 1.2rem; flex-wrap: wrap; }
     .door-card { background: #fff; border-radius: 16px; padding: 1.8rem 2rem;
                  box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05);
-                 display: flex; flex-direction: column; align-items: center; gap: 1.2rem;
-                 min-width: 220px; }
+                 display: flex; flex-direction: column; align-items: center; gap: 1rem;
+                 min-width: 220px; transition: box-shadow .2s; }
     .door-name { font-size: 1rem; font-weight: 700; color: #1a2535; text-transform: uppercase;
                  letter-spacing: .06em; }
-    .door-icon { font-size: 3.5rem; line-height: 1; }
-    .door-status { font-size: .82rem; color: #7a90a8; min-height: 1.2em; }
+    .door-state { font-size: 1.4rem; font-weight: 800; letter-spacing: .04em; padding: .3rem .9rem;
+                  border-radius: 8px; }
+    .door-state.closed { color: #1a7a4a; background: #e8fdf0; }
+    .door-state.open   { color: #c0392b; background: #fde8e8; }
+    .door-state.unknown { color: #7a90a8; background: #f0f4f8; }
     .trigger-btn { background: #e07820; color: #fff; border: none; border-radius: 10px;
                    padding: .75rem 2rem; font-size: 1rem; font-weight: 700; cursor: pointer;
                    letter-spacing: .02em; transition: background .15s, transform .1s;
@@ -3052,8 +3055,6 @@ _GARAGE_PAGE = """\
   </div>
   <div class="doors" id="doors"></div>
 <script>
-const lastTriggered = {};
-
 async function trigger(name, btn, lastEl) {
   if (!confirm(`Trigger "${name}"?`)) return;
   btn.disabled = true;
@@ -3062,8 +3063,8 @@ async function trigger(name, btn, lastEl) {
     const r = await fetch(`/api/garage/${encodeURIComponent(name)}/trigger`, { method: "POST" });
     const data = await r.json();
     if (data.ok) {
-      lastTriggered[name] = new Date();
       lastEl.textContent = "Triggered at " + new Date().toLocaleTimeString();
+      setTimeout(() => refreshStatus(name), 3000);
     } else {
       alert("Error: " + (data.error || "unknown"));
     }
@@ -3072,6 +3073,30 @@ async function trigger(name, btn, lastEl) {
   }
   btn.disabled = false;
   btn.textContent = "Trigger";
+}
+
+function applyStatus(name, data) {
+  const el = document.getElementById(`state-${name}`);
+  if (!data.ok) {
+    el.textContent = "⚠️ unreachable";
+    el.className = "door-state unknown";
+    return;
+  }
+  if (data.door_closed === true) {
+    el.textContent = "CLOSED";
+    el.className = "door-state closed";
+  } else if (data.door_closed === false) {
+    el.textContent = "OPEN";
+    el.className = "door-state open";
+  } else {
+    el.textContent = "UNKNOWN";
+    el.className = "door-state unknown";
+  }
+}
+
+async function refreshStatus(name) {
+  const data = await fetch(`/api/garage/${encodeURIComponent(name)}/status`).then(r => r.json());
+  applyStatus(name, data);
 }
 
 async function load() {
@@ -3084,27 +3109,17 @@ async function load() {
   el.innerHTML = garages.map(g => `
     <div class="door-card">
       <div class="door-name">${g.name}</div>
-      <div class="door-icon">&#127968;</div>
-      <div class="door-status" id="status-${g.name}">Checking…</div>
-      <button class="trigger-btn" id="btn-${g.name}" onclick="trigger('${g.name}', this, document.getElementById('last-${g.name}'))">Trigger</button>
+      <div class="door-state unknown" id="state-${g.name}">…</div>
+      <button class="trigger-btn" id="btn-${g.name}"
+        onclick="trigger('${g.name}', this, document.getElementById('last-${g.name}'))">Trigger</button>
       <div class="last-triggered" id="last-${g.name}"></div>
     </div>`).join("");
 
-  for (const g of garages) {
-    fetch(`/api/garage/${encodeURIComponent(g.name)}/status`)
-      .then(r => r.json())
-      .then(data => {
-        const el = document.getElementById(`status-${g.name}`);
-        if (data.ok) {
-          el.textContent = "Shelly switch: " + (data.output ? "ON" : "off");
-        } else {
-          el.textContent = "⚠️ " + (data.error || "unreachable");
-        }
-      });
-  }
+  for (const g of garages) refreshStatus(g.name);
 }
 
 load();
+setInterval(() => fetch("/api/garage").then(r => r.json()).then(gs => gs.forEach(g => refreshStatus(g.name))), 10000);
 </script>
 </body>
 </html>"""
