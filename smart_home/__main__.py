@@ -851,7 +851,7 @@ def monitor(duration, verbose, db, no_db):
     presence_last_seen: dict[str, datetime.datetime] = {}
     presence_state = _presence.load_state()
     presence_addr_map: dict[str, str] = {}  # MAC address -> ble_name (for nameless adverts)
-    PRESENCE_TIMEOUT = datetime.timedelta(minutes=5)
+    PRESENCE_TIMEOUT = datetime.timedelta(seconds=30)
 
     # Tracks which presence devices have already had their auto-open fired this
     # "home" episode. Reset to empty when the device goes "away" again.
