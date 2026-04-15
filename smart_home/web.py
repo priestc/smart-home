@@ -1775,11 +1775,14 @@ async function loadChart() {
     chart.options.scales.x.time.unit = "day";
   } else if (mode === "day" && activeDay) {
     const { year, month, day } = activeDay;
-    const { data, bytes } = await fetchJSON(`/api/history/day?year=${year}&month=${month}&day=${day}&bucket_minutes=${getBucket()}`);
-    totalBytes = bytes;
-    chart.data.datasets = buildSensorDatasets(data, [], false);
     const xMin = new Date(year, month - 1, day, 0, 0, 0);
     const xMax = new Date(year, month - 1, day, 23, 59, 59);
+    const [hist, evts] = await Promise.all([
+      fetchJSON(`/api/history?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`),
+      fetchJSON(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`),
+    ]);
+    totalBytes = hist.bytes + evts.bytes;
+    chart.data.datasets = buildSensorDatasets(hist.data, evts.data, false);
     chart.options.scales.x.min = xMin;
     chart.options.scales.x.max = xMax;
     chart.options.scales.x.time.unit = "hour";
