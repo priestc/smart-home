@@ -2562,6 +2562,14 @@ def index():
     .ev-badge.b-io   { background: #e8f4fd; color: #1a6db5; }
     .ev-detail { font-size: .85rem; color: #1a2535; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .ev-time   { font-size: .75rem; color: #aabbc8; white-space: nowrap; margin-left: auto; }
+    .garage-cards { display: flex; gap: 1rem; margin-bottom: 2rem; flex-wrap: wrap; }
+    .garage-card { background: #fff; border-radius: 12px; padding: 1.1rem 1.5rem; min-width: 160px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); text-decoration: none; color: inherit; display: block; }
+    .garage-card .label { font-size: 0.75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+    .garage-card .gstate { font-size: 1.6rem; font-weight: 800; margin: .25rem 0 .1rem; line-height: 1; }
+    .garage-card .gstate.closed { color: #2a9d6e; }
+    .garage-card .gstate.open   { color: #c0392b; }
+    .garage-card .gstate.unknown { color: #aabbc8; }
+    .garage-card .gtimer { font-size: 0.75rem; color: #c0392b; font-weight: 600; margin-top: .2rem; min-height: 1em; }
     .chart-links { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 2rem; }
     .chart-link { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; background: #fff; border-radius: 12px; padding: 1rem 1.5rem; min-width: 220px; text-decoration: none; color: #1a2535; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); transition: box-shadow .15s, transform .15s; }
     .chart-link:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12), 0 6px 18px rgba(0,0,0,.08); transform: translateY(-1px); }
@@ -2572,7 +2580,10 @@ def index():
 <body>
   <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a></h1>
 
-  <div class="cards" id="cards"></div>
+  <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem">
+    <div class="cards" id="cards" style="margin-bottom:0;flex-wrap:wrap;display:flex;gap:1rem"></div>
+    <div class="garage-cards" id="garage-cards" style="margin-bottom:0"></div>
+  </div>
   <div class="presence-cards" id="presence-cards"></div>
 
   <div class="section-title">Charts</div>
@@ -2650,12 +2661,56 @@ async function loadEvents() {
     </div>`;
   }).join("");
 }
+const garageOpenSince = {};  // name -> ms timestamp when last opened
+function fmtDur(ms) {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sc = s % 60;
+  if (h > 0) return `${h}h ${m}m ${sc}s`;
+  if (m > 0) return `${m}m ${sc}s`;
+  return `${sc}s`;
+}
+function tickGarageTimers() {
+  const now = Date.now();
+  for (const [name, since] of Object.entries(garageOpenSince)) {
+    const el = document.getElementById(`gtimer-${name}`);
+    if (el) el.textContent = "Open " + fmtDur(now - since);
+  }
+}
+setInterval(tickGarageTimers, 1000);
+async function loadGarage() {
+  const garages = await fetch("/api/garage").then(r => r.json());
+  if (!garages.length) return;
+  const results = await Promise.all(garages.map(g =>
+    fetch(`/api/garage/${encodeURIComponent(g.name)}/status`).then(r => r.json())
+      .then(s => ({ name: g.name, ...s })).catch(() => ({ name: g.name, ok: false }))
+  ));
+  const el = document.getElementById("garage-cards");
+  el.innerHTML = results.map(d => {
+    let stateClass = "unknown", stateText = "?";
+    if (d.ok) {
+      if (d.door_closed === true)  { stateClass = "closed"; stateText = "CLOSED"; }
+      else if (d.door_closed === false) { stateClass = "open"; stateText = "OPEN"; }
+    } else { stateText = "⚠"; }
+    if (d.door_closed === false && d.last_opened) {
+      garageOpenSince[d.name] = new Date(d.last_opened.replace(" ", "T")).getTime();
+    } else if (d.door_closed !== false) {
+      delete garageOpenSince[d.name];
+    }
+    return `<a href="/garage" class="garage-card">
+      <div class="label">${d.name}</div>
+      <div class="gstate ${stateClass}">${stateText}</div>
+      <div class="gtimer" id="gtimer-${d.name}"></div>
+    </a>`;
+  }).join("");
+}
 loadCurrent();
 loadPresence();
 loadEvents();
+loadGarage();
 setInterval(loadCurrent, 30000);
 setInterval(loadPresence, 30000);
 setInterval(loadEvents, 60000);
+setInterval(loadGarage, 15000);
 </script>
 </body>
 </html>"""
