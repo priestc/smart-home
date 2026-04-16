@@ -857,6 +857,10 @@ def monitor(duration, verbose, db, no_db):
     # "home" episode. Reset to empty when the device goes "away" again.
     _auto_open_done: set[str] = set()
 
+    # Tracks which garage door names were auto-closed on departure so that only
+    # those doors are re-opened on arrival (not doors the user left open manually).
+    _auto_closed_doors: set[str] = set()
+
     async def _auto_open_on_arrival(ble_name: str, label: str) -> None:
         """Triggered immediately when a presence device is first seen after being away."""
         loop = asyncio.get_running_loop()
@@ -866,10 +870,14 @@ def monitor(duration, verbose, db, no_db):
             if not g.get("auto"):
                 continue
             name, ip, pulse = g["name"], g["ip"], g.get("pulse_seconds", 0.5)
+            if name not in _auto_closed_doors:
+                click.echo(f"[{log_ts}] Skipping '{name}' — not auto-closed on departure")
+                continue
             try:
                 status = await loop.run_in_executor(None, _garage.get_status, ip)
                 if status.get("door_closed") is True:
                     await loop.run_in_executor(None, _garage.trigger, ip, pulse)
+                    _auto_closed_doors.discard(name)
                     log_ts = datetime.datetime.now().strftime("%H:%M:%S")
                     click.echo(f"[{log_ts}] Auto-opened garage '{name}' ({label} arrived)")
                     _push.send_notification(
@@ -956,6 +964,7 @@ def monitor(duration, verbose, db, no_db):
                     click.echo(f"[{ts}] Presence: {label} is {new_status}")
                     if new_status == "away":
                         _auto_open_done.discard(ble_name)
+                        _auto_closed_doors.clear()
                         _push.send_notification(
                             title="Left home",
                             body=f"{label} left home",
@@ -966,6 +975,7 @@ def monitor(duration, verbose, db, no_db):
                                     door_status = _garage.get_status(g["ip"])
                                     if door_status.get("door_closed") is False:
                                         _garage.trigger(g["ip"], g.get("pulse_seconds", 0.5))
+                                        _auto_closed_doors.add(g["name"])
                                         click.echo(f"[{ts}] Auto-closed garage '{g['name']}' ({label} left)")
                                         _push.send_notification(
                                             title="Garage closing",
