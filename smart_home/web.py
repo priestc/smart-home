@@ -3138,6 +3138,199 @@ def camera_page():
 
 
 # ---------------------------------------------------------------------------
+# Smart plugs
+# ---------------------------------------------------------------------------
+
+@app.get("/api/plugs/current")
+def api_plugs_current():
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT label, address, watts, volts, amps, energy_wh, power_factor, is_on, ts
+            FROM plug_readings
+            WHERE id IN (
+                SELECT MAX(id) FROM plug_readings WHERE label IS NOT NULL GROUP BY label
+            )
+            ORDER BY label
+        """).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.get("/api/plugs/history")
+def api_plugs_history():
+    label  = request.args.get("label")
+    start  = request.args.get("start")
+    end    = request.args.get("end")
+    bucket = max(1, request.args.get("bucket_minutes", 5, type=int))
+    limit  = min(int(request.args.get("limit", 2000)), 10000)
+    bucket_secs = bucket * 60
+    where, params = ["label IS NOT NULL", "watts IS NOT NULL"], []
+    if label: where.append("label = ?"); params.append(label)
+    if start: where.append("ts >= ?");   params.append(start)
+    if end:   where.append("ts <= ?");   params.append(end)
+    w = " WHERE " + " AND ".join(where)
+    sql = f"""
+        SELECT
+            strftime('%Y-%m-%d %H:%M:%S',
+                CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs},
+                'unixepoch') AS ts,
+            label,
+            ROUND(AVG(watts), 2)   AS watts,
+            ROUND(AVG(volts), 2)   AS volts,
+            ROUND(AVG(amps),  3)   AS amps,
+            ROUND(AVG(energy_wh), 1) AS energy_wh
+        FROM plug_readings{w}
+        GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, label
+        ORDER BY ts ASC LIMIT ?
+    """
+    params.append(limit)
+    with _conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+_PLUGS_PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Smart Plugs &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; color: #1a2535; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1.5rem; }
+    .nav a { font-size: .85rem; color: #2e7dd4; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .cards { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+    .card { background: #fff; border-radius: 12px; padding: 1.1rem 1.5rem; min-width: 200px;
+            box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .card .clabel { font-size: .75rem; color: #7a90a8; text-transform: uppercase;
+                    letter-spacing: .07em; font-weight: 600; margin-bottom: .4rem; }
+    .card .watts  { font-size: 2.2rem; font-weight: 700; color: #e07820; line-height: 1; margin-bottom: .3rem; }
+    .card .meta   { font-size: .8rem; color: #4a6080; line-height: 1.6; }
+    .card .ts     { font-size: .72rem; color: #aabbc8; margin-top: .4rem; }
+    .card .state  { display: inline-block; padding: .15rem .5rem; border-radius: 20px;
+                    font-size: .7rem; font-weight: 700; margin-bottom: .3rem; }
+    .state.on  { background: #e8fdf0; color: #1a7a4a; }
+    .state.off { background: #f0f4f8; color: #7a90a8; }
+    .chart-wrap { background: #fff; border-radius: 12px; padding: 1.4rem 1.4rem 1rem;
+                  margin-bottom: 1.5rem;
+                  box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .chart-wrap h2 { font-size: .85rem; color: #7a90a8; text-transform: uppercase;
+                     letter-spacing: .06em; font-weight: 600; margin-bottom: 1rem; }
+    .range-btns { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .range-btns button { background: #fff; color: #4a6080; border: 1px solid #d0dce8;
+                         border-radius: 6px; padding: .3rem .9rem; cursor: pointer;
+                         font-size: .85rem; font-weight: 500; transition: all .15s; }
+    .range-btns button:hover { background: #f0f4f8; }
+    .range-btns button.active { background: #e07820; color: #fff; border-color: #e07820; }
+    #no-plugs { color: #7a90a8; }
+  </style>
+</head>
+<body>
+  <h1>Smart Plugs</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div id="no-plugs" style="display:none">
+    No plugs configured. Run <code>smart-home configure-plug</code> on the server.
+  </div>
+  <div class="cards" id="cards"></div>
+  <div id="chart-section" style="display:none">
+    <div class="range-btns">
+      <button onclick="setRange(0.125)">3h</button>
+      <button onclick="setRange(1)" class="active">24h</button>
+      <button onclick="setRange(3)">3d</button>
+      <button onclick="setRange(7)">7d</button>
+    </div>
+    <div class="chart-wrap"><h2>Power (Watts)</h2><canvas id="chart-watts" height="120"></canvas></div>
+  </div>
+<script>
+const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085"];
+let rangeDays = 1;
+function localISO(d) {
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function setRange(days) {
+  rangeDays = days;
+  document.querySelectorAll(".range-btns button").forEach((b,i) =>
+    b.classList.toggle("active", [0.125,1,3,7][i] === days));
+  loadHistory();
+}
+const wattsChart = new Chart(document.getElementById("chart-watts"), {
+  type: "line", data: { datasets: [] },
+  options: {
+    animation: false, parsing: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: { legend: { labels: { color: "#4a6080" } } },
+    scales: {
+      x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" },
+           ticks: { color: "#7a90a8", maxTicksLimit: 12 }, grid: { color: "#e8eef4" } },
+      y: { min: 0, ticks: { color: "#7a90a8", callback: v => v + " W" }, grid: { color: "#e8eef4" } }
+    }
+  }
+});
+async function loadCurrent() {
+  const data = await fetch("/api/plugs/current").then(r => r.json());
+  const el = document.getElementById("cards");
+  if (!data.length) {
+    document.getElementById("no-plugs").style.display = "";
+    document.getElementById("chart-section").style.display = "none";
+    return;
+  }
+  document.getElementById("chart-section").style.display = "";
+  el.innerHTML = data.map((p, i) => {
+    const stateLabel = p.is_on ? "ON" : "OFF";
+    const stateClass = p.is_on ? "on" : "off";
+    return `<div class="card">
+      <div class="clabel">${p.label}</div>
+      <span class="state ${stateClass}">${stateLabel}</span>
+      <div class="watts">${p.watts != null ? p.watts.toFixed(1) : "—"} W</div>
+      <div class="meta">
+        ${p.volts != null ? p.volts.toFixed(1) + " V" : ""}
+        ${p.amps  != null ? "&nbsp;&middot;&nbsp;" + p.amps.toFixed(2) + " A" : ""}
+        ${p.energy_wh != null ? "<br>" + (p.energy_wh/1000).toFixed(3) + " kWh total" : ""}
+        ${p.power_factor != null ? "&nbsp;&middot;&nbsp;PF " + p.power_factor + "%" : ""}
+      </div>
+      <div class="ts">${new Date(p.ts).toLocaleString()}</div>
+    </div>`;
+  }).join("");
+}
+async function loadHistory() {
+  const bucket = ({0.125:1, 1:5, 3:15, 7:30})[rangeDays] || 5;
+  const xMin = new Date(Date.now() - rangeDays * 86400000);
+  const xMax = new Date();
+  const data = await fetch(
+    `/api/plugs/history?start=${localISO(xMin)}&end=${localISO(xMax)}&bucket_minutes=${bucket}&limit=8000`
+  ).then(r => r.json());
+  const labels = [...new Set(data.map(r => r.label))].sort();
+  const colorMap = Object.fromEntries(labels.map((l, i) => [l, COLORS[i % COLORS.length]]));
+  wattsChart.data.datasets = labels.map(lbl => ({
+    label: lbl,
+    data: data.filter(r => r.label === lbl).map(r => ({ x: new Date(r.ts), y: r.watts })),
+    borderColor: colorMap[lbl], backgroundColor: "transparent",
+    borderWidth: 1.5, pointRadius: 0, tension: 0,
+  }));
+  wattsChart.options.scales.x.min = xMin;
+  wattsChart.options.scales.x.max = xMax;
+  wattsChart.options.scales.x.time.unit = rangeDays <= 1 ? "hour" : "day";
+  wattsChart.update();
+}
+loadCurrent().then(loadHistory);
+setInterval(loadCurrent, 60000);
+setInterval(loadHistory, 60000);
+</script>
+</body>
+</html>"""
+
+
+@app.get("/plugs")
+def plugs_page():
+    return Response(_PLUGS_PAGE, mimetype="text/html")
+
+
 # Garage door
 # ---------------------------------------------------------------------------
 

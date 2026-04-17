@@ -40,6 +40,22 @@ def open_db(path: str) -> sqlite3.Connection:
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS plug_readings (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts           TEXT NOT NULL,
+            address      TEXT,
+            label        TEXT,
+            watts        REAL,
+            volts        REAL,
+            amps         REAL,
+            energy_wh    REAL,
+            power_factor INTEGER,
+            is_on        INTEGER,
+            UNIQUE(ts, label)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS plug_readings_label_ts ON plug_readings (label, ts DESC)")
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS garage_events (
             id    INTEGER PRIMARY KEY AUTOINCREMENT,
             ts    TEXT NOT NULL,
