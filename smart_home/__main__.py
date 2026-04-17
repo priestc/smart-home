@@ -767,6 +767,75 @@ def configure_plug(timeout):
     click.echo("Saved. Start 'smart-home monitor' to begin polling energy data.")
 
 
+@main.command("remove-camera")
+@click.argument("name")
+def remove_camera(name):
+    """Remove a camera by name."""
+    cameras = _camera.load_config()
+    before = len(cameras)
+    cameras = [c for c in cameras if c["name"] != name]
+    if len(cameras) == before:
+        click.echo(f"No camera named {name!r}. Configured cameras:")
+        for c in cameras:
+            click.echo(f"  {c['name']}")
+        return
+    _camera.save_config(cameras)
+    click.echo(f"Removed camera '{name}'.")
+
+
+@main.command("remove-garage")
+@click.argument("name")
+def remove_garage(name):
+    """Remove a garage door by name."""
+    garages = _garage.load_config()
+    before = len(garages)
+    garages = [g for g in garages if g["name"] != name]
+    if len(garages) == before:
+        click.echo(f"No garage named {name!r}. Configured garages:")
+        for g in garages:
+            click.echo(f"  {g['name']}")
+        return
+    _garage.save_config(garages)
+    click.echo(f"Removed garage '{name}'.")
+
+
+@main.command("remove-plug")
+@click.argument("label")
+def remove_plug(label):
+    """Remove a smart plug by label."""
+    plugs = _plug.load_config()
+    before = len(plugs)
+    plugs = [p for p in plugs if p.get("label") != label]
+    if len(plugs) == before:
+        click.echo(f"No plug with label {label!r}. Configured plugs:")
+        for p in plugs:
+            click.echo(f"  {p.get('label')}  ({p.get('address')})")
+        return
+    _plug.save_config(plugs)
+    click.echo(f"Removed plug '{label}'.")
+
+
+@main.command("remove-presence-device")
+@click.argument("name")
+def remove_presence_device(name):
+    """Remove a presence device by BLE name or display label."""
+    devices = _presence.load_devices()  # ble_name -> label
+    name_lower = name.lower()
+    match = next(
+        (ble for ble, label in devices.items()
+         if ble.lower() == name_lower or label.lower() == name_lower),
+        None,
+    )
+    if match is None:
+        click.echo(f"No presence device matching {name!r}. Registered devices:")
+        for ble, label in devices.items():
+            click.echo(f"  {label}  ({ble})")
+        return
+    label = devices.pop(match)
+    _presence.save_devices(devices)
+    click.echo(f"Removed presence device '{label}' ({match}).")
+
+
 @main.command("test-push")
 def test_push():
     """Send a test push notification to all registered devices."""

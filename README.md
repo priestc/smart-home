@@ -70,6 +70,40 @@ Labels saved.
 
 Labels are stored in `~/.config/smart-home/labels.json` and used by the monitor and web dashboard.
 
+To remove a temperature sensor:
+
+```bash
+smart-home unlabel <label-or-mac>
+# Add --purge to also delete its history from the database
+```
+
+---
+
+## Removing Devices
+
+Each device type has a dedicated remove command:
+
+| Command | What it removes |
+|---|---|
+| `smart-home unlabel <label-or-mac>` | Temperature/humidity sensor |
+| `smart-home remove-presence-device <name>` | Presence detection device |
+| `smart-home remove-garage <name>` | Garage door |
+| `smart-home remove-plug <label>` | Smart plug |
+| `smart-home remove-camera <name>` | IP camera |
+
+Example:
+
+```bash
+smart-home remove-camera "front door"
+smart-home remove-plug "washing machine"
+```
+
+After removing a device, restart the monitor service for the change to take effect:
+
+```bash
+sudo systemctl restart smart-home.service
+```
+
 ---
 
 ## Running the Monitor
