@@ -152,20 +152,35 @@ async def scan(
                     callback(reading)
 
     async def _run():
-        scanner = BleakScanner(detection_callback=detection_callback)
-        if scanner_ref is not None:
-            scanner_ref.append(scanner)
-        async with scanner:
-            coros = list(extra_tasks or [])
-            if duration is not None:
-                coros.append(asyncio.sleep(duration))
-                if coros:
-                    await asyncio.gather(*coros)
-            else:
-                async def _forever():
-                    while True:
-                        await asyncio.sleep(1)
-                coros.append(_forever())
-                await asyncio.gather(*coros)
+        # BlueZ can hold a stale scan registration for several seconds after a
+        # crash/restart. Retry with backoff until it clears.
+        for attempt in range(10):
+            try:
+                scanner = BleakScanner(detection_callback=detection_callback)
+                if scanner_ref is not None:
+                    if attempt == 0:
+                        scanner_ref.append(scanner)
+                    else:
+                        scanner_ref[0] = scanner
+                async with scanner:
+                    coros = list(extra_tasks or [])
+                    if duration is not None:
+                        coros.append(asyncio.sleep(duration))
+                        if coros:
+                            await asyncio.gather(*coros)
+                    else:
+                        async def _forever():
+                            while True:
+                                await asyncio.sleep(1)
+                        coros.append(_forever())
+                        await asyncio.gather(*coros)
+                return  # clean exit
+            except Exception as e:
+                if "InProgress" in str(e) or "Operation already in progress" in str(e):
+                    wait = 5 * (attempt + 1)
+                    print(f"BLE scanner busy (BlueZ stale registration), retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                else:
+                    raise
 
     await _run()
