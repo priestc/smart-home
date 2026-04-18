@@ -81,9 +81,9 @@ def delete_away_period(ble_name: str, start: str, end: str) -> int:
     """
     entries = load_history()
     before = len(entries)
-    # Normalise to bare seconds (strip sub-second and timezone)
-    start_s = start[:19]
-    end_s   = end[:19]
+    # Normalise to bare seconds, replacing T separator with space to match stored format
+    start_s = start[:19].replace("T", " ")
+    end_s   = end[:19].replace("T", " ")
     entries = [
         e for e in entries
         if not (
