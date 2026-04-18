@@ -1716,6 +1716,120 @@ def pvvx_history(sensor, count, verbose):
         prev_ts = ts_dt
 
 
+@main.command("backfill")
+@click.option("--start", default=None, help="Gap start timestamp (e.g. '2026-04-17 17:45:00'). Auto-detected if omitted.")
+@click.option("--end",   default=None, help="Gap end timestamp. Auto-detected if omitted.")
+@click.option("--db", default=DEFAULT_DB, show_default=True, help="SQLite database path.")
+def backfill(start, end, db):
+    """Pull stored history from PVVX sensors and fill a gap in the database.
+
+    Automatically detects the largest gap in readings for each PVVX sensor
+    and fetches its on-device history to fill it in. Govee sensors (H5074)
+    do not store history on-device; use 'smart-home import' with a Govee
+    app export for those.
+
+    The monitor service is stopped during the BLE connection and restarted
+    afterwards.
+    """
+    import subprocess as _sp
+
+    conn = open_db(db)
+    label_map  = _labels.load()
+    pvvx_addrs = _pvvx.load_addresses()
+
+    # Build list of PVVX sensors that have a label
+    pvvx_sensors = [
+        (addr, lbl)
+        for addr, lbl in label_map.items()
+        if addr.upper() in pvvx_addrs
+    ]
+
+    if not pvvx_sensors:
+        click.echo("No PVVX sensors registered. Run 'smart-home mark-pvvx <address>' first.")
+        conn.close()
+        return
+
+    # Auto-detect gap per sensor (largest contiguous run of missing minutes)
+    def detect_gap(label):
+        rows = conn.execute(
+            "SELECT ts FROM readings WHERE label=? ORDER BY ts DESC LIMIT 2000",
+            (label,),
+        ).fetchall()
+        if len(rows) < 2:
+            return None, None
+        # Walk from newest backwards looking for a jump > 5 minutes
+        for i in range(len(rows) - 1):
+            newer = datetime.datetime.strptime(rows[i][0],   "%Y-%m-%d %H:%M:%S")
+            older = datetime.datetime.strptime(rows[i+1][0], "%Y-%m-%d %H:%M:%S")
+            gap_minutes = (newer - older).total_seconds() / 60
+            if gap_minutes > 5:
+                return older, newer
+        return None, None
+
+    svc_was_running = _sp.run(
+        ["sudo", "-n", "systemctl", "is-active", "--quiet", "smart-home.service"]
+    ).returncode == 0
+    if svc_was_running:
+        click.echo("Stopping smart-home.service for BLE access...")
+        _sp.run(["sudo", "-n", "systemctl", "stop", "smart-home.service"], check=True)
+
+    total_inserted = 0
+    try:
+        for addr, label in pvvx_sensors:
+            # Determine gap window
+            if start and end:
+                gap_start = datetime.datetime.strptime(start, "%Y-%m-%d %H:%M:%S")
+                gap_end   = datetime.datetime.strptime(end,   "%Y-%m-%d %H:%M:%S")
+            else:
+                gap_start, gap_end = detect_gap(label)
+                if gap_start is None:
+                    click.echo(f"{label}: no gap detected, skipping.")
+                    continue
+                click.echo(f"{label}: detected gap {gap_start} → {gap_end} ({int((gap_end-gap_start).total_seconds()/60)} min)")
+
+            click.echo(f"{label} ({addr}): fetching on-device history...")
+            records = asyncio.run(_pvvx.read_pvvx_history(addr, count=255, verbose=False))
+
+            if not records:
+                click.echo(f"  No records returned — sensor not in range or not PVVX firmware.")
+                continue
+
+            records.sort(key=lambda r: r["ts"])
+            click.echo(f"  Sensor has {len(records)} records ({records[0]['ts']} → {records[-1]['ts']})")
+
+            start_str = gap_start.strftime("%Y-%m-%d %H:%M:%S")
+            end_str   = gap_end.strftime("%Y-%m-%d %H:%M:%S")
+            in_window = [r for r in records if start_str <= r["ts"] <= end_str]
+
+            if not in_window:
+                click.echo(f"  No records fall within the gap window — sensor may not store that far back.")
+                continue
+
+            inserted = 0
+            for r in in_window:
+                temp_f = round(r["temp_c"] * 9 / 5 + 32, 4)
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity) VALUES (?,?,?,?,?)",
+                    (r["ts"], addr, label, temp_f, r["humidity"]),
+                )
+                inserted += cur.rowcount
+            conn.commit()
+            total_inserted += inserted
+            click.echo(f"  Inserted {inserted} rows ({len(in_window)} in window).")
+
+    finally:
+        conn.close()
+        if svc_was_running:
+            click.echo("Restarting smart-home.service...")
+            _sp.run(["sudo", "-n", "systemctl", "start", "smart-home.service"])
+
+    click.echo(f"\nDone. Total rows inserted: {total_inserted}")
+    if any(lbl for addr, lbl in label_map.items() if addr.upper() not in pvvx_addrs):
+        govee = [lbl for addr, lbl in label_map.items() if addr.upper() not in pvvx_addrs]
+        click.echo(f"\nNote: {', '.join(govee)} are Govee sensors with no on-device history.")
+        click.echo("      Export from the Govee app and use 'smart-home import' to fill their gap.")
+
+
 @main.command("scan-all")
 @click.option("--timeout", "-t", type=float, default=15.0,
               help="Seconds to scan (default: 15).")
