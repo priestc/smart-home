@@ -103,6 +103,42 @@ sudo systemctl restart smart-home.service
 
 ---
 
+## Adding a Garage Door (Shelly Gen3)
+
+### Setup
+
+Wire the Shelly to your garage door button terminals, connect it to WiFi, then register it:
+
+```bash
+smart-home configure-garage
+```
+
+The command auto-scans the network for Shelly devices and walks you through setup.
+
+### Changing the IP address
+
+The garage door configuration lives on the server at:
+
+```
+~/.config/smart-home/garages.json
+```
+
+Edit that file directly to update the IP:
+
+```json
+[
+  {
+    "name": "garage",
+    "ip": "192.168.1.50",
+    "pulse_seconds": 0.5
+  }
+]
+```
+
+Or re-run `smart-home configure-garage` — it will auto-discover the new IP and overwrite the entry. No service restart is needed after changing the IP.
+
+---
+
 ## Adding a Camera (XIAO ESP32-S3 Sense)
 
 ### 1. Flash the firmware
