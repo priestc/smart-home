@@ -933,6 +933,7 @@ def monitor(duration, verbose, db, no_db):
     plug_devices: dict[str, tuple] = {}    # address -> (BLEDevice, ble_name)
     _plug_poll_active: set[str] = set()
     _plug_last_poll_ok: dict[str, datetime.datetime] = {}
+    _plug_last_poll_attempt: dict[str, datetime.datetime] = {}
     PLUG_POLL_COOLDOWN = datetime.timedelta(seconds=60)
     latest_plug_reading: dict[str, dict] = {}  # address -> reading dict
     scanner_ref: list = []
@@ -1033,9 +1034,10 @@ def monitor(duration, verbose, db, no_db):
         if _plug.is_h5086(device, adv) and device.address.upper() in plug_label_map:
             addr = device.address
             plug_devices[addr] = (device, ble_name)
-            last_ok = _plug_last_poll_ok.get(addr, datetime.datetime.min)
-            if addr not in _plug_poll_active and (now - last_ok) >= PLUG_POLL_COOLDOWN:
+            last_attempt = _plug_last_poll_attempt.get(addr, datetime.datetime.min)
+            if addr not in _plug_poll_active and (now - last_attempt) >= PLUG_POLL_COOLDOWN:
                 _plug_poll_active.add(addr)
+                _plug_last_poll_attempt[addr] = now
                 try:
                     asyncio.get_running_loop().create_task(_poll_plug(addr, adv))
                 except RuntimeError:
