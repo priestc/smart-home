@@ -1533,13 +1533,14 @@ def monitor(duration, verbose, db, no_db):
                         click.echo(f"[camera:{w.name}] {event[1]}")
                     elif event[0] == "motion":
                         zone_name, pct = event[1], event[2]
+                        screenshot = event[3] if len(event) > 3 else None
                         key = (w.name, zone_name)
                         now = datetime.datetime.now()
                         ts = now.strftime("%Y-%m-%d %H:%M:%S")
                         if conn:
                             conn.execute(
-                                "INSERT INTO camera_events (ts, camera, zone, pct) VALUES (?,?,?,?)",
-                                (ts, w.name, zone_name, pct),
+                                "INSERT INTO camera_events (ts, camera, zone, pct, screenshot) VALUES (?,?,?,?,?)",
+                                (ts, w.name, zone_name, pct, screenshot),
                             )
                             conn.commit()
                         if now - _camera_notify_times.get(key, datetime.datetime.min) >= CAMERA_COOLDOWN:

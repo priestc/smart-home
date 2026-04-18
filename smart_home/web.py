@@ -2924,10 +2924,22 @@ def api_cameras():
 def api_camera_events(name):
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT ts, zone, pct FROM camera_events WHERE camera=? ORDER BY ts DESC LIMIT 100",
+            "SELECT id, ts, zone, pct, screenshot IS NOT NULL AS has_image FROM camera_events WHERE camera=? ORDER BY ts DESC LIMIT 100",
             (name,),
         ).fetchall()
     return jsonify([dict(r) for r in rows])
+
+
+@app.get("/api/camera/events/<name>/<int:event_id>/image")
+def api_camera_event_image(name, event_id):
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT screenshot FROM camera_events WHERE id=? AND camera=?",
+            (event_id, name),
+        ).fetchone()
+    if not row or not row["screenshot"]:
+        return Response("No image", status=404)
+    return Response(bytes(row["screenshot"]), mimetype="image/jpeg")
 
 
 _CAMERA_VIEW_PAGE = """\
@@ -2971,11 +2983,34 @@ _CAMERA_VIEW_PAGE = """\
     td { padding: .5rem .6rem; border-bottom: 1px solid #f0f4f8; color: #4a6080; }
     td:first-child { color: #1a2535; }
     tr:last-child td { border-bottom: none; }
+    tr.has-image { cursor: pointer; }
+    tr.has-image:hover td { background: #f5f8fc; }
     .empty { color: #7a90a8; font-size: .85rem; }
     #no-cameras { color: #7a90a8; font-size: .9rem; }
+    .img-icon { font-size: .7rem; color: #2e7dd4; margin-left: .3rem; }
+    /* Modal */
+    #modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7);
+                     z-index: 1000; align-items: center; justify-content: center; }
+    #modal-overlay.open { display: flex; }
+    #modal-box { background: #fff; border-radius: 12px; padding: 1rem; max-width: 90vw;
+                 max-height: 90vh; overflow: auto; box-shadow: 0 8px 32px rgba(0,0,0,.3); }
+    #modal-box img { display: block; max-width: 100%; border-radius: 6px; }
+    #modal-meta { font-size: .8rem; color: #7a90a8; margin-bottom: .6rem; }
+    #modal-close { float: right; cursor: pointer; font-size: 1.2rem; color: #7a90a8;
+                   line-height: 1; margin-left: 1rem; }
+    #modal-close:hover { color: #1a2535; }
   </style>
 </head>
 <body>
+  <div id="modal-overlay" onclick="closeModal(event)">
+    <div id="modal-box">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.6rem">
+        <div id="modal-meta"></div>
+        <span id="modal-close" onclick="closeModal()">&times;</span>
+      </div>
+      <img id="modal-img" src="" alt="Motion screenshot">
+    </div>
+  </div>
   <h1>Cameras</h1>
   <div class="nav">
     <a href="/">&larr; Dashboard</a>
@@ -3034,14 +3069,38 @@ async function loadEvents() {
     wrap.innerHTML = '<p class="empty">No motion events recorded yet.</p>';
     return;
   }
-  wrap.innerHTML = `<table>
-    <thead><tr><th>Time</th><th>Zone</th><th>Changed</th></tr></thead>
-    <tbody>${data.map(e => `<tr>
+  const tbody = document.createElement("tbody");
+  data.forEach(e => {
+    const tr = document.createElement("tr");
+    if (e.has_image) {
+      tr.className = "has-image";
+      tr.onclick = () => openModal(e);
+    }
+    tr.innerHTML = `
       <td>${fmtDt(e.ts)}</td>
-      <td>${e.zone}</td>
-      <td>${e.pct != null ? e.pct.toFixed(1) + "%" : "—"}</td>
-    </tr>`).join("")}</tbody>
-  </table>`;
+      <td>${e.zone}${e.has_image ? '<span class="img-icon">&#128247;</span>' : ''}</td>
+      <td>${e.pct != null ? e.pct.toFixed(1) + "%" : "—"}</td>`;
+    tbody.appendChild(tr);
+  });
+  wrap.innerHTML = "";
+  const table = document.createElement("table");
+  table.innerHTML = "<thead><tr><th>Time</th><th>Zone</th><th>Changed</th></tr></thead>";
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+}
+
+function openModal(e) {
+  document.getElementById("modal-meta").textContent = `${fmtDt(e.ts)} — ${e.zone}`;
+  document.getElementById("modal-img").src =
+    `/api/camera/events/${encodeURIComponent(activeCam)}/${e.id}/image`;
+  document.getElementById("modal-overlay").classList.add("open");
+}
+
+function closeModal(evt) {
+  if (evt && evt.target !== document.getElementById("modal-overlay") &&
+      evt.target !== document.getElementById("modal-close")) return;
+  document.getElementById("modal-overlay").classList.remove("open");
+  document.getElementById("modal-img").src = "";
 }
 
 function switchCam(name) {
@@ -3076,6 +3135,10 @@ async function init() {
   });
   switchCam(cameras[0].name);
 }
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") closeModal();
+});
 
 init();
 </script>

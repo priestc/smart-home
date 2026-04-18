@@ -148,7 +148,8 @@ class CameraWatcher:
                 if pct >= threshold:
                     zone_streak[zname] = zone_streak.get(zname, 0) + 1
                     if zone_streak[zname] == self.STREAK_NEEDED:
-                        self.events.put(("motion", zname, round(pct * 100, 1)))
+                        _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                        self.events.put(("motion", zname, round(pct * 100, 1), buf.tobytes()))
                 else:
                     zone_streak[zname] = 0
 
