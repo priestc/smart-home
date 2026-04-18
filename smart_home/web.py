@@ -2972,9 +2972,10 @@ _CAMERA_PAGE = """\
     <div class="canvas-wrap">
       <canvas id="canvas"></canvas>
     </div>
-    <p class="hint">Click and drag on the frame to draw a motion zone. Click an existing zone to select it.</p>
+    <p class="hint" id="hint">Click on the frame to place polygon points. Click near the first point to close. Escape to cancel.</p>
     <div class="controls">
       <button class="btn" onclick="refreshFrame()">&#8635; Refresh Frame</button>
+      <button class="btn" id="btn-cancel" onclick="cancelDraw()" style="display:none">Cancel</button>
       <button class="btn danger" id="btn-delete" onclick="deleteSelected()" disabled>Delete Zone</button>
       <span class="sens-label">Sensitivity</span>
       <input id="sens" type="range" min="1" max="30" value="5" style="width:100px">
@@ -2988,7 +2989,10 @@ _CAMERA_PAGE = """\
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad"];
 let cameras = [], activeCam = null;
 let zones = [], selectedIdx = -1;
-let drawing = false, startX = 0, startY = 0, scaleX = 1, scaleY = 1;
+// Polygon drawing state
+let drawing = false, currentPoly = [], mousePos = null;
+const CLOSE_RADIUS = 0.02; // normalized distance to snap-close
+
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 const img = new Image();
@@ -2996,9 +3000,6 @@ const img = new Image();
 img.onload = () => {
   canvas.width  = img.naturalWidth;
   canvas.height = img.naturalHeight;
-  const dw = canvas.parentElement.offsetWidth;
-  scaleX = img.naturalWidth  / Math.min(dw, img.naturalWidth);
-  scaleY = img.naturalHeight / Math.min(dw, img.naturalWidth) * (img.naturalHeight / img.naturalWidth);
   redraw();
 };
 
@@ -3006,84 +3007,172 @@ document.getElementById("sens").oninput = function() {
   document.getElementById("sens-val").textContent = this.value + "%";
   if (selectedIdx >= 0) {
     zones[selectedIdx].sensitivity = parseFloat(this.value) / 100;
-    redraw();
   }
 };
 
 function clientToCanvas(e) {
   const r = canvas.getBoundingClientRect();
-  return {
-    x: (e.clientX - r.left) / r.width,
-    y: (e.clientY - r.top)  / r.height,
-  };
+  return [
+    (e.clientX - r.left) / r.width,
+    (e.clientY - r.top)  / r.height,
+  ];
 }
 
-canvas.addEventListener("mousedown", e => {
-  const p = clientToCanvas(e);
-  // Check if clicking existing zone
+function dist(ax, ay, bx, by) {
+  return Math.sqrt((ax - bx) ** 2 + (ay - by) ** 2);
+}
+
+function pointInPolygon(px, py, points) {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    const [xi, yi] = points[i], [xj, yj] = points[j];
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+      inside = !inside;
+  }
+  return inside;
+}
+
+canvas.addEventListener("mousemove", e => {
+  mousePos = clientToCanvas(e);
+  if (drawing) redraw();
+});
+
+canvas.addEventListener("mouseleave", () => { mousePos = null; });
+
+canvas.addEventListener("click", e => {
+  const [px, py] = clientToCanvas(e);
+
+  if (drawing) {
+    // Close polygon if near first point and have >= 3 points
+    if (currentPoly.length >= 3 && dist(px, py, currentPoly[0][0], currentPoly[0][1]) < CLOSE_RADIUS) {
+      finishPolygon();
+      return;
+    }
+    currentPoly.push([px, py]);
+    redraw();
+    return;
+  }
+
+  // Check if clicking an existing zone
   for (let i = zones.length - 1; i >= 0; i--) {
-    const z = zones[i];
-    if (p.x >= z.x && p.x <= z.x + z.width && p.y >= z.y && p.y <= z.y + z.height) {
-      selectedIdx = i;
-      document.getElementById("btn-delete").disabled = false;
-      document.getElementById("sens").value = Math.round((z.sensitivity || 0.05) * 100);
-      document.getElementById("sens-val").textContent = Math.round((z.sensitivity || 0.05) * 100) + "%";
-      redraw();
+    if (pointInPolygon(px, py, zones[i].points)) {
+      selectZone(i);
       return;
     }
   }
+
+  // Start new polygon
   drawing = true;
-  startX = p.x; startY = p.y;
+  currentPoly = [[px, py]];
   selectedIdx = -1;
   document.getElementById("btn-delete").disabled = true;
-});
-
-canvas.addEventListener("mousemove", e => {
-  if (!drawing) return;
-  const p = clientToCanvas(e);
+  document.getElementById("btn-cancel").style.display = "";
+  document.getElementById("hint").textContent = "Keep clicking to add points. Click near the first point (shown in white) to close the polygon.";
   redraw();
-  const x = Math.min(startX, p.x), y = Math.min(startY, p.y);
-  const w = Math.abs(p.x - startX), h = Math.abs(p.y - startY);
-  ctx.strokeStyle = COLORS[zones.length % COLORS.length];
-  ctx.lineWidth = 2 / canvas.getBoundingClientRect().width * canvas.width;
-  ctx.setLineDash([6, 3]);
-  ctx.strokeRect(x * canvas.width, y * canvas.height, w * canvas.width, h * canvas.height);
-  ctx.setLineDash([]);
 });
 
-canvas.addEventListener("mouseup", e => {
-  if (!drawing) return;
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") cancelDraw();
+  if ((e.key === "Enter" || e.key === "Return") && drawing && currentPoly.length >= 3) finishPolygon();
+});
+
+function cancelDraw() {
   drawing = false;
-  const p = clientToCanvas(e);
-  const x = Math.min(startX, p.x), y = Math.min(startY, p.y);
-  const w = Math.abs(p.x - startX), h = Math.abs(p.y - startY);
-  if (w < 0.01 || h < 0.01) return; // too small
+  currentPoly = [];
+  document.getElementById("btn-cancel").style.display = "none";
+  document.getElementById("hint").textContent = "Click on the frame to place polygon points. Click near the first point to close. Escape to cancel.";
+  redraw();
+}
+
+function finishPolygon() {
   const name = prompt("Zone name:", `zone-${zones.length + 1}`);
-  if (!name) return;
+  if (!name) { cancelDraw(); return; }
   const sens = parseFloat(document.getElementById("sens").value) / 100;
-  zones.push({ name, x, y, width: w, height: h, sensitivity: sens });
+  zones.push({ name, points: currentPoly.slice(), sensitivity: sens });
   selectedIdx = zones.length - 1;
   document.getElementById("btn-delete").disabled = false;
+  drawing = false;
+  currentPoly = [];
+  document.getElementById("btn-cancel").style.display = "none";
+  document.getElementById("hint").textContent = "Click on the frame to place polygon points. Click near the first point to close. Escape to cancel.";
   renderZoneList();
   redraw();
-});
+}
 
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(img, 0, 0);
-  const lw = 2 / canvas.getBoundingClientRect().width * canvas.width;
+  const cw = canvas.width, ch = canvas.height;
+  const lw = Math.max(1.5, cw / canvas.getBoundingClientRect().width * 1.5);
+
+  // Draw completed zones
   zones.forEach((z, i) => {
+    if (!z.points || z.points.length < 2) return;
     const color = COLORS[i % COLORS.length];
+    const sel = i === selectedIdx;
+    ctx.beginPath();
+    ctx.moveTo(z.points[0][0] * cw, z.points[0][1] * ch);
+    for (let k = 1; k < z.points.length; k++)
+      ctx.lineTo(z.points[k][0] * cw, z.points[k][1] * ch);
+    ctx.closePath();
+    ctx.fillStyle = color + (sel ? "55" : "33");
+    ctx.fill();
     ctx.strokeStyle = color;
-    ctx.lineWidth = lw * (i === selectedIdx ? 2.5 : 1.5);
-    ctx.setLineDash(i === selectedIdx ? [] : []);
-    ctx.strokeRect(z.x * canvas.width, z.y * canvas.height, z.width * canvas.width, z.height * canvas.height);
-    ctx.fillStyle = color + "33";
-    ctx.fillRect(z.x * canvas.width, z.y * canvas.height, z.width * canvas.width, z.height * canvas.height);
-    ctx.fillStyle = color;
-    ctx.font = `bold ${Math.max(12, lw * 6)}px system-ui`;
-    ctx.fillText(z.name, z.x * canvas.width + 4, z.y * canvas.height + Math.max(14, lw * 7));
+    ctx.lineWidth = sel ? lw * 2 : lw;
+    ctx.setLineDash([]);
+    ctx.stroke();
+    // Vertex dots
+    z.points.forEach(([px, py]) => {
+      ctx.beginPath();
+      ctx.arc(px * cw, py * ch, sel ? lw * 2.5 : lw * 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    });
+    // Label
+    const cx = z.points.reduce((s, p) => s + p[0], 0) / z.points.length;
+    const cy = z.points.reduce((s, p) => s + p[1], 0) / z.points.length;
+    ctx.fillStyle = "#fff";
+    ctx.font = `bold ${Math.max(12, lw * 5)}px system-ui`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(z.name, cx * cw, cy * ch);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
   });
+
+  // Draw in-progress polygon
+  if (drawing && currentPoly.length > 0) {
+    const color = COLORS[zones.length % COLORS.length];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lw;
+    ctx.setLineDash([6 * lw, 3 * lw]);
+    ctx.beginPath();
+    ctx.moveTo(currentPoly[0][0] * cw, currentPoly[0][1] * ch);
+    for (let k = 1; k < currentPoly.length; k++)
+      ctx.lineTo(currentPoly[k][0] * cw, currentPoly[k][1] * ch);
+    if (mousePos) ctx.lineTo(mousePos[0] * cw, mousePos[1] * ch);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Vertex dots; first one is white to show close target
+    currentPoly.forEach(([px, py], k) => {
+      ctx.beginPath();
+      ctx.arc(px * cw, py * ch, lw * 2.5, 0, Math.PI * 2);
+      ctx.fillStyle = k === 0 ? "#fff" : color;
+      ctx.fill();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      ctx.stroke();
+    });
+    // Snap indicator
+    if (mousePos && currentPoly.length >= 3 &&
+        dist(mousePos[0], mousePos[1], currentPoly[0][0], currentPoly[0][1]) < CLOSE_RADIUS) {
+      ctx.beginPath();
+      ctx.arc(currentPoly[0][0] * cw, currentPoly[0][1] * ch, lw * 5, 0, Math.PI * 2);
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = lw * 1.5;
+      ctx.stroke();
+    }
+  }
 }
 
 function renderZoneList() {
@@ -3091,11 +3180,12 @@ function renderZoneList() {
     <div class="zone-row" onclick="selectZone(${i})" style="cursor:pointer;outline:${i===selectedIdx?'2px solid '+COLORS[i%COLORS.length]:'none'}">
       <span class="zone-color" style="background:${COLORS[i % COLORS.length]}"></span>
       <span class="zone-name">${z.name}</span>
-      <span class="zone-sens">sensitivity: ${Math.round((z.sensitivity||0.05)*100)}%</span>
+      <span class="zone-sens">sensitivity: ${Math.round((z.sensitivity||0.05)*100)}%  &middot;  ${(z.points||[]).length} points</span>
     </div>`).join("");
 }
 
 function selectZone(i) {
+  if (drawing) return;
   selectedIdx = i;
   document.getElementById("btn-delete").disabled = false;
   document.getElementById("sens").value = Math.round((zones[i].sensitivity || 0.05) * 100);
@@ -3144,8 +3234,9 @@ function switchCam(name) {
   activeCam = name;
   document.querySelectorAll(".cam-tab").forEach(b => b.classList.toggle("active", b.dataset.cam === name));
   document.getElementById("editor").style.display = "";
-  zones = []; selectedIdx = -1;
+  zones = []; selectedIdx = -1; drawing = false; currentPoly = [];
   document.getElementById("btn-delete").disabled = true;
+  document.getElementById("btn-cancel").style.display = "none";
   refreshFrame();
   loadZones();
 }

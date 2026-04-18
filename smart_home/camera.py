@@ -121,15 +121,30 @@ class CameraWatcher:
 
             for zone in zones:
                 zname = zone["name"]
-                x1 = max(0, int(zone["x"] * w))
-                y1 = max(0, int(zone["y"] * h))
-                x2 = min(w, int((zone["x"] + zone["width"]) * w))
-                y2 = min(h, int((zone["y"] + zone["height"]) * h))
-                roi = fgmask[y1:y2, x1:x2]
-                if roi.size == 0:
-                    continue
-                pct = float(np.count_nonzero(roi)) / roi.size
                 threshold = float(zone.get("sensitivity", 0.05))
+
+                # Build a polygon mask from normalized points
+                points = zone.get("points")
+                if points and len(points) >= 3:
+                    pts = np.array([[int(px * w), int(py * h)] for px, py in points], dtype=np.int32)
+                    mask = np.zeros((h, w), dtype=np.uint8)
+                    cv2.fillPoly(mask, [pts], 255)
+                    total = int(np.count_nonzero(mask))
+                    if total == 0:
+                        continue
+                    roi_pixels = int(np.count_nonzero(fgmask & mask))
+                    pct = roi_pixels / total
+                else:
+                    # Legacy rectangle support
+                    x1 = max(0, int(zone.get("x", 0) * w))
+                    y1 = max(0, int(zone.get("y", 0) * h))
+                    x2 = min(w, int((zone.get("x", 0) + zone.get("width", 1)) * w))
+                    y2 = min(h, int((zone.get("y", 0) + zone.get("height", 1)) * h))
+                    roi = fgmask[y1:y2, x1:x2]
+                    if roi.size == 0:
+                        continue
+                    pct = float(np.count_nonzero(roi)) / roi.size
+
                 if pct >= threshold:
                     zone_streak[zname] = zone_streak.get(zname, 0) + 1
                     if zone_streak[zname] == self.STREAK_NEEDED:
