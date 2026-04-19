@@ -81,6 +81,15 @@ def open_db(path: str) -> sqlite3.Connection:
         conn.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS camera_temps (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts      TEXT NOT NULL,
+            camera  TEXT NOT NULL,
+            temp_c  REAL NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS camera_temps_camera_ts ON camera_temps (camera, ts DESC)")
     conn.commit()
     return conn
 

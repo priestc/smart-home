@@ -1520,6 +1520,34 @@ def monitor(duration, verbose, db, no_db):
     _camera_notify_times: dict[tuple, datetime.datetime] = {}
     CAMERA_COOLDOWN = datetime.timedelta(minutes=5)
 
+    async def camera_temp_loop():
+        """Poll each camera's /temp endpoint every 60s and store in camera_temps."""
+        import httpx as _httpx
+        await asyncio.sleep(5)  # let things settle on startup
+        while True:
+            for cam in cameras_cfg:
+                url = cam.get("url", "").rstrip("/") + "/temp"
+                try:
+                    r = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda u=url: _httpx.get(u, timeout=5.0)
+                    )
+                    r.raise_for_status()
+                    try:
+                        data = r.json()
+                        temp_c = float(data.get("temp") or data.get("temperature") or data.get("value"))
+                    except Exception:
+                        temp_c = float(r.text.strip())
+                    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    if conn:
+                        conn.execute(
+                            "INSERT INTO camera_temps (ts, camera, temp_c) VALUES (?,?,?)",
+                            (ts, cam["name"], temp_c),
+                        )
+                        conn.commit()
+                except Exception as e:
+                    click.echo(f"[camera-temp:{cam['name']}] {e}")
+            await asyncio.sleep(60)
+
     async def camera_watch_loop():
         while True:
             await asyncio.sleep(1)
@@ -1556,6 +1584,7 @@ def monitor(duration, verbose, db, no_db):
         extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop()]
         if cameras_cfg:
             extra.append(camera_watch_loop())
+            extra.append(camera_temp_loop())
         if presence_devices:
             extra.append(check_presence())
         if ecobee_cfg:

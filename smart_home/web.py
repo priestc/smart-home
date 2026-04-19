@@ -2954,6 +2954,17 @@ def api_camera_events(name):
     return jsonify([dict(r) for r in rows])
 
 
+@app.get("/api/camera/temp/<name>")
+def api_camera_temp(name):
+    days = request.args.get("days", 1, type=float)
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT ts, temp_c FROM camera_temps WHERE camera=? AND ts >= datetime('now', ?) ORDER BY ts ASC",
+            (name, f"-{days} days"),
+        ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
 @app.get("/api/camera/events/<name>/<int:event_id>/image")
 def api_camera_event_image(name, event_id):
     with _conn() as conn:
@@ -2973,6 +2984,8 @@ _CAMERA_VIEW_PAGE = """\
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Cameras &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
@@ -3058,6 +3071,17 @@ _CAMERA_VIEW_PAGE = """\
       <div class="section-title">Recent Motion Events</div>
       <div id="events-wrap"><p class="empty">Loading&hellip;</p></div>
     </div>
+    <div class="panel" id="temp-panel" style="display:none">
+      <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+        <span>Camera Temperature (&deg;C)</span>
+        <span id="temp-range-btns" style="display:flex;gap:.4rem">
+          <button onclick="loadTemp(0.125)" data-days="0.125" style="background:#fff;border:1px solid #d0dce8;border-radius:5px;padding:.2rem .6rem;cursor:pointer;font-size:.75rem;color:#4a6080">3h</button>
+          <button onclick="loadTemp(1)" data-days="1" style="background:#2e7dd4;border:1px solid #2e7dd4;border-radius:5px;padding:.2rem .6rem;cursor:pointer;font-size:.75rem;color:#fff">24h</button>
+          <button onclick="loadTemp(7)" data-days="7" style="background:#fff;border:1px solid #d0dce8;border-radius:5px;padding:.2rem .6rem;cursor:pointer;font-size:.75rem;color:#4a6080">7d</button>
+        </span>
+      </div>
+      <canvas id="temp-chart" height="100" style="margin-top:.8rem"></canvas>
+    </div>
   </div>
 
 <script>
@@ -3127,6 +3151,44 @@ function closeModal(evt) {
   document.getElementById("modal-img").src = "";
 }
 
+let tempChart = null, tempRangeDays = 1;
+
+async function loadTemp(days) {
+  if (!activeCam) return;
+  if (days !== undefined) {
+    tempRangeDays = days;
+    document.querySelectorAll("#temp-range-btns button").forEach(b => {
+      const active = parseFloat(b.dataset.days) === days;
+      b.style.background = active ? "#2e7dd4" : "#fff";
+      b.style.color = active ? "#fff" : "#4a6080";
+      b.style.borderColor = active ? "#2e7dd4" : "#d0dce8";
+    });
+  }
+  const data = await fetch(`/api/camera/temp/${encodeURIComponent(activeCam)}?days=${tempRangeDays}`).then(r => r.json());
+  const panel = document.getElementById("temp-panel");
+  if (!data.length) { panel.style.display = "none"; return; }
+  panel.style.display = "";
+  const pts = data.map(r => ({ x: new Date(r.ts), y: r.temp_c }));
+  if (tempChart) {
+    tempChart.data.datasets[0].data = pts;
+    tempChart.update();
+  } else {
+    tempChart = new Chart(document.getElementById("temp-chart"), {
+      type: "line",
+      data: { datasets: [{ data: pts, borderColor: "#e07820", backgroundColor: "transparent",
+                           borderWidth: 1.5, pointRadius: 0, tension: 0 }] },
+      options: {
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" },
+               grid: { color: "#f0f4f8" }, ticks: { color: "#7a90a8", maxTicksLimit: 8 } },
+          y: { grid: { color: "#f0f4f8" }, ticks: { color: "#7a90a8" } },
+        },
+      },
+    });
+  }
+}
+
 function switchCam(name) {
   activeCam = name;
   document.querySelectorAll(".cam-tab").forEach(b =>
@@ -3137,7 +3199,9 @@ function switchCam(name) {
   document.querySelector(".feed-actions button").textContent = "Pause";
   startLive();
   loadEvents();
+  loadTemp();
   setInterval(loadEvents, 30000);
+  setInterval(loadTemp, 60000);
 }
 
 async function init() {
