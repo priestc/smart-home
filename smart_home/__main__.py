@@ -1540,6 +1540,8 @@ def monitor(duration, verbose, db, no_db):
                     except Exception:
                         temp_c = float(text)
                     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    log_ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    click.echo(f"[{log_ts}] Camera temp {cam['name']}: {temp_c}°C")
                     if conn:
                         conn.execute(
                             "INSERT INTO camera_temps (ts, camera, temp_c) VALUES (?,?,?)",
@@ -1547,7 +1549,8 @@ def monitor(duration, verbose, db, no_db):
                         )
                         conn.commit()
                 except Exception as e:
-                    click.echo(f"[camera-temp:{cam['name']}] {e}")
+                    log_ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    click.echo(f"[{log_ts}] Camera temp {cam['name']} error: {e}")
             await asyncio.sleep(60)
 
     async def camera_watch_loop():
