@@ -1522,21 +1522,22 @@ def monitor(duration, verbose, db, no_db):
 
     async def camera_temp_loop():
         """Poll each camera's /temp endpoint every 60s and store in camera_temps."""
-        import httpx as _httpx
+        import urllib.request as _urllib_req
         await asyncio.sleep(5)  # let things settle on startup
         while True:
             for cam in cameras_cfg:
                 url = cam.get("url", "").rstrip("/") + "/temp"
                 try:
-                    r = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda u=url: _httpx.get(u, timeout=5.0)
-                    )
-                    r.raise_for_status()
+                    def _fetch(u=url):
+                        with _urllib_req.urlopen(u, timeout=5) as resp:
+                            return resp.read().decode().strip()
+                    text = await asyncio.get_event_loop().run_in_executor(None, _fetch)
                     try:
-                        data = r.json()
+                        import json as _json
+                        data = _json.loads(text)
                         temp_c = float(data.get("temp") or data.get("temperature") or data.get("value"))
                     except Exception:
-                        temp_c = float(r.text.strip())
+                        temp_c = float(text)
                     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     if conn:
                         conn.execute(
