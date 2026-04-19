@@ -74,6 +74,7 @@ class CameraWatcher:
     STREAK_NEEDED   = 3    # consecutive frames with motion before firing
     FRAME_INTERVAL  = 0.1  # seconds between snapshot requests (~10 fps)
     RECONNECT_WAIT  = 10   # seconds to wait after a fetch failure
+    WARMUP_SECONDS  = 30   # suppress motion events after connect/reconnect
 
     def __init__(self, camera: dict):
         self.name: str = camera["name"]
@@ -119,6 +120,7 @@ class CameraWatcher:
             history=300, varThreshold=40, detectShadows=False
         )
         zone_streak: dict[str, int] = {}
+        warmup_until = time.time() + self.WARMUP_SECONDS
 
         while not self._stop.is_set():
             # Fetch a frame
@@ -134,6 +136,9 @@ class CameraWatcher:
             except Exception as e:
                 self.events.put(("error", f"Snapshot failed for {self.name}: {e}"))
                 self._stop.wait(self.RECONNECT_WAIT)
+                # Reset warmup after any reconnect
+                warmup_until = time.time() + self.WARMUP_SECONDS
+                zone_streak.clear()
                 continue
 
             zones = self.zones
@@ -173,7 +178,7 @@ class CameraWatcher:
 
                 if pct >= threshold:
                     zone_streak[zname] = zone_streak.get(zname, 0) + 1
-                    if zone_streak[zname] == self.STREAK_NEEDED:
+                    if zone_streak[zname] == self.STREAK_NEEDED and time.time() >= warmup_until:
                         _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                         self.events.put(("motion", zname, round(pct * 100, 1), buf.tobytes()))
                 else:
