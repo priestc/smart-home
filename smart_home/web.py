@@ -1640,8 +1640,10 @@ function localISO(d) {
 }
 async function loadColors() {
   const data = await fetch("/api/current").then(r => r.json());
+  const reservedColors = new Set(Object.values(SENSOR_COLORS));
+  const roomColors = COLORS.filter(c => !reservedColors.has(c));
   data.map(s => s.label).filter(Boolean).sort()
-    .forEach((lbl, i) => { colorMap[lbl] = COLORS[i % COLORS.length]; });
+    .forEach((lbl, i) => { colorMap[lbl] = roomColors[i % roomColors.length]; });
   const indoorLabels = data.map(s => s.label).filter(l => l && isIndoorLabel(l)).sort();
   const sensorBtns = document.getElementById('sensor-btns');
   const existingRoomBtns = [...sensorBtns.querySelectorAll('button[data-room]')];
