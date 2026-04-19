@@ -1516,6 +1516,15 @@ def monitor(duration, verbose, db, no_db):
         w.start()
         camera_watchers.append(w)
         click.echo(f"Camera watcher started: {cam['name']} ({len(cam.get('zones', []))} zone(s))")
+        if cam.get("flipped"):
+            import httpx as _httpx_cam
+            base = cam["url"].rstrip("/")
+            try:
+                _httpx_cam.get(f"{base}/control?var=vflip&val=1", timeout=3)
+                _httpx_cam.get(f"{base}/control?var=hmirror&val=1", timeout=3)
+                click.echo(f"  Applied flip to {cam['name']}")
+            except Exception as e:
+                click.echo(f"  Could not apply flip to {cam['name']}: {e}")
 
     _camera_notify_times: dict[tuple, datetime.datetime] = {}
     CAMERA_COOLDOWN = datetime.timedelta(minutes=5)

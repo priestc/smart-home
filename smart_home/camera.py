@@ -44,7 +44,7 @@ def rotate_jpeg(jpeg_bytes: bytes, degrees: int) -> bytes:
     return enc.tobytes()
 
 
-def get_snapshot_jpeg(base_url: str, snapshot_path: str = "/snapshot", rotation: int = 0) -> tuple[bytes | None, str | None]:
+def get_snapshot_jpeg(base_url: str, snapshot_path: str = "/snapshot") -> tuple[bytes | None, str | None]:
     """Fetch a JPEG from GET <base_url><snapshot_path>.
 
     Returns (jpeg_bytes, None) on success or (None, error_message) on failure.
@@ -53,7 +53,7 @@ def get_snapshot_jpeg(base_url: str, snapshot_path: str = "/snapshot", rotation:
     try:
         r = httpx.get(f"{base_url.rstrip('/')}{snapshot_path}", timeout=5.0)
         r.raise_for_status()
-        return rotate_jpeg(r.content, rotation), None
+        return r.content, None
     except Exception as e:
         return None, str(e)
 

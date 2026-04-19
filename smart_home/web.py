@@ -2906,24 +2906,31 @@ def api_camera_snapshot(name):
     cam = next((c for c in cameras if c["name"] == name), None)
     if cam is None:
         return ("Camera not found", 404)
-    jpeg, err = _camera.get_snapshot_jpeg(
-        cam["url"], cam.get("snapshot_path", "/snapshot"), cam.get("rotation", 0)
-    )
+    jpeg, err = _camera.get_snapshot_jpeg(cam["url"], cam.get("snapshot_path", "/snapshot"))
     if jpeg is None:
         return (f"Could not grab frame: {err}", 502)
     return Response(jpeg, mimetype="image/jpeg")
 
 
-@app.post("/api/camera/rotate/<name>")
-def api_camera_rotate(name):
+@app.post("/api/camera/flip/<name>")
+def api_camera_flip(name):
+    import httpx
     from smart_home import camera as _camera
     cameras = _camera.load_config()
     cam = next((c for c in cameras if c["name"] == name), None)
     if cam is None:
         return ("Camera not found", 404)
-    cam["rotation"] = (cam.get("rotation", 0) + 90) % 360
+    flipped = not cam.get("flipped", False)
+    cam["flipped"] = flipped
     _camera.save_config(cameras)
-    return jsonify({"rotation": cam["rotation"]})
+    val = 1 if flipped else 0
+    base = cam["url"].rstrip("/")
+    try:
+        httpx.get(f"{base}/control?var=vflip&val={val}", timeout=3)
+        httpx.get(f"{base}/control?var=hmirror&val={val}", timeout=3)
+    except Exception:
+        pass
+    return jsonify({"flipped": flipped})
 
 
 @app.get("/api/camera/zones/<name>")
@@ -2955,7 +2962,7 @@ def api_camera_zones_set(name):
 def api_cameras():
     from smart_home import camera as _camera
     cameras = _camera.load_config()
-    return jsonify([{"name": c["name"], "zones": c.get("zones", [])} for c in cameras])
+    return jsonify([{"name": c["name"], "zones": c.get("zones", []), "flipped": c.get("flipped", False)} for c in cameras])
 
 
 @app.get("/api/camera/events/<name>")
@@ -3079,7 +3086,7 @@ _CAMERA_VIEW_PAGE = """\
       <div class="feed-actions">
         <span><span class="live-dot"></span>Live</span>
         <button class="btn" onclick="toggleLive()">Pause</button>
-        <button class="btn" onclick="rotateCam()">Rotate 90°</button>
+        <button class="btn" id="flip-btn" onclick="flipCam()">Flip 180°</button>
       </div>
     </div>
     <div class="panel">
@@ -3129,9 +3136,10 @@ function refreshFrame() {
     `/api/camera/snapshot/${encodeURIComponent(activeCam)}?t=${Date.now()}`;
 }
 
-async function rotateCam() {
+async function flipCam() {
   if (!activeCam) return;
-  await fetch(`/api/camera/rotate/${encodeURIComponent(activeCam)}`, { method: "POST" });
+  const data = await fetch(`/api/camera/flip/${encodeURIComponent(activeCam)}`, { method: "POST" }).then(r => r.json());
+  document.getElementById("flip-btn").textContent = data.flipped ? "Unflip" : "Flip 180°";
   refreshFrame();
 }
 
@@ -3230,6 +3238,8 @@ function switchCam(name) {
   document.getElementById("main").style.display = "";
   live = true;
   document.querySelector(".feed-actions button").textContent = "Pause";
+  const cam = cameras.find(c => c.name === name);
+  document.getElementById("flip-btn").textContent = cam && cam.flipped ? "Unflip" : "Flip 180°";
   startLive();
   loadEvents();
   loadVitals();
