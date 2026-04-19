@@ -1520,37 +1520,35 @@ def monitor(duration, verbose, db, no_db):
     _camera_notify_times: dict[tuple, datetime.datetime] = {}
     CAMERA_COOLDOWN = datetime.timedelta(minutes=5)
 
-    async def camera_temp_loop():
-        """Poll each camera's /temp endpoint every 60s and store in camera_temps."""
+    async def camera_vitals_loop():
+        """Poll each camera's /vitals endpoint every 60s and store in camera_vitals."""
         import httpx as _httpx
         await asyncio.sleep(5)  # let things settle on startup
         while True:
             for cam in cameras_cfg:
-                url = cam.get("url", "").rstrip("/") + "/temp"
+                url = cam.get("url", "").rstrip("/") + "/vitals"
                 try:
                     def _fetch(u=url):
                         r = _httpx.get(u, timeout=5.0)
                         r.raise_for_status()
-                        return r.text.strip()
-                    text = await asyncio.get_event_loop().run_in_executor(None, _fetch)
-                    try:
-                        import json as _json
-                        data = _json.loads(text)
-                        temp_c = float(data.get("temp") or data.get("temperature") or data.get("value"))
-                    except Exception:
-                        temp_c = float(text)
+                        return r.json()
+                    data = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+                    temp_c    = data.get("temperature_c")
+                    wifi_rssi = data.get("wifi_rssi_dbm")
+                    free_heap = data.get("free_heap_kb")
+                    uptime_s  = data.get("uptime_s")
                     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     log_ts = datetime.datetime.now().strftime("%H:%M:%S")
-                    click.echo(f"[{log_ts}] Camera temp {cam['name']}: {temp_c}°C")
+                    click.echo(f"[{log_ts}] Camera vitals {cam['name']}: {temp_c}°C  RSSI={wifi_rssi}dBm  heap={free_heap}KB  uptime={uptime_s}s")
                     if conn:
                         conn.execute(
-                            "INSERT INTO camera_temps (ts, camera, temp_c) VALUES (?,?,?)",
-                            (ts, cam["name"], temp_c),
+                            "INSERT INTO camera_vitals (ts, camera, temp_c, wifi_rssi, free_heap_kb, uptime_s) VALUES (?,?,?,?,?,?)",
+                            (ts, cam["name"], temp_c, wifi_rssi, free_heap, uptime_s),
                         )
                         conn.commit()
                 except Exception as e:
                     log_ts = datetime.datetime.now().strftime("%H:%M:%S")
-                    click.echo(f"[{log_ts}] Camera temp {cam['name']} error: {e}")
+                    click.echo(f"[{log_ts}] Camera vitals {cam['name']} error: {e}")
             await asyncio.sleep(60)
 
     async def camera_watch_loop():
@@ -1589,7 +1587,7 @@ def monitor(duration, verbose, db, no_db):
         extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop()]
         if cameras_cfg:
             extra.append(camera_watch_loop())
-            extra.append(camera_temp_loop())
+            extra.append(camera_vitals_loop())
         if presence_devices:
             extra.append(check_presence())
         if ecobee_cfg:

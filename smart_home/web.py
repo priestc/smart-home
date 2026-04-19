@@ -2954,12 +2954,12 @@ def api_camera_events(name):
     return jsonify([dict(r) for r in rows])
 
 
-@app.get("/api/camera/temp/<name>")
-def api_camera_temp(name):
+@app.get("/api/camera/vitals/<name>")
+def api_camera_vitals(name):
     days = request.args.get("days", 1, type=float)
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT ts, temp_c FROM camera_temps WHERE camera=? AND ts >= datetime('now', ?) ORDER BY ts ASC",
+            "SELECT ts, temp_c, wifi_rssi, free_heap_kb FROM camera_vitals WHERE camera=? AND ts >= datetime('now', ?) ORDER BY ts ASC",
             (name, f"-{days} days"),
         ).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -3071,16 +3071,21 @@ _CAMERA_VIEW_PAGE = """\
       <div class="section-title">Recent Motion Events</div>
       <div id="events-wrap"><p class="empty">Loading&hellip;</p></div>
     </div>
-    <div class="panel" id="temp-panel" style="display:none">
-      <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
-        <span>Camera Temperature (&deg;C)</span>
-        <span id="temp-range-btns" style="display:flex;gap:.4rem">
-          <button onclick="loadTemp(0.125)" data-days="0.125" style="background:#fff;border:1px solid #d0dce8;border-radius:5px;padding:.2rem .6rem;cursor:pointer;font-size:.75rem;color:#4a6080">3h</button>
-          <button onclick="loadTemp(1)" data-days="1" style="background:#2e7dd4;border:1px solid #2e7dd4;border-radius:5px;padding:.2rem .6rem;cursor:pointer;font-size:.75rem;color:#fff">24h</button>
-          <button onclick="loadTemp(7)" data-days="7" style="background:#fff;border:1px solid #d0dce8;border-radius:5px;padding:.2rem .6rem;cursor:pointer;font-size:.75rem;color:#4a6080">7d</button>
+    <div class="panel" id="vitals-panel" style="display:none">
+      <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem">
+        <span>Camera Vitals</span>
+        <span id="vitals-range-btns" style="display:flex;gap:.4rem">
+          <button onclick="loadVitals(0.125)" data-days="0.125" style="background:#fff;border:1px solid #d0dce8;border-radius:5px;padding:.2rem .6rem;cursor:pointer;font-size:.75rem;color:#4a6080">3h</button>
+          <button onclick="loadVitals(1)" data-days="1" style="background:#2e7dd4;border:1px solid #2e7dd4;border-radius:5px;padding:.2rem .6rem;cursor:pointer;font-size:.75rem;color:#fff">24h</button>
+          <button onclick="loadVitals(7)" data-days="7" style="background:#fff;border:1px solid #d0dce8;border-radius:5px;padding:.2rem .6rem;cursor:pointer;font-size:.75rem;color:#4a6080">7d</button>
         </span>
       </div>
-      <canvas id="temp-chart" height="100" style="margin-top:.8rem"></canvas>
+      <div style="font-size:.72rem;color:#7a90a8;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin-bottom:.3rem">Temperature (&deg;C)</div>
+      <canvas id="chart-temp" height="80"></canvas>
+      <div style="font-size:.72rem;color:#7a90a8;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin:.9rem 0 .3rem">WiFi Signal (dBm)</div>
+      <canvas id="chart-rssi" height="80"></canvas>
+      <div style="font-size:.72rem;color:#7a90a8;text-transform:uppercase;letter-spacing:.06em;font-weight:600;margin:.9rem 0 .3rem">Free Heap (KB)</div>
+      <canvas id="chart-heap" height="80"></canvas>
     </div>
   </div>
 
@@ -3151,42 +3156,49 @@ function closeModal(evt) {
   document.getElementById("modal-img").src = "";
 }
 
-let tempChart = null, tempRangeDays = 1;
+const vitalsCharts = {};
+let vitalsRangeDays = 1;
 
-async function loadTemp(days) {
+function makeVitalsChart(id, color) {
+  return new Chart(document.getElementById(id), {
+    type: "line",
+    data: { datasets: [{ data: [], borderColor: color, backgroundColor: "transparent",
+                         borderWidth: 1.5, pointRadius: 0, tension: 0 }] },
+    options: {
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" },
+             grid: { color: "#f0f4f8" }, ticks: { color: "#7a90a8", maxTicksLimit: 8 } },
+        y: { grid: { color: "#f0f4f8" }, ticks: { color: "#7a90a8" } },
+      },
+    },
+  });
+}
+
+async function loadVitals(days) {
   if (!activeCam) return;
   if (days !== undefined) {
-    tempRangeDays = days;
-    document.querySelectorAll("#temp-range-btns button").forEach(b => {
+    vitalsRangeDays = days;
+    document.querySelectorAll("#vitals-range-btns button").forEach(b => {
       const active = parseFloat(b.dataset.days) === days;
       b.style.background = active ? "#2e7dd4" : "#fff";
       b.style.color = active ? "#fff" : "#4a6080";
       b.style.borderColor = active ? "#2e7dd4" : "#d0dce8";
     });
   }
-  const data = await fetch(`/api/camera/temp/${encodeURIComponent(activeCam)}?days=${tempRangeDays}`).then(r => r.json());
-  const panel = document.getElementById("temp-panel");
+  const data = await fetch(`/api/camera/vitals/${encodeURIComponent(activeCam)}?days=${vitalsRangeDays}`).then(r => r.json());
+  const panel = document.getElementById("vitals-panel");
   if (!data.length) { panel.style.display = "none"; return; }
   panel.style.display = "";
-  const pts = data.map(r => ({ x: new Date(r.ts), y: r.temp_c }));
-  if (tempChart) {
-    tempChart.data.datasets[0].data = pts;
-    tempChart.update();
-  } else {
-    tempChart = new Chart(document.getElementById("temp-chart"), {
-      type: "line",
-      data: { datasets: [{ data: pts, borderColor: "#e07820", backgroundColor: "transparent",
-                           borderWidth: 1.5, pointRadius: 0, tension: 0 }] },
-      options: {
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" },
-               grid: { color: "#f0f4f8" }, ticks: { color: "#7a90a8", maxTicksLimit: 8 } },
-          y: { grid: { color: "#f0f4f8" }, ticks: { color: "#7a90a8" } },
-        },
-      },
-    });
+  if (!vitalsCharts.temp) {
+    vitalsCharts.temp = makeVitalsChart("chart-temp", "#e07820");
+    vitalsCharts.rssi = makeVitalsChart("chart-rssi", "#2e7dd4");
+    vitalsCharts.heap = makeVitalsChart("chart-heap", "#2a9d6e");
   }
+  vitalsCharts.temp.data.datasets[0].data = data.map(r => ({ x: new Date(r.ts), y: r.temp_c }));
+  vitalsCharts.rssi.data.datasets[0].data = data.map(r => ({ x: new Date(r.ts), y: r.wifi_rssi }));
+  vitalsCharts.heap.data.datasets[0].data = data.map(r => ({ x: new Date(r.ts), y: r.free_heap_kb }));
+  Object.values(vitalsCharts).forEach(c => c.update());
 }
 
 function switchCam(name) {
@@ -3199,9 +3211,9 @@ function switchCam(name) {
   document.querySelector(".feed-actions button").textContent = "Pause";
   startLive();
   loadEvents();
-  loadTemp();
+  loadVitals();
   setInterval(loadEvents, 30000);
-  setInterval(loadTemp, 60000);
+  setInterval(loadVitals, 60000);
 }
 
 async function init() {
