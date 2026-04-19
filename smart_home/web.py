@@ -2948,7 +2948,7 @@ def api_cameras():
 def api_camera_events(name):
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT id, ts, zone, pct, screenshot IS NOT NULL AS has_image FROM camera_events WHERE camera=? ORDER BY ts DESC LIMIT 100",
+            "SELECT id, ts, zone, pct, screenshot IS NOT NULL AS has_image FROM camera_events WHERE camera=? ORDER BY ts DESC LIMIT 10",
             (name,),
         ).fetchall()
     return jsonify([dict(r) for r in rows])
