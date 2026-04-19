@@ -1351,6 +1351,19 @@ _TEMP_PAGE = """\
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
 const colorMap = {};
 function labelColor(lbl) { return colorMap[lbl] ?? COLORS[0]; }
+const SENSOR_COLORS = { 'outside-sun': '#e07820', 'outside-shade': '#2e7dd4', 'indoor-avg': '#2a9d6e' };
+function modeColor(m) { return SENSOR_COLORS[m] ?? colorMap[m] ?? COLORS[0]; }
+function hexToRgb(hex) { return [parseInt(hex.slice(1,3),16),parseInt(hex.slice(3,5),16),parseInt(hex.slice(5,7),16)]; }
+function applyBtnColor(btn, color, active) {
+  const [r,g,b] = hexToRgb(color);
+  if (active) {
+    btn.style.background = color; btn.style.borderColor = color; btn.style.color = '#fff';
+  } else {
+    btn.style.background = `rgba(${r},${g},${b},0.1)`;
+    btn.style.borderColor = `rgba(${r},${g},${b},0.35)`;
+    btn.style.color = color;
+  }
+}
 let mode = "recent", rangeDays = 1, activeMonth = null, activeDay = null, offsetMs = 0;
 const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 const isLocal = /^192\\.168\\./.test(location.hostname) || /\\.local$/.test(location.hostname);
@@ -1380,6 +1393,7 @@ function setSensorMode(mode, btn) {
     activeModes.add(mode);
     btn.classList.add('active');
   }
+  applyBtnColor(btn, modeColor(mode), activeModes.has(mode));
   loadChart();
 }
 
@@ -1642,8 +1656,16 @@ async function loadColors() {
       if (activeModes.has(lbl)) btn.classList.add('active');
       const diffBtn = document.getElementById('btn-diff');
       sensorBtns.insertBefore(btn, diffBtn);
+      applyBtnColor(btn, modeColor(lbl), activeModes.has(lbl));
     });
+  } else {
+    existingRoomBtns.forEach(b => applyBtnColor(b, modeColor(b.dataset.room), activeModes.has(b.dataset.room)));
   }
+  // Apply colors to static sensor buttons
+  [['btn-outside-sun','outside-sun'],['btn-outside-shade','outside-shade'],['btn-indoor-avg','indoor-avg']].forEach(([id,m]) => {
+    const btn = document.getElementById(id);
+    if (btn) applyBtnColor(btn, modeColor(m), activeModes.has(m));
+  });
 }
 function shiftView(dir) {
   offsetMs += dir * rangeDays * 86400000;
