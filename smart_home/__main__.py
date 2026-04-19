@@ -1522,15 +1522,27 @@ def monitor(duration, verbose, db, no_db):
 
     async def camera_temp_loop():
         """Poll each camera's /temp endpoint every 60s and store in camera_temps."""
-        import urllib.request as _urllib_req
+        import http.client as _http_client
+        from urllib.parse import urlparse as _urlparse
         await asyncio.sleep(5)  # let things settle on startup
         while True:
             for cam in cameras_cfg:
                 url = cam.get("url", "").rstrip("/") + "/temp"
                 try:
                     def _fetch(u=url):
-                        with _urllib_req.urlopen(u, timeout=5) as resp:
-                            return resp.read().decode().strip()
+                        p = _urlparse(u)
+                        c = _http_client.HTTPConnection(p.hostname, p.port or 80, timeout=5)
+                        try:
+                            c.request("GET", p.path or "/")
+                            try:
+                                resp = c.getresponse()
+                                return resp.read().decode().strip()
+                            except _http_client.BadStatusLine as bsl:
+                                # ESP32 sends plain text with no HTTP framing;
+                                # the "status line" is the actual body.
+                                return bsl.line.strip()
+                        finally:
+                            c.close()
                     text = await asyncio.get_event_loop().run_in_executor(None, _fetch)
                     try:
                         import json as _json
