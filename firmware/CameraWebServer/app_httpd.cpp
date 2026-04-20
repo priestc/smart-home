@@ -26,6 +26,7 @@
 #include "driver/temp_sensor.h"
 
 #include "driver/temperature_sensor.h" // Note the 'ure' in temperature
+#include "WiFi.h"
 
 
 esp_err_t vitals_handler(httpd_req_t *req) {
