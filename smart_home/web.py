@@ -3224,10 +3224,16 @@ async function loadVitals(days) {
     vitalsCharts.rssi = makeVitalsChart("chart-rssi", "#2e7dd4");
     vitalsCharts.heap = makeVitalsChart("chart-heap", "#2a9d6e");
   }
-  vitalsCharts.temp.data.datasets[0].data = data.map(r => ({ x: new Date(r.ts), y: r.temp_c }));
-  vitalsCharts.rssi.data.datasets[0].data = data.map(r => ({ x: new Date(r.ts), y: r.wifi_rssi }));
-  vitalsCharts.heap.data.datasets[0].data = data.map(r => ({ x: new Date(r.ts), y: r.free_heap_kb }));
-  Object.values(vitalsCharts).forEach(c => c.update());
+  const now = new Date();
+  const minTime = new Date(now - vitalsRangeDays * 86400000);
+  vitalsCharts.temp.data.datasets[0].data = data.map(r => ({ x: new Date(r.ts.replace(' ', 'T')), y: r.temp_c }));
+  vitalsCharts.rssi.data.datasets[0].data = data.map(r => ({ x: new Date(r.ts.replace(' ', 'T')), y: r.wifi_rssi }));
+  vitalsCharts.heap.data.datasets[0].data = data.map(r => ({ x: new Date(r.ts.replace(' ', 'T')), y: r.free_heap_kb }));
+  Object.values(vitalsCharts).forEach(c => {
+    c.options.scales.x.min = minTime;
+    c.options.scales.x.max = now;
+    c.update();
+  });
 }
 
 function switchCam(name) {
