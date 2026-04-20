@@ -53,6 +53,36 @@ esp_err_t temp_handler(httpd_req_t *req){
     return httpd_resp_send(req, ts.c_str(), ts.length());
 }
 
+esp_err_t vitals_handler(httpd_req_t *req) {
+    float tsens_out = 0.0;
+    temperature_sensor_handle_t temp_sensor = NULL;
+    temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 80);
+
+    if (temperature_sensor_install(&temp_sensor_config, &temp_sensor) == ESP_OK) {
+        temperature_sensor_enable(temp_sensor);
+        temperature_sensor_get_celsius(temp_sensor, &tsens_out);
+        temperature_sensor_disable(temp_sensor);
+        temperature_sensor_uninstall(temp_sensor);
+    }
+
+    uint32_t free_heap = esp_get_free_heap_size();
+    uint32_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    int8_t rssi = WiFi.RSSI();
+    uint32_t uptime_sec = millis() / 1000;
+
+    String json = "{";
+    json += "\"uptime_s\":" + String(uptime_sec) + ",";
+    json += "\"temperature_c\":" + String(tsens_out, 2) + ",";
+    json += "\"wifi_rssi_dbm\":" + String(rssi) + ",";
+    json += "\"free_heap_kb\":" + String(free_heap / 1024) + ",";
+    json += "\"free_psram_kb\":" + String(free_psram / 1024);
+    json += "}";
+
+    httpd_resp_set_status(req, "200 OK");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json.c_str(), json.length());
+}
+
 #if defined(ARDUINO_ARCH_ESP32) && defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
 #endif
@@ -713,6 +743,13 @@ void startCameraServer() {
     .user_ctx  = NULL
   };
 
+  httpd_uri_t vitals_uri = {
+    .uri       = "/vitals",
+    .method    = HTTP_GET,
+    .handler   = vitals_handler,
+    .user_ctx  = NULL
+  };
+
   httpd_uri_t index_uri = {
     .uri = "/",
     .method = HTTP_GET,
@@ -872,6 +909,7 @@ void startCameraServer() {
     httpd_register_uri_handler(camera_httpd, &pll_uri);
     httpd_register_uri_handler(camera_httpd, &win_uri);
     httpd_register_uri_handler(camera_httpd, &temp_uri);
+    httpd_register_uri_handler(camera_httpd, &vitals_uri);
   }
 
   config.server_port += 1;
