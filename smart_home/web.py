@@ -3192,17 +3192,29 @@ function closeModal(evt) {
 const vitalsCharts = {};
 let vitalsRangeDays = 1;
 
-function makeVitalsChart(id, color) {
+function fmtUptime(s) {
+  if (s == null) return "";
+  if (s < 120)        return s + "s";
+  if (s < 7200)       return Math.round(s / 60) + "m";
+  if (s < 172800)     return (s / 3600).toFixed(1) + "h";
+  return (s / 86400).toFixed(1) + "d";
+}
+
+function makeVitalsChart(id, color, yTickCb) {
+  const yTicks = yTickCb ? { color: "#7a90a8", callback: yTickCb } : { color: "#7a90a8" };
+  const yTooltip = yTickCb ? {
+    plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => fmtUptime(ctx.parsed.y) } } }
+  } : { plugins: { legend: { display: false } } };
   return new Chart(document.getElementById(id), {
     type: "line",
     data: { datasets: [{ data: [], borderColor: color, backgroundColor: "transparent",
                          borderWidth: 1.5, pointRadius: 0, tension: 0 }] },
     options: {
-      plugins: { legend: { display: false } },
+      ...yTooltip,
       scales: {
         x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" },
              grid: { color: "#f0f4f8" }, ticks: { color: "#7a90a8", maxTicksLimit: 8 } },
-        y: { grid: { color: "#f0f4f8" }, ticks: { color: "#7a90a8" } },
+        y: { grid: { color: "#f0f4f8" }, ticks: yTicks },
       },
     },
   });
@@ -3227,7 +3239,7 @@ async function loadVitals(days) {
     vitalsCharts.temp   = makeVitalsChart("chart-temp",   "#e07820");
     vitalsCharts.rssi   = makeVitalsChart("chart-rssi",   "#2e7dd4");
     vitalsCharts.heap   = makeVitalsChart("chart-heap",   "#2a9d6e");
-    vitalsCharts.uptime = makeVitalsChart("chart-uptime", "#9b4dca");
+    vitalsCharts.uptime = makeVitalsChart("chart-uptime", "#9b4dca", fmtUptime);
     vitalsCharts.psram  = makeVitalsChart("chart-psram",  "#c0392b");
   }
   const now = new Date();
