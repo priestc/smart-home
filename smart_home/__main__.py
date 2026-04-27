@@ -63,50 +63,29 @@ def label_sensors(timeout):
         click.echo("\nLabels saved.")
 
 
-@main.command("unlabel")
-@click.argument("sensor")
-@click.option("--purge", is_flag=True, help="Also delete all DB readings for this sensor.")
-@click.option("--db", default=DEFAULT_DB, show_default=True, help="SQLite database path.")
-def unlabel(sensor, purge, db):
-    """Remove a sensor by label name or MAC address.
-
-    SENSOR can be a label (e.g. 'Outside') or a MAC address.
-    """
+def _remove_ble_sensor(name, purge, db):
     label_map = _labels.load()
-
-    # Find the entry — match by address or label (case-insensitive)
-    sensor_lower = sensor.lower()
+    name_lower = name.lower()
     match_addr = next(
         (addr for addr, lbl in label_map.items()
-         if addr.lower() == sensor_lower or lbl.lower() == sensor_lower),
+         if addr.lower() == name_lower or lbl.lower() == name_lower),
         None,
     )
-
     if match_addr is None:
-        click.echo(f"No sensor found matching {sensor!r}.")
-        click.echo("Current labels:")
-        for addr, lbl in label_map.items():
-            click.echo(f"  {lbl}  ({addr})")
-        return
-
-    label_name = label_map[match_addr]
-    click.echo(f"Removing sensor: {label_name} ({match_addr})")
-
-    del label_map[match_addr]
+        return False
+    lbl = label_map.pop(match_addr)
     _labels.save(label_map)
-    click.echo("Removed from labels.")
-
+    click.echo(f"Removed BLE sensor '{lbl}' ({match_addr}).")
     if purge:
         conn = open_db(db)
         deleted = conn.execute(
             "DELETE FROM readings WHERE address = ? OR label = ?",
-            (match_addr, label_name),
+            (match_addr, lbl),
         ).rowcount
         conn.commit()
         conn.close()
         click.echo(f"Purged {deleted} readings from database.")
-    else:
-        click.echo("Tip: pass --purge to also delete its readings from the database.")
+    return True
 
 
 DEVICE_CATEGORIES = {
@@ -767,57 +746,69 @@ def configure_garage():
     click.echo(f"\nDone. Control it at: http://<your-server>:5000/garage")
 
 
-@main.command("remove-camera")
+@main.command("remove-device")
 @click.argument("name")
-def remove_camera(name):
-    """Remove a camera by name."""
-    cameras = _camera.load_config()
-    before = len(cameras)
-    cameras = [c for c in cameras if c["name"] != name]
-    if len(cameras) == before:
-        click.echo(f"No camera named {name!r}. Configured cameras:")
-        for c in cameras:
-            click.echo(f"  {c['name']}")
-        return
-    _camera.save_config(cameras)
-    click.echo(f"Removed camera '{name}'.")
+@click.option("--purge", is_flag=True, help="Also delete DB readings (BLE sensors only).")
+@click.option("--db", default=DEFAULT_DB, show_default=True, help="SQLite database path.")
+def remove_device(name, purge, db):
+    """Remove a registered device by name. Works for all device types."""
+    from smart_home import ecobee as _ecobee
+    from smart_home import homeassistant as _ha
 
-
-@main.command("remove-garage")
-@click.argument("name")
-def remove_garage(name):
-    """Remove a garage door by name."""
-    garages = _garage.load_config()
-    before = len(garages)
-    garages = [g for g in garages if g["name"] != name]
-    if len(garages) == before:
-        click.echo(f"No garage named {name!r}. Configured garages:")
-        for g in garages:
-            click.echo(f"  {g['name']}")
-        return
-    _garage.save_config(garages)
-    click.echo(f"Removed garage '{name}'.")
-
-
-@main.command("remove-presence-device")
-@click.argument("name")
-def remove_presence_device(name):
-    """Remove a presence device by BLE name or display label."""
-    devices = _presence.load_devices()  # ble_name -> label
     name_lower = name.lower()
+    removed = []
+
+    if _remove_ble_sensor(name, purge, db):
+        removed.append("BLE sensor")
+
+    ecobee_cfg = _ecobee.load_config()
+    if ecobee_cfg and ecobee_cfg.get("label", "").lower() == name_lower:
+        _ecobee.CONFIG_PATH.unlink(missing_ok=True)
+        click.echo(f"Removed Ecobee thermostat '{ecobee_cfg['label']}'.")
+        removed.append("thermostat")
+
+    ha_cfg = _ha.load_config()
+    if ha_cfg and ha_cfg.get("label", "").lower() == name_lower:
+        _ha.CONFIG_PATH.unlink(missing_ok=True)
+        click.echo(f"Removed Home Assistant thermostat '{ha_cfg['label']}'.")
+        removed.append("thermostat")
+
+    plugs = _smart_plug.load_config()
+    new_plugs = [p for p in plugs if p.get("name", "").lower() != name_lower]
+    if len(new_plugs) < len(plugs):
+        _smart_plug.save_config(new_plugs)
+        click.echo(f"Removed smart plug '{name}'.")
+        removed.append("smart plug")
+
+    cameras = _camera.load_config()
+    new_cameras = [c for c in cameras if c.get("name", "").lower() != name_lower]
+    if len(new_cameras) < len(cameras):
+        _camera.save_config(new_cameras)
+        click.echo(f"Removed camera '{name}'.")
+        removed.append("camera")
+
+    garages = _garage.load_config()
+    new_garages = [g for g in garages if g.get("name", "").lower() != name_lower]
+    if len(new_garages) < len(garages):
+        _garage.save_config(new_garages)
+        click.echo(f"Removed garage '{name}'.")
+        removed.append("garage")
+
+    presence = _presence.load_devices()
     match = next(
-        (ble for ble, label in devices.items()
-         if ble.lower() == name_lower or label.lower() == name_lower),
+        (ble for ble, lbl in presence.items()
+         if ble.lower() == name_lower or lbl.lower() == name_lower),
         None,
     )
-    if match is None:
-        click.echo(f"No presence device matching {name!r}. Registered devices:")
-        for ble, label in devices.items():
-            click.echo(f"  {label}  ({ble})")
-        return
-    label = devices.pop(match)
-    _presence.save_devices(devices)
-    click.echo(f"Removed presence device '{label}' ({match}).")
+    if match is not None:
+        lbl = presence.pop(match)
+        _presence.save_devices(presence)
+        click.echo(f"Removed presence device '{lbl}' ({match}).")
+        removed.append("presence device")
+
+    if not removed:
+        click.echo(f"No device found matching {name!r}.")
+        click.echo("Run 'smart-home list-devices' to see all registered devices.")
 
 
 @main.command("test-push")
