@@ -18,7 +18,7 @@ from smart_home import camera as _camera
 from smart_home import garage as _garage
 from smart_home import smart_plug as _smart_plug
 from smart_home.battery import dump_gatt
-from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading
+from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading, insert_plug_reading
 
 DEFAULT_DB = os.path.expanduser("~/.local/share/smart-home/readings.db")
 
@@ -1645,6 +1645,34 @@ def monitor(duration, verbose, db, no_db):
                             )
                             click.echo(f"[{now.strftime('%H:%M:%S')}] Motion in {w.name}/{zone_name} ({pct}%)")
 
+    plugs_cfg = _smart_plug.load_config()
+
+    async def poll_smart_plugs_loop():
+        POLL_INTERVAL = 30
+        for p in plugs_cfg:
+            click.echo(f"Smart plug configured: {p['name']} ({p['device']}) at {p['ip']}")
+        while True:
+            for p in plugs_cfg:
+                try:
+                    loop = asyncio.get_running_loop()
+                    reading = await loop.run_in_executor(None, _smart_plug.fetch_reading, p["ip"])
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    click.echo(
+                        f"[{ts}] Plug '{p['name']}' ({p['device']}): "
+                        f"{reading['watts']}W  {reading['volts']}V  {reading['amps']}A  "
+                        f"pf={reading['power_factor']}  total={reading['energy_wh']}Wh"
+                    )
+                    if conn:
+                        insert_plug_reading(
+                            conn, p["name"], p.get("ip"),
+                            reading["watts"], reading["volts"], reading["amps"],
+                            reading["energy_wh"], reading["power_factor"], reading["is_on"],
+                        )
+                except Exception as e:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    click.echo(f"[{ts}] Plug poll failed for '{p['name']}': {e}")
+            await asyncio.sleep(POLL_INTERVAL)
+
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
         extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop()]
@@ -1657,6 +1685,8 @@ def monitor(duration, verbose, db, no_db):
             extra.append(poll_ecobee_loop())
         if ha_cfg:
             extra.append(poll_homeassistant_loop())
+        if plugs_cfg:
+            extra.append(poll_smart_plugs_loop())
         asyncio.run(scan(
             on_reading,
             duration=duration,

@@ -53,7 +53,8 @@ async def _probe_tasmota(client, ip: str) -> dict | None:
 
 async def _scan(subnet: str) -> list[dict]:
     import httpx
-    async with httpx.AsyncClient() as client:
+    limits = httpx.Limits(max_connections=254, max_keepalive_connections=0)
+    async with httpx.AsyncClient(limits=limits) as client:
         results = await asyncio.gather(*[
             _probe_tasmota(client, f"{subnet}.{i}") for i in range(1, 255)
         ])
@@ -65,3 +66,23 @@ def discover(subnet: str | None = None) -> list[dict]:
     if subnet is None:
         subnet = local_subnet()
     return asyncio.run(_scan(subnet))
+
+
+def fetch_reading(ip: str) -> dict:
+    """Fetch current power reading from a Tasmota device.
+
+    Returns dict with keys: watts, volts, amps, energy_wh, power_factor, is_on.
+    """
+    import httpx
+    r = httpx.get(f"http://{ip}/cm", params={"cmnd": "StatusSNS"}, timeout=5)
+    r.raise_for_status()
+    data = r.json()
+    energy = data.get("StatusSNS", {}).get("ENERGY", {})
+    return {
+        "watts":        energy.get("Power"),
+        "volts":        energy.get("Voltage"),
+        "amps":         energy.get("Current"),
+        "energy_wh":    energy.get("Total", 0) * 1000 if energy.get("Total") is not None else None,
+        "power_factor": energy.get("Factor"),
+        "is_on":        energy.get("Power", 0) > 0,
+    }

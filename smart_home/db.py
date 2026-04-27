@@ -122,6 +122,20 @@ def insert_no_reading(conn: sqlite3.Connection, label: str, address: str | None 
     conn.commit()
 
 
+def insert_plug_reading(conn: sqlite3.Connection, label: str, address: str | None,
+                        watts: float | None, volts: float | None, amps: float | None,
+                        energy_wh: float | None, power_factor: int | None, is_on: bool | None) -> None:
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT OR IGNORE INTO plug_readings "
+        "(ts, address, label, watts, volts, amps, energy_wh, power_factor, is_on) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (ts, address, label, watts, volts, amps, energy_wh, power_factor,
+         int(is_on) if is_on is not None else None),
+    )
+    conn.commit()
+
+
 def bulk_insert(conn: sqlite3.Connection, rows: list[tuple]) -> int:
     """Insert (ts, label, temp_f, humidity) tuples. Returns number of rows inserted."""
     before = conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0]
