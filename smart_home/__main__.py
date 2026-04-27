@@ -109,6 +109,13 @@ def unlabel(sensor, purge, db):
         click.echo("Tip: pass --purge to also delete its readings from the database.")
 
 
+DEVICE_CATEGORIES = {
+    "1": "BLE Sensor (temperature/humidity)",
+    "2": "Thermostat",
+    "3": "Smart Plug",
+    "4": "Presence Device",
+}
+
 DEVICE_TYPES = {
     "1": ("Govee H5074",         ("Govee_H5074", "GVH5074")),
     "2": ("Xiaomi LYWSD03MMC",   ("LYWSD03MMC", "ATC_")),
@@ -124,9 +131,7 @@ SMART_PLUG_TYPES = {
 }
 
 
-@main.command("add-smart-plug")
-def add_smart_plug():
-    """Register a smart plug to record the power draw of a device."""
+def _add_smart_plug():
     click.echo("What type of smart plug do you want to add?\n")
     for key, name in SMART_PLUG_TYPES.items():
         click.echo(f"  {key}. {name}")
@@ -141,8 +146,8 @@ def add_smart_plug():
         ip = click.prompt("Enter the IP address of the plug manually").strip()
     elif len(found) == 1:
         d = found[0]
-        label = d["friendly_name"] or d["topic"] or d["ip"]
-        click.echo(f"Found: {label} ({d['ip']})")
+        found_label = d["friendly_name"] or d["topic"] or d["ip"]
+        click.echo(f"Found: {found_label} ({d['ip']})")
         if not click.confirm("Is this the plug you want to add?", default=True):
             ip = click.prompt("Enter the IP address manually").strip()
         else:
@@ -150,8 +155,8 @@ def add_smart_plug():
     else:
         click.echo(f"\nFound {len(found)} Tasmota device(s):\n")
         for i, d in enumerate(found, 1):
-            label = d["friendly_name"] or d["topic"] or d["ip"]
-            click.echo(f"  {i}. {label} ({d['ip']})")
+            found_label = d["friendly_name"] or d["topic"] or d["ip"]
+            click.echo(f"  {i}. {found_label} ({d['ip']})")
         idx = click.prompt("\nWhich one is the plug you want to add?",
                            type=click.IntRange(1, len(found))) - 1
         ip = found[idx]["ip"]
@@ -172,13 +177,7 @@ def add_smart_plug():
     click.echo("Run 'smart-home monitor' to start polling this plug.")
 
 
-@main.command("add-thermostat")
-def add_thermostat():
-    """Register a smart thermostat to record its temperature data.
-
-    Authenticates with the thermostat's API, asks for the room name,
-    and saves config so that 'monitor' will poll it going forward.
-    """
+def _add_thermostat():
     click.echo("What type of thermostat do you want to add?\n")
     for key, name in THERMOSTAT_TYPES.items():
         click.echo(f"  {key}. {name}")
@@ -329,13 +328,75 @@ def install_services():
 
 @main.command("list-devices")
 def list_devices():
-    """Show all registered devices and their labels."""
+    """Show all registered devices of all types."""
+    from smart_home import ecobee as _ecobee
+    from smart_home import homeassistant as _ha
+
+    any_found = False
+
     label_map = _labels.load()
-    if not label_map:
+    if label_map:
+        any_found = True
+        click.echo("\n  BLE Sensors:")
+        click.echo("  " + "-" * 50)
+        for addr, lbl in sorted(label_map.items(), key=lambda x: x[1]):
+            click.echo(f"  {lbl:<24} {addr}")
+
+    ecobee_cfg = _ecobee.load_config()
+    ha_cfg = _ha.load_config()
+    if ecobee_cfg or ha_cfg:
+        any_found = True
+        click.echo("\n  Thermostats:")
+        click.echo("  " + "-" * 50)
+        if ecobee_cfg:
+            lbl = ecobee_cfg.get("label", "(no label)")
+            ident = ecobee_cfg.get("identifier", "")
+            click.echo(f"  {lbl:<24} Ecobee ({ident})")
+        if ha_cfg:
+            lbl = ha_cfg.get("label", "(no label)")
+            entity = ha_cfg.get("entity_id", "")
+            click.echo(f"  {lbl:<24} Home Assistant ({entity})")
+
+    plugs = _smart_plug.load_config()
+    if plugs:
+        any_found = True
+        click.echo("\n  Smart Plugs:")
+        click.echo("  " + "-" * 50)
+        for p in plugs:
+            click.echo(f"  {p.get('name', ''):<24} {p.get('type', '')} → {p.get('device', '')} ({p.get('ip', '')})")
+
+    presence = _presence.load_devices()
+    if presence:
+        any_found = True
+        state = _presence.load_state()
+        now = datetime.datetime.now()
+
+        def _since(ts_str):
+            if not ts_str:
+                return "never"
+            try:
+                dt = datetime.datetime.fromisoformat(ts_str)
+                secs = int((now - dt).total_seconds())
+                if secs < 60:    return f"{secs}s ago"
+                if secs < 3600:  return f"{secs // 60}m ago"
+                if secs < 86400: return f"{secs // 3600}h {(secs % 3600) // 60}m ago"
+                return f"{secs // 86400}d ago"
+            except ValueError:
+                return ts_str
+
+        click.echo("\n  Presence Devices:")
+        click.echo("  " + "-" * 50)
+        for ble_name, lbl in sorted(presence.items(), key=lambda x: x[1]):
+            s = state.get(ble_name, {})
+            status = s.get("status", "unknown")
+            last_seen = _since(s.get("last_seen"))
+            stale = (status == "home" and s.get("last_seen") and
+                     (now - datetime.datetime.fromisoformat(s["last_seen"])).total_seconds() > 300)
+            flag = "  (stale?)" if stale else ""
+            click.echo(f"  {lbl:<24} {ble_name:<24} {status:<10} {last_seen}{flag}")
+
+    if not any_found:
         click.echo("No devices registered. Run 'smart-home add-device' to add one.")
-        return
-    for addr, label in sorted(label_map.items(), key=lambda x: x[1]):
-        click.echo(f"  {label:<20} {addr}")
 
 
 @main.command("recent-readings")
@@ -408,14 +469,26 @@ def sensor_history(label, limit, db):
 
 @main.command("add-device")
 @click.option("--timeout", "-t", type=float, default=15.0,
-              help="Seconds to scan (default: 15).")
+              help="Seconds to scan for BLE devices (default: 15).")
 def add_device(timeout):
-    """Scan for sensors and register them with a label.
+    """Register a new device of any type."""
+    click.echo("What type of device do you want to add?\n")
+    for key, name in DEVICE_CATEGORIES.items():
+        click.echo(f"  {key}. {name}")
+    choice = click.prompt("\nEnter choice", type=click.Choice(list(DEVICE_CATEGORIES)))
 
-    Prompts for device type, scans for matching BLE devices, then asks
-    for a label for each new device found.
-    """
-    click.echo("What type of sensor do you want to add?\n")
+    if choice == "1":
+        _add_ble_sensor(timeout)
+    elif choice == "2":
+        _add_thermostat()
+    elif choice == "3":
+        _add_smart_plug()
+    elif choice == "4":
+        _add_presence_device(timeout)
+
+
+def _add_ble_sensor(timeout):
+    click.echo("\nWhat type of BLE sensor do you want to add?\n")
     for key, (name, _) in DEVICE_TYPES.items():
         click.echo(f"  {key}. {name}")
     choice = click.prompt("\nEnter choice", type=click.Choice(list(DEVICE_TYPES)))
@@ -447,9 +520,9 @@ def add_device(timeout):
     click.echo(f"\nFound {len(found)} new sensor(s). Enter a label for each:\n")
     changed = False
     for addr, name in found.items():
-        label = click.prompt(f"  {name} ({addr})").strip()
-        if label:
-            label_map[addr] = label
+        lbl = click.prompt(f"  {name} ({addr})").strip()
+        if lbl:
+            label_map[addr] = lbl
             changed = True
 
     if changed:
@@ -498,13 +571,7 @@ def import_zip(zipfile_path, label, db):
     click.echo(f"Imported {inserted} new rows ({len(rows)} total, {len(rows)-inserted} duplicates skipped).")
 
 
-@main.command("add-presence-device")
-@click.option("--timeout", "-t", type=float, default=15.0,
-              help="Seconds to scan (default: 15).")
-def add_presence_device(timeout):
-    """Scan for BLE devices and register one as a presence detector."""
-    from bleak import BleakScanner
-
+def _add_presence_device(timeout):
     found = {}  # ble_name -> rssi (only devices with a name)
 
     def callback(device, adv):
@@ -516,7 +583,7 @@ def add_presence_device(timeout):
         async with BleakScanner(detection_callback=callback):
             await asyncio.sleep(timeout)
 
-    click.echo(f"Scanning for BLE devices ({int(timeout)}s)...")
+    click.echo(f"\nScanning for BLE devices ({int(timeout)}s)...")
     try:
         asyncio.run(_run())
     except KeyboardInterrupt:
@@ -526,7 +593,7 @@ def add_presence_device(timeout):
         click.echo("No named devices found.")
         return
 
-    devices_list = sorted(found.items(), key=lambda x: x[1], reverse=True)  # sort by rssi
+    devices_list = sorted(found.items(), key=lambda x: x[1], reverse=True)
     click.echo(f"\nFound {len(devices_list)} named device(s):\n")
     for i, (name, rssi) in enumerate(devices_list, 1):
         click.echo(f"  {i}. {name!r}  rssi={rssi}")
@@ -537,48 +604,12 @@ def add_presence_device(timeout):
         return
 
     ble_name, _ = devices_list[choice - 1]
-    label = click.prompt("Display name for this device", default=ble_name).strip()
+    lbl = click.prompt("Display name for this device", default=ble_name).strip()
 
     devices = _presence.load_devices()
-    devices[ble_name] = label
+    devices[ble_name] = lbl
     _presence.save_devices(devices)
-    click.echo(f"\nRegistered '{label}' (BLE name: {ble_name!r}) as a presence device.")
-
-
-@main.command("list-presence-devices")
-def list_presence_devices():
-    """Show registered presence devices and their current status."""
-    devices = _presence.load_devices()
-    if not devices:
-        click.echo("No presence devices registered. Run 'smart-home add-presence-device' to add one.")
-        return
-
-    state = _presence.load_state()
-    now = datetime.datetime.now()
-
-    def since(ts_str):
-        if not ts_str:
-            return "never"
-        try:
-            dt = datetime.datetime.fromisoformat(ts_str)
-            secs = int((now - dt).total_seconds())
-            if secs < 60:    return f"{secs}s ago"
-            if secs < 3600:  return f"{secs // 60}m ago"
-            if secs < 86400: return f"{secs // 3600}h {(secs % 3600) // 60}m ago"
-            return f"{secs // 86400}d ago"
-        except ValueError:
-            return ts_str
-
-    click.echo(f"\n  {'label':<24} {'ble name':<24} {'status':<10} {'last seen'}")
-    click.echo("  " + "-" * 76)
-    for ble_name, label in sorted(devices.items(), key=lambda x: x[1]):
-        s = state.get(ble_name, {})
-        status = s.get("status", "unknown")
-        last_seen = since(s.get("last_seen"))
-        stale = status == "home" and s.get("last_seen") and \
-            (now - datetime.datetime.fromisoformat(s["last_seen"])).total_seconds() > 300
-        flag = "  (stale?)" if stale else ""
-        click.echo(f"  {label:<24} {ble_name:<24} {status:<10} {last_seen}{flag}")
+    click.echo(f"\nRegistered '{lbl}' (BLE name: {ble_name!r}) as a presence device.")
 
 
 @main.command("configure-push")
@@ -2290,6 +2321,12 @@ def flash_device(address, firmware_path, timeout):
                 click.echo("Label saved.")
     else:
         click.echo(f"Existing label kept: {label_map[address]}")
+
+
+@main.command("see-monitor")
+def see_monitor():
+    """Stream the smart-home monitor service log (journalctl -u smart-home.service)."""
+    os.execvp("journalctl", ["journalctl", "-u", "smart-home.service"])
 
 
 if __name__ == "__main__":
