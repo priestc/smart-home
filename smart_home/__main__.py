@@ -16,6 +16,7 @@ from smart_home import presence as _presence
 from smart_home import push as _push
 from smart_home import camera as _camera
 from smart_home import garage as _garage
+from smart_home import smart_plug as _smart_plug
 from smart_home.battery import dump_gatt
 from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading
 
@@ -117,6 +118,34 @@ THERMOSTAT_TYPES = {
     "1": "Ecobee",
     "2": "Home Assistant (via local API)",
 }
+
+SMART_PLUG_TYPES = {
+    "1": "SONOFF S31",
+}
+
+
+@main.command("add-smart-plug")
+def add_smart_plug():
+    """Register a smart plug to record the power draw of a device."""
+    click.echo("What type of smart plug do you want to add?\n")
+    for key, name in SMART_PLUG_TYPES.items():
+        click.echo(f"  {key}. {name}")
+    choice = click.prompt("\nEnter choice", type=click.Choice(list(SMART_PLUG_TYPES)))
+    plug_type = SMART_PLUG_TYPES[choice]
+
+    name = click.prompt("\nWhat do you want to name this plug?").strip()
+    device = click.prompt("What device is plugged into it (what you want to record the power draw of)?").strip()
+
+    plugs = _smart_plug.load_config()
+    plugs.append({
+        "type": plug_type,
+        "name": name,
+        "device": device,
+    })
+    _smart_plug.save_config(plugs)
+
+    click.echo(f"\nSaved. Plug '{name}' monitoring '{device}' ({plug_type}) has been registered.")
+    click.echo("Run 'smart-home monitor' to start polling this plug.")
 
 
 @main.command("add-thermostat")
