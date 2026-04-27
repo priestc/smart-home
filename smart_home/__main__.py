@@ -133,6 +133,29 @@ def add_smart_plug():
     choice = click.prompt("\nEnter choice", type=click.Choice(list(SMART_PLUG_TYPES)))
     plug_type = SMART_PLUG_TYPES[choice]
 
+    click.echo("\nScanning local network for Tasmota devices...")
+    found = _smart_plug.discover()
+
+    if not found:
+        click.echo("No Tasmota devices found automatically.")
+        ip = click.prompt("Enter the IP address of the plug manually").strip()
+    elif len(found) == 1:
+        d = found[0]
+        label = d["friendly_name"] or d["topic"] or d["ip"]
+        click.echo(f"Found: {label} ({d['ip']})")
+        if not click.confirm("Is this the plug you want to add?", default=True):
+            ip = click.prompt("Enter the IP address manually").strip()
+        else:
+            ip = d["ip"]
+    else:
+        click.echo(f"\nFound {len(found)} Tasmota device(s):\n")
+        for i, d in enumerate(found, 1):
+            label = d["friendly_name"] or d["topic"] or d["ip"]
+            click.echo(f"  {i}. {label} ({d['ip']})")
+        idx = click.prompt("\nWhich one is the plug you want to add?",
+                           type=click.IntRange(1, len(found))) - 1
+        ip = found[idx]["ip"]
+
     name = click.prompt("\nWhat do you want to name this plug?").strip()
     device = click.prompt("What device is plugged into it (what you want to record the power draw of)?").strip()
 
@@ -141,10 +164,11 @@ def add_smart_plug():
         "type": plug_type,
         "name": name,
         "device": device,
+        "ip": ip,
     })
     _smart_plug.save_config(plugs)
 
-    click.echo(f"\nSaved. Plug '{name}' monitoring '{device}' ({plug_type}) has been registered.")
+    click.echo(f"\nSaved. Plug '{name}' monitoring '{device}' ({plug_type} at {ip}) has been registered.")
     click.echo("Run 'smart-home monitor' to start polling this plug.")
 
 
