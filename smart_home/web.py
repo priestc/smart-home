@@ -326,6 +326,122 @@ def trends():
     return jsonify([dict(r) for r in rows])
 
 
+@app.get("/api/plug_history")
+def plug_history():
+    """Historical plug readings. Query params:
+      label          - filter by plug label (optional)
+      start          - ISO datetime lower bound (optional)
+      end            - ISO datetime upper bound (optional)
+      limit          - max rows returned (default 1000, max 200000)
+      bucket_minutes - group readings into N-minute buckets (optional)
+    """
+    label = request.args.get("label")
+    start = (request.args.get("start") or "").replace("T", " ") or None
+    end   = (request.args.get("end")   or "").replace("T", " ") or None
+    try:
+        limit = min(int(request.args.get("limit", 1000)), 200000)
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+    try:
+        bucket = max(1, int(request.args.get("bucket_minutes", 1)))
+    except ValueError:
+        return jsonify({"error": "bucket_minutes must be an integer"}), 400
+
+    where, params = ["label IS NOT NULL"], []
+    if label:
+        where.append("label = ?")
+        params.append(label)
+    if start:
+        where.append("ts >= ?")
+        params.append(start)
+    if end:
+        where.append("ts <= ?")
+        params.append(end)
+
+    where_sql = " WHERE " + " AND ".join(where)
+
+    if bucket > 1:
+        bucket_secs = bucket * 60
+        sql = f"""
+            SELECT
+                strftime('%Y-%m-%d %H:%M:%S', CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs}, 'unixepoch') AS ts,
+                label,
+                ROUND(AVG(watts), 2)        AS watts,
+                ROUND(AVG(amps), 3)         AS amps,
+                ROUND(AVG(volts), 1)        AS volts,
+                ROUND(AVG(power_factor), 0) AS power_factor
+            FROM plug_readings{where_sql}
+            GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, label
+            ORDER BY ts ASC LIMIT ?
+        """
+    else:
+        sql = f"SELECT ts, label, watts, amps, volts, power_factor FROM plug_readings{where_sql} ORDER BY ts ASC LIMIT ?"
+
+    params.append(limit)
+    with _conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.get("/api/plug_history/month")
+def plug_history_month():
+    """Plug readings for a calendar month across all years, ts normalized to year 2000.
+    Query params: month (1-12), bucket_minutes (default 60).
+    """
+    import datetime as _dt
+    month = max(1, min(12, request.args.get("month", 1, type=int)))
+    bucket_minutes = max(1, request.args.get("bucket_minutes", 60, type=int))
+    bucket_secs = bucket_minutes * 60
+    month_str = f"{month:02d}"
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT
+                strftime('%Y', ts) AS year,
+                CAST(strftime('%s', '2000' || substr(ts, 5)) AS INTEGER) / ? * ? AS bucket,
+                label,
+                ROUND(AVG(watts), 2) AS watts
+            FROM plug_readings
+            WHERE strftime('%m', ts) = ?
+              AND watts IS NOT NULL AND label IS NOT NULL
+            GROUP BY bucket, label, year
+            ORDER BY bucket ASC
+        """, (bucket_secs, bucket_secs, month_str)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        ts = _dt.datetime.utcfromtimestamp(d["bucket"]).strftime("%Y-%m-%d %H:%M:%S")
+        result.append({"year": d["year"], "ts": ts, "label": d["label"], "watts": d["watts"]})
+    return jsonify(result)
+
+
+@app.get("/api/plug_history/year")
+def plug_history_year():
+    """All plug readings normalized to year 2000 for year-over-year overlay.
+    Query params: bucket_minutes (default 360).
+    """
+    import datetime as _dt
+    bucket_minutes = max(1, request.args.get("bucket_minutes", 360, type=int))
+    bucket_secs = bucket_minutes * 60
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT
+                strftime('%Y', ts) AS year,
+                CAST(strftime('%s', '2000' || substr(ts, 5)) AS INTEGER) / ? * ? AS bucket,
+                label,
+                ROUND(AVG(watts), 2) AS watts
+            FROM plug_readings
+            WHERE watts IS NOT NULL AND label IS NOT NULL
+            GROUP BY bucket, label, year
+            ORDER BY bucket ASC
+        """, (bucket_secs, bucket_secs)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        ts = _dt.datetime.utcfromtimestamp(d["bucket"]).strftime("%Y-%m-%d %H:%M:%S")
+        result.append({"year": d["year"], "ts": ts, "label": d["label"], "watts": d["watts"]})
+    return jsonify(result)
+
+
 @app.get("/presence")
 def presence_page():
     return Response("""<!DOCTYPE html>
@@ -1916,6 +2032,228 @@ async function loadChart() {
     )
 
 
+_ENERGY_PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Energy Usage &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; color: #1a2535; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1.5rem; }
+    .nav a { font-size: .85rem; color: #2e7dd4; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .chart-wrap { background: #fff; border-radius: 12px; padding: 1.4rem 1.4rem 1rem; margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .chart-wrap h2 { font-size: 0.85rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: 1rem; }
+    .btn-group { margin-bottom: 1.2rem; }
+    .btn-group-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .4rem; }
+    .range-btns { display: flex; gap: .4rem; flex-wrap: wrap; }
+    .range-btns button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s; }
+    .range-btns button:hover { background: #f0f4f8; border-color: #aabbc8; }
+    .range-btns button.active { background: #e07820; color: #fff; border-color: #e07820; }
+    .range-btns button:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
+    .res-row { display: flex; align-items: center; gap: .6rem; margin-bottom: 1.2rem; }
+    .res-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+    .res-row select { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Energy Usage</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div class="res-row">
+    <label for="res">Resolution</label>
+    <select id="res" onchange="resolution=this.value; loadChart()">
+      <option value="low">Low</option>
+      <option value="medium">Medium</option>
+      <option value="max">Max</option>
+    </select>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">Most Recent</div>
+    <div class="range-btns" id="recent-btns">
+      <button id="btn-prev" onclick="shiftView(-1)">&#8592;</button>
+      <button onclick="setRange(0.125)" data-days="0.125">3h</button>
+      <button onclick="setRange(1)" data-days="1" class="active">24h</button>
+      <button onclick="setRange(3)" data-days="3">3d</button>
+      <button onclick="setRange(7)" data-days="7">7d</button>
+      <button onclick="setRange(30)" data-days="30">30d</button>
+      <button id="btn-next" onclick="shiftView(1)" disabled>&#8594;</button>
+    </div>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">By Month</div>
+    <div class="range-btns" id="month-btns">
+      <button onclick="setAllMonths()">All Months</button>
+      <button onclick="setMonth(1)">Jan</button>
+      <button onclick="setMonth(2)">Feb</button>
+      <button onclick="setMonth(3)">Mar</button>
+      <button onclick="setMonth(4)">Apr</button>
+      <button onclick="setMonth(5)">May</button>
+      <button onclick="setMonth(6)">Jun</button>
+      <button onclick="setMonth(7)">Jul</button>
+      <button onclick="setMonth(8)">Aug</button>
+      <button onclick="setMonth(9)">Sep</button>
+      <button onclick="setMonth(10)">Oct</button>
+      <button onclick="setMonth(11)">Nov</button>
+      <button onclick="setMonth(12)">Dec</button>
+    </div>
+  </div>
+  <div class="chart-wrap"><h2>Power (W)</h2><canvas id="chart-watts" height="120"></canvas></div>
+<script>
+const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
+const colorMap = {};
+let mode = "recent", rangeDays = 1, activeMonth = null, offsetMs = 0;
+const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const isLocal = /^192\\.168\\./.test(location.hostname) || /\\.local$/.test(location.hostname);
+let resolution = isLocal ? "max" : isMobile ? "low" : "medium";
+document.getElementById("res").value = resolution;
+const BUCKETS = {
+  recent: {
+    low:    {0.125:10, 1:30,  3:60,  7:120, 30:360},
+    medium: {0.125:3,  1:10,  3:20,  7:30,  30:60 },
+    max:    {0.125:1,  1:2,   3:5,   7:10,  30:20 },
+  },
+  month:  { low: 240, medium: 60, max: 10 },
+  year:   { low: 1440, medium: 360, max: 60 },
+};
+function getBucket() {
+  if (mode === "recent") return BUCKETS.recent[resolution][rangeDays] || 60;
+  return BUCKETS[mode][resolution];
+}
+function localISO(d) {
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function shiftView(dir) {
+  offsetMs += dir * rangeDays * 86400000;
+  if (offsetMs > 0) offsetMs = 0;
+  loadChart();
+}
+function setRange(days) {
+  mode = "recent"; rangeDays = days; offsetMs = 0;
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b =>
+    b.classList.toggle("active", parseFloat(b.dataset.days) === days));
+  document.querySelectorAll("#month-btns button").forEach(b => b.classList.remove("active"));
+  loadChart();
+}
+function setAllMonths() {
+  mode = "year";
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll("#month-btns button").forEach((b,i) => b.classList.toggle("active", i === 0));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
+  loadChart();
+}
+function setMonth(m) {
+  mode = "month"; activeMonth = m;
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll("#month-btns button").forEach((b,i) => b.classList.toggle("active", i === m));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
+  loadChart();
+}
+const wattsChart = new Chart(document.getElementById("chart-watts"), {
+  type: "line", data: { datasets: [] },
+  options: {
+    animation: false, parsing: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { labels: { color: "#4a6080" } },
+      tooltip: {
+        enabled: false,
+        external: function({ chart, tooltip }) {
+          let el = document.getElementById('chartjs-tt');
+          if (!el) {
+            el = document.createElement('div');
+            el.id = 'chartjs-tt';
+            el.style.cssText = 'position:absolute;pointer-events:none;background:rgba(0,0,0,.75);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;font-family:system-ui,sans-serif;white-space:nowrap;z-index:10;';
+            chart.canvas.parentNode.style.position = 'relative';
+            chart.canvas.parentNode.appendChild(el);
+          }
+          if (tooltip.opacity === 0) { el.style.display = 'none'; return; }
+          const title = (tooltip.title || [])[0] || '';
+          let html = title ? '<div style="font-weight:600;margin-bottom:3px;">' + title + '</div>' : '';
+          for (const item of (tooltip.dataPoints || [])) {
+            if (item.raw == null || item.raw.y == null) continue;
+            const color = item.dataset.borderColor || '#ccc';
+            html += '<div style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:' + color + ';border:1px solid ' + color + ';flex-shrink:0;"></span><span>' + (item.dataset.label || '') + ': ' + item.raw.y.toFixed(1) + ' W</span></div>';
+          }
+          el.innerHTML = html;
+          el.style.display = 'block';
+          const pw = chart.canvas.parentNode.offsetWidth;
+          const tw = el.offsetWidth || 160;
+          el.style.left = (tooltip.caretX + tw + 14 > pw ? tooltip.caretX - tw - 4 : tooltip.caretX + 14) + 'px';
+          el.style.top = Math.max(0, tooltip.caretY - 20) + 'px';
+        }
+      }
+    },
+    scales: {
+      x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" }, ticks: { color: "#7a90a8", maxTicksLimit: 8 }, grid: { color: "#e8eef4" } },
+      y: { min: 0, ticks: { color: "#7a90a8", callback: v => v + " W" }, grid: { color: "#e8eef4" } }
+    }
+  }
+});
+function buildDatasets(data) {
+  const byKey = {};
+  const yearMode = mode !== "recent";
+  for (const row of data) {
+    if (row.label == null) continue;
+    const key = yearMode && row.year ? row.label + " (" + row.year + ")" : row.label;
+    (byKey[key] ??= []).push({ x: new Date(row.ts), y: row.watts });
+  }
+  const keys = Object.keys(byKey).sort();
+  keys.forEach((k, i) => { colorMap[k] = COLORS[i % COLORS.length]; });
+  return keys.map(k => ({
+    label: k, data: byKey[k],
+    borderColor: colorMap[k], backgroundColor: "transparent",
+    borderWidth: 1.5, pointRadius: 0, tension: 0,
+  }));
+}
+async function loadChart() {
+  let data, xMin, xMax, timeUnit;
+  if (mode === "recent") {
+    xMax = new Date(Date.now() + offsetMs);
+    xMin = new Date(xMax - rangeDays * 86400000);
+    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
+    data = await fetch(`/api/plug_history?${params}`).then(r => r.json());
+    timeUnit = rangeDays >= 3 ? "day" : "hour";
+    const peek = await fetch(`/api/plug_history?end=${localISO(xMin)}&limit=1`).then(r => r.json());
+    document.getElementById('btn-prev').disabled = peek.length === 0;
+    document.getElementById('btn-next').disabled = offsetMs >= 0;
+  } else if (mode === "month") {
+    data = await fetch(`/api/plug_history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
+    xMin = new Date(2000, activeMonth - 1, 1);
+    xMax = new Date(2000, activeMonth, 0, 23, 59, 59);
+    timeUnit = "day";
+  } else {
+    data = await fetch(`/api/plug_history/year?bucket_minutes=${getBucket()}`).then(r => r.json());
+    xMin = new Date(2000, 0, 1);
+    xMax = new Date(2000, 11, 31, 23, 59, 59);
+    timeUnit = "month";
+  }
+  wattsChart.data.datasets = buildDatasets(data);
+  wattsChart.options.scales.x.min = xMin;
+  wattsChart.options.scales.x.max = xMax;
+  wattsChart.options.scales.x.time.unit = timeUnit;
+  wattsChart.update();
+}
+loadChart();
+setInterval(loadChart, 30000);
+</script>
+</body>
+</html>"""
+
+
+@app.get("/chart/energy")
+def chart_energy():
+    return Response(_ENERGY_PAGE, mimetype="text/html")
+
+
 @app.get("/chart/differential")
 def chart_differential():
     return Response(_DIFF_PAGE, mimetype="text/html")
@@ -2652,6 +2990,7 @@ def index():
   <div class="chart-links">
     <a href="/chart/temperature" class="chart-link"><span class="cl-title">Temperature</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/humidity"    class="chart-link"><span class="cl-title">Humidity</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/chart/energy"      class="chart-link"><span class="cl-title">Energy Usage</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/differential" class="chart-link"><span class="cl-title">Differentials</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/sensors"     class="chart-link"><span class="cl-title">Sensor Battery Life</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/signal"      class="chart-link"><span class="cl-title">Signal Strength</span><span class="cl-arrow">&#8594;</span></a>
