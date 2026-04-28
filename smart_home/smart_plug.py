@@ -74,7 +74,7 @@ def fetch_reading(ip: str) -> dict:
     Returns dict with keys: watts, volts, amps, energy_wh, power_factor, is_on.
     """
     import httpx
-    r = httpx.get(f"http://{ip}/cm", params={"cmnd": "StatusSNS"}, timeout=5)
+    r = httpx.get(f"http://{ip}/cm", params={"cmnd": "Status 8"}, timeout=5)
     r.raise_for_status()
     data = r.json()
     energy = data.get("StatusSNS", {}).get("ENERGY", {})
