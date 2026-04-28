@@ -1686,7 +1686,7 @@ def monitor(duration, verbose, db, no_db):
                     )
                     if conn:
                         insert_plug_reading(
-                            conn, p["name"], p.get("ip"),
+                            conn, p["device"], p.get("ip"),
                             reading["watts"], reading["volts"], reading["amps"],
                             reading["energy_wh"], reading["power_factor"], reading["is_on"],
                         )

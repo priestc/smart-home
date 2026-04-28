@@ -2074,6 +2074,10 @@ _ENERGY_PAGE = """\
     </select>
   </div>
   <div class="btn-group">
+    <div class="btn-group-label">Devices</div>
+    <div class="range-btns" id="device-btns"></div>
+  </div>
+  <div class="btn-group">
     <div class="btn-group-label">Most Recent</div>
     <div class="range-btns" id="recent-btns">
       <button id="btn-prev" onclick="shiftView(-1)">&#8592;</button>
@@ -2107,6 +2111,7 @@ _ENERGY_PAGE = """\
 <script>
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
 const colorMap = {};
+const hiddenDevices = new Set();
 let mode = "recent", rangeDays = 1, activeMonth = null, offsetMs = 0;
 const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 const isLocal = /^192\\.168\\./.test(location.hostname) || /\\.local$/.test(location.hostname);
@@ -2128,6 +2133,40 @@ function getBucket() {
 function localISO(d) {
   const p = n => String(n).padStart(2,'0');
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function hexToRgb(hex) { return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]; }
+function applyBtnColor(btn, color, active) {
+  const [r,g,b] = hexToRgb(color);
+  if (active) {
+    btn.style.background = color; btn.style.borderColor = color; btn.style.color = '#fff';
+  } else {
+    btn.style.background = `rgba(${r},${g},${b},0.06)`;
+    btn.style.borderColor = `rgba(${r},${g},${b},0.2)`;
+    btn.style.color = '#7a90a8';
+  }
+}
+function toggleDevice(device, btn) {
+  if (hiddenDevices.has(device)) { hiddenDevices.delete(device); }
+  else { hiddenDevices.add(device); }
+  const active = !hiddenDevices.has(device);
+  applyBtnColor(btn, colorMap[device] || COLORS[0], active);
+  wattsChart.data.datasets.forEach((ds, i) =>
+    wattsChart.setDatasetVisibility(i, !hiddenDevices.has(ds.device)));
+  wattsChart.update();
+}
+function updateDeviceButtons(devices) {
+  const container = document.getElementById('device-btns');
+  for (const dev of devices) {
+    let btn = document.getElementById('dev-btn-' + dev);
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.id = 'dev-btn-' + dev;
+      btn.textContent = dev;
+      btn.onclick = () => toggleDevice(dev, btn);
+      container.appendChild(btn);
+    }
+    applyBtnColor(btn, colorMap[dev] || COLORS[0], !hiddenDevices.has(dev));
+  }
 }
 function shiftView(dir) {
   offsetMs += dir * rangeDays * 86400000;
@@ -2163,7 +2202,7 @@ const wattsChart = new Chart(document.getElementById("chart-watts"), {
     animation: false, parsing: false,
     interaction: { mode: "index", intersect: false },
     plugins: {
-      legend: { labels: { color: "#4a6080" } },
+      legend: { display: false },
       tooltip: {
         enabled: false,
         external: function({ chart, tooltip }) {
@@ -2204,13 +2243,16 @@ function buildDatasets(data) {
   for (const row of data) {
     if (row.label == null) continue;
     const key = yearMode && row.year ? row.label + " (" + row.year + ")" : row.label;
-    (byKey[key] ??= []).push({ x: new Date(row.ts), y: row.watts });
+    if (!byKey[key]) byKey[key] = { device: row.label, points: [] };
+    byKey[key].points.push({ x: new Date(row.ts), y: row.watts });
   }
   const keys = Object.keys(byKey).sort();
-  keys.forEach((k, i) => { colorMap[k] = COLORS[i % COLORS.length]; });
+  const devices = [...new Set(keys.map(k => byKey[k].device))].sort();
+  devices.forEach((dev, i) => { colorMap[dev] = COLORS[i % COLORS.length]; });
+  updateDeviceButtons(devices);
   return keys.map(k => ({
-    label: k, data: byKey[k],
-    borderColor: colorMap[k], backgroundColor: "transparent",
+    label: k, device: byKey[k].device, data: byKey[k].points,
+    borderColor: colorMap[byKey[k].device], backgroundColor: "transparent",
     borderWidth: 1.5, pointRadius: 0, tension: 0,
   }));
 }
@@ -2237,6 +2279,8 @@ async function loadChart() {
     timeUnit = "month";
   }
   wattsChart.data.datasets = buildDatasets(data);
+  wattsChart.data.datasets.forEach((ds, i) =>
+    wattsChart.setDatasetVisibility(i, !hiddenDevices.has(ds.device)));
   wattsChart.options.scales.x.min = xMin;
   wattsChart.options.scales.x.max = xMax;
   wattsChart.options.scales.x.time.unit = timeUnit;
