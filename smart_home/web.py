@@ -521,6 +521,26 @@ def presence_page():
   <div id="content"><p class="empty">Loading&hellip;</p></div>
 
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 function fmtDur(s) {
   s = Math.round(s);
   if (s < 60)    return `${s}s`;
@@ -615,7 +635,7 @@ async function deleteAway(btn) {
 }
 
 async function load() {
-  const data = await fetch("/api/presence/history").then(r => r.json());
+  const data = await fetchJSON("/api/presence/history");
   const el = document.getElementById("content");
   if (!data.length) { el.innerHTML = '<p class="empty">No presence devices registered.</p>'; return; }
   el.innerHTML = data.map(renderDevice).join("");
@@ -699,6 +719,26 @@ def trends_page():
   <div id="tod-charts"></div>
 
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 const COLORS = {
   max: "#e07820",
   avg: "#2e7dd4",
@@ -790,7 +830,7 @@ function makeChart(ctx, label) {
 }
 
 async function load() {
-  const data = await fetch("/api/trends").then(r => r.json());
+  const data = await fetchJSON("/api/trends");
   const container = document.getElementById("charts");
 
   // group by label
@@ -868,7 +908,7 @@ function makeTODChart(ctx) {
 }
 
 async function loadTOD() {
-  const data = await fetch("/api/minmax-tod").then(r => r.json());
+  const data = await fetchJSON("/api/minmax-tod");
   const container = document.getElementById("tod-charts");
 
   const byLabel = {};
@@ -946,6 +986,26 @@ _CHART_PAGE = """\
   </div>
   CHART_CANVAS
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b"];
 const colorMap = {};
 function labelColor(lbl) { return colorMap[lbl] ?? COLORS[0]; }
@@ -955,7 +1015,7 @@ function localISO(d) {
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 async function loadColors() {
-  const data = await fetch("/api/current").then(r => r.json());
+  const data = await fetchJSON("/api/current");
   data.map(s => s.label).filter(Boolean).sort()
     .forEach((lbl, i) => { colorMap[lbl] = COLORS[i % COLORS.length]; });
 }
@@ -987,7 +1047,7 @@ def _chart_page(title, canvas, js):
 _HISTORY_FETCH = """\
   const start = localISO(new Date(Date.now() - rangeDays * 86400000));
   const bucket = ({0.125:1,1:2,3:10,7:20,30:60})[rangeDays] || 1;
-  const data = await fetch(`/api/history?start=${start}&limit=8000&bucket_minutes=${bucket}`).then(r => r.json());
+  const data = await fetchJSON(`/api/history?start=${start}&limit=8000&bucket_minutes=${bucket}`);
   const xMin = new Date(Date.now() - rangeDays * 86400000), xMax = new Date();
   const timeUnit = rangeDays >= 3 ? "day" : "hour";"""
 
@@ -1077,6 +1137,26 @@ _DIFF_PAGE = """\
   </div>
   <div class="chart-wrap"><h2>Differential (&deg;F)</h2><canvas id="chart" height="120"></canvas></div>
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
 const colorMap = {};
 function labelColor(lbl) { return colorMap[lbl] ?? COLORS[0]; }
@@ -1246,7 +1326,7 @@ function localISO(d) {
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 async function loadColors() {
-  const data = await fetch("/api/current").then(r => r.json());
+  const data = await fetchJSON("/api/current");
   data.map(s => s.label).filter(Boolean).sort()
     .forEach((lbl, i) => { colorMap[lbl] = COLORS[i % COLORS.length]; });
 }
@@ -1352,8 +1432,8 @@ async function loadChart() {
     const xMin = new Date(xMax - rangeDays * 86400000);
     const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
     const [data, events] = await Promise.all([
-      fetch(`/api/history?${params}`).then(r => r.json()),
-      fetch(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`).then(r => r.json()),
+      fetchJSON(`/api/history?${params}`),
+      fetchJSON(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`),
     ]);
     chart.data.datasets = buildSensorDatasets(data, events, false);
     chart.options.scales.x.min = xMin;
@@ -1368,11 +1448,11 @@ async function loadChart() {
       chart.options.scales.x.time.unit = "day";
       chart.options.scales.x.ticks.stepSize = 1;
     }
-    const peek = await fetch(`/api/history?end=${localISO(xMin)}&limit=1&bucket_minutes=${getBucket()}`).then(r => r.json());
+    const peek = await fetchJSON(`/api/history?end=${localISO(xMin)}&limit=1&bucket_minutes=${getBucket()}`);
     document.getElementById('btn-prev').disabled = peek.length === 0;
     document.getElementById('btn-next').disabled = offsetMs >= 0;
   } else if (mode === "month") {
-    const data = await fetch(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
+    const data = await fetchJSON(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`);
     chart.data.datasets = buildSensorDatasets(data, [], true);
     const xMin = new Date(2000, activeMonth - 1, 1);
     const xMax = new Date(2000, activeMonth, 0, 23, 59, 59);
@@ -1380,7 +1460,7 @@ async function loadChart() {
     chart.options.scales.x.max = xMax;
     chart.options.scales.x.time.unit = "day";
   } else {
-    const data = await fetch(`/api/history/year?bucket_minutes=${getBucket()}`).then(r => r.json());
+    const data = await fetchJSON(`/api/history/year?bucket_minutes=${getBucket()}`);
     chart.data.datasets = buildSensorDatasets(data, [], true);
     chart.options.scales.x.min = new Date(2000, 0, 1);
     chart.options.scales.x.max = new Date(2000, 11, 31, 23, 59, 59);
@@ -1498,6 +1578,26 @@ _TEMP_PAGE = """\
   </div>
   <div class="chart-wrap"><h2>Temperature (&deg;F)</h2><canvas id="chart" height="120"></canvas></div>
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
 const colorMap = {};
 function labelColor(lbl) { return colorMap[lbl] ?? COLORS[0]; }
@@ -1789,7 +1889,7 @@ function localISO(d) {
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 async function loadColors() {
-  const data = await fetch("/api/current").then(r => r.json());
+  const data = await fetchJSON("/api/current");
   const reservedColors = new Set(Object.values(SENSOR_COLORS));
   const roomColors = COLORS.filter(c => !reservedColors.has(c));
   data.map(s => s.label).filter(Boolean).sort()
@@ -1942,12 +2042,18 @@ function fmtBytes(n) {
        : n >= 1024    ? (n/1024).toFixed(1) + ' KB'
        :                n + ' B';
 }
-async function fetchJSON(url) {
-  const r = await fetch(url);
-  const cl = r.headers.get('content-length');
-  const text = await r.text();
-  const bytes = cl !== null ? parseInt(cl) : new TextEncoder().encode(text).length;
-  return { data: JSON.parse(text), bytes };
+async function fetchJSONBytes(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    const cl = r.headers.get('content-length');
+    const text = await r.text();
+    const bytes = cl !== null ? parseInt(cl) : new TextEncoder().encode(text).length;
+    return { data: JSON.parse(text), bytes };
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
 }
 async function loadChart() {
   let totalBytes = 0;
@@ -1956,8 +2062,8 @@ async function loadChart() {
     const xMin = new Date(xMax - rangeDays * 86400000);
     const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
     const [hist, evts] = await Promise.all([
-      fetchJSON(`/api/history?${params}`),
-      fetchJSON(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`),
+      fetchJSONBytes(`/api/history?${params}`),
+      fetchJSONBytes(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`),
     ]);
     totalBytes = hist.bytes + evts.bytes;
     chart.data.datasets = buildSensorDatasets(hist.data, evts.data, false);
@@ -1973,11 +2079,11 @@ async function loadChart() {
       chart.options.scales.x.time.unit = "day";
       chart.options.scales.x.ticks.stepSize = 1;
     }
-    const peek = await fetch(`/api/history?end=${localISO(xMin)}&limit=1&bucket_minutes=${getBucket()}`).then(r => r.json());
+    const peek = await fetchJSON(`/api/history?end=${localISO(xMin)}&limit=1&bucket_minutes=${getBucket()}`);
     document.getElementById('btn-prev').disabled = peek.length === 0;
     document.getElementById('btn-next').disabled = offsetMs >= 0;
   } else if (mode === "month") {
-    const { data, bytes } = await fetchJSON(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`);
+    const { data, bytes } = await fetchJSONBytes(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`);
     totalBytes = bytes;
     chart.data.datasets = buildSensorDatasets(data, [], true);
     const xMin = new Date(2000, activeMonth - 1, 1);
@@ -1990,8 +2096,8 @@ async function loadChart() {
     const xMin = new Date(year, month - 1, day, 0, 0, 0);
     const xMax = new Date(year, month - 1, day, 23, 59, 59);
     const [hist, evts] = await Promise.all([
-      fetchJSON(`/api/history?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`),
-      fetchJSON(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`),
+      fetchJSONBytes(`/api/history?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`),
+      fetchJSONBytes(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`),
     ]);
     totalBytes = hist.bytes + evts.bytes;
     chart.data.datasets = buildSensorDatasets(hist.data, evts.data, false);
@@ -2000,7 +2106,7 @@ async function loadChart() {
     chart.options.scales.x.time.unit = "hour";
     chart.options.scales.x.ticks.stepSize = 1;
   } else {
-    const { data, bytes } = await fetchJSON(`/api/history/year?bucket_minutes=${getBucket()}`);
+    const { data, bytes } = await fetchJSONBytes(`/api/history/year?bucket_minutes=${getBucket()}`);
     totalBytes = bytes;
     chart.data.datasets = buildSensorDatasets(data, [], true);
     chart.options.scales.x.min = new Date(2000, 0, 1);
@@ -2011,7 +2117,7 @@ async function loadChart() {
   chart.update();
 }
 async function populateYears() {
-  const years = await fetch("/api/history/years").then(r => r.json());
+  const years = await fetchJSON("/api/history/years");
   const sel = document.getElementById('day-year');
   const now = new Date();
   // Pre-fill controls with today if not already set
@@ -2144,6 +2250,26 @@ _ENERGY_PAGE = """\
   <div class="chart-wrap"><h2>Power (W)</h2><canvas id="chart-watts" height="120"></canvas></div>
   <div class="chart-wrap"><h2>Daily Energy (kWh) &mdash; device accumulator</h2><canvas id="chart-daily" height="80"></canvas></div>
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
 const colorMap = {};
 const hiddenDevices = new Set();
@@ -2351,19 +2477,19 @@ async function loadChart() {
     xMin = new Date(xMax - rangeDays * 86400000);
     const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
     [data] = await Promise.all([
-      fetch(`/api/plug_history?${params}`).then(r => r.json()),
+      fetchJSON(`/api/plug_history?${params}`),
     ]);
     timeUnit = rangeDays >= 3 ? "day" : "hour";
-    const peek = await fetch(`/api/plug_history?end=${localISO(xMin)}&limit=1`).then(r => r.json());
+    const peek = await fetchJSON(`/api/plug_history?end=${localISO(xMin)}&limit=1`);
     document.getElementById('btn-prev').disabled = peek.length === 0;
     document.getElementById('btn-next').disabled = offsetMs >= 0;
   } else if (mode === "month") {
-    data = await fetch(`/api/plug_history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
+    data = await fetchJSON(`/api/plug_history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`);
     xMin = new Date(2000, activeMonth - 1, 1);
     xMax = new Date(2000, activeMonth, 0, 23, 59, 59);
     timeUnit = "day";
   } else {
-    data = await fetch(`/api/plug_history/year?bucket_minutes=${getBucket()}`).then(r => r.json());
+    data = await fetchJSON(`/api/plug_history/year?bucket_minutes=${getBucket()}`);
     xMin = new Date(2000, 0, 1);
     xMax = new Date(2000, 11, 31, 23, 59, 59);
     timeUnit = "month";
@@ -2379,7 +2505,7 @@ async function loadChart() {
   const dailyStart = mode === "recent" ? localISO(new Date(Date.now() + offsetMs - Math.max(rangeDays, 7) * 86400000)) : null;
   const dailyEnd   = mode === "recent" ? localISO(new Date(Date.now() + offsetMs)) : null;
   const dailyParams = [dailyStart && `start=${dailyStart}`, dailyEnd && `end=${dailyEnd}`].filter(Boolean).join("&");
-  const daily = await fetch(`/api/plug_daily${dailyParams ? "?" + dailyParams : ""}`).then(r => r.json());
+  const daily = await fetchJSON(`/api/plug_daily${dailyParams ? "?" + dailyParams : ""}`);
   dailyChart.data.datasets = buildDailyDatasets(daily);
   dailyChart.data.datasets.forEach((ds, i) =>
     dailyChart.setDatasetVisibility(i, !hiddenDevices.has(ds.device)));
@@ -2482,6 +2608,26 @@ _SENSORS_PAGE = """\
   </div>
   <div class="chart-wrap"><h2>Battery (%)</h2><canvas id="chart-battery" height="80"></canvas></div>
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
 const colorMap = {};
 let mode = "recent", rangeDays = 1, activeMonth = null, offsetMs = 0;
@@ -2609,7 +2755,7 @@ function localISO(d) {
 }
 
 async function loadSensors() {
-  const data = await fetch("/api/current").then(r => r.json());
+  const data = await fetchJSON("/api/current");
   const labels = data.map(s => s.label).filter(Boolean).sort();
   labels.forEach((lbl, i) => { colorMap[lbl] = COLORS[i % COLORS.length]; });
 
@@ -2635,22 +2781,22 @@ async function loadChart() {
     const xMax = new Date(Date.now() + offsetMs);
     const xMin = new Date(xMax - rangeDays * 86400000);
     const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
-    data = await fetch(`/api/history?${params}`).then(r => r.json());
+    data = await fetchJSON(`/api/history?${params}`);
     batteryChart.options.scales.x.min = xMin;
     batteryChart.options.scales.x.max = xMax;
     batteryChart.options.scales.x.time.unit = rangeDays === 0.125 ? "minute" : rangeDays === 1 ? "hour" : "day";
     batteryChart.options.scales.x.ticks.stepSize = rangeDays === 0.125 ? 30 : 1;
-    const peek = await fetch(`/api/history?end=${localISO(xMin)}&limit=1&bucket_minutes=${getBucket()}`).then(r => r.json());
+    const peek = await fetchJSON(`/api/history?end=${localISO(xMin)}&limit=1&bucket_minutes=${getBucket()}`);
     document.getElementById('btn-prev').disabled = peek.length === 0;
     document.getElementById('btn-next').disabled = offsetMs >= 0;
   } else if (mode === "month") {
-    data = await fetch(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
+    data = await fetchJSON(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`);
     const xMin = new Date(2000, activeMonth - 1, 1), xMax = new Date(2000, activeMonth, 0, 23, 59, 59);
     batteryChart.options.scales.x.min = xMin;
     batteryChart.options.scales.x.max = xMax;
     batteryChart.options.scales.x.time.unit = "day";
   } else {
-    data = await fetch(`/api/history/year?bucket_minutes=${getBucket()}`).then(r => r.json());
+    data = await fetchJSON(`/api/history/year?bucket_minutes=${getBucket()}`);
     batteryChart.options.scales.x.min = new Date(2000, 0, 1);
     batteryChart.options.scales.x.max = new Date(2000, 11, 31, 23, 59, 59);
     batteryChart.options.scales.x.time.unit = "month";
@@ -2768,6 +2914,26 @@ _SIGNAL_PAGE = """\
   </div>
   <div class="chart-wrap"><h2>RSSI (dBm) <small style="font-size:0.55em;color:#7a90a8;font-weight:normal">higher is better</small></h2><canvas id="chart" height="120"></canvas></div>
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
 const colorMap = {};
 let mode = "recent", rangeDays = 1, activeMonth = null, offsetMs = 0;
@@ -2883,7 +3049,7 @@ function localISO(d) {
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 async function loadSensors() {
-  const data = await fetch("/api/current").then(r => r.json());
+  const data = await fetchJSON("/api/current");
   const labels = data.map(s => s.label).filter(Boolean).sort();
   labels.forEach((lbl, i) => { colorMap[lbl] = COLORS[i % COLORS.length]; });
   const btnsEl = document.getElementById('sensor-btns');
@@ -2923,22 +3089,22 @@ async function loadChart() {
     const xMax = new Date(Date.now() + offsetMs);
     const xMin = new Date(xMax - rangeDays * 86400000);
     const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
-    data = await fetch(`/api/history?${params}`).then(r => r.json());
+    data = await fetchJSON(`/api/history?${params}`);
     chart.options.scales.x.min = xMin;
     chart.options.scales.x.max = xMax;
     chart.options.scales.x.time.unit = rangeDays === 0.125 ? "minute" : rangeDays === 1 ? "hour" : "day";
     chart.options.scales.x.ticks.stepSize = rangeDays === 0.125 ? 30 : 1;
-    const peek = await fetch(`/api/history?end=${localISO(xMin)}&limit=1&bucket_minutes=${getBucket()}`).then(r => r.json());
+    const peek = await fetchJSON(`/api/history?end=${localISO(xMin)}&limit=1&bucket_minutes=${getBucket()}`);
     document.getElementById('btn-prev').disabled = peek.length === 0;
     document.getElementById('btn-next').disabled = offsetMs >= 0;
   } else if (mode === "month") {
-    data = await fetch(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`).then(r => r.json());
+    data = await fetchJSON(`/api/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`);
     const xMin = new Date(2000, activeMonth - 1, 1), xMax = new Date(2000, activeMonth, 0, 23, 59, 59);
     chart.options.scales.x.min = xMin;
     chart.options.scales.x.max = xMax;
     chart.options.scales.x.time.unit = "day";
   } else {
-    data = await fetch(`/api/history/year?bucket_minutes=${getBucket()}`).then(r => r.json());
+    data = await fetchJSON(`/api/history/year?bucket_minutes=${getBucket()}`);
     chart.options.scales.x.min = new Date(2000, 0, 1);
     chart.options.scales.x.max = new Date(2000, 11, 31, 23, 59, 59);
     chart.options.scales.x.time.unit = "month";
@@ -3042,9 +3208,29 @@ def events_page():
     <tbody id="tbody"><tr><td colspan="4" class="empty">Loading&hellip;</td></tr></tbody>
   </table>
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 const EVENT_LABELS = """ + str(EVENT_LABELS).replace("'", '"') + """;
 async function load() {
-  const data = await fetch("/api/events?limit=100").then(r => r.json());
+  const data = await fetchJSON("/api/events?limit=100");
   const tbody = document.getElementById("tbody");
   if (!data.length) {
     tbody.innerHTML = '<tr><td colspan="4" class="empty">No events recorded yet.</td></tr>';
@@ -3121,9 +3307,11 @@ def index():
     .chart-link:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12), 0 6px 18px rgba(0,0,0,.08); transform: translateY(-1px); }
     .chart-link .cl-title { font-size: .9rem; font-weight: 600; }
     .chart-link .cl-arrow { color: #aabbc8; font-size: 1.1rem; }
+    #error-bar { display:none; background:#fde8e8; color:#c0392b; border-radius:8px; padding:.6rem 1rem; margin-bottom:1rem; font-size:.85rem; font-weight:500; }
   </style>
 </head>
 <body>
+  <div id="error-bar"></div>
   <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a></h1>
 
   <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem">
@@ -3152,30 +3340,62 @@ def index():
   </div>
 
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
+const _errors = new Set();
+function showError(section) {
+  if (_errors.has(section)) return;
+  _errors.add(section);
+  const bar = document.getElementById("error-bar");
+  bar.style.display = "";
+  bar.textContent = "Failed to load: " + [..._errors].join(", ") + ". Check network connection.";
+}
 async function loadCurrent() {
-  const data = await fetch("/api/current").then(r => r.json());
-  document.getElementById("cards").innerHTML = data.map(s => `
-    <div class="card">
-      <div class="label">${s.label || s.address}</div>
-      <div class="temp">${s.temp_f.toFixed(1)}&deg;F</div>
-      <div class="hum">${s.humidity.toFixed(1)}% RH</div>
-      <div class="ts">${new Date(s.ts).toLocaleString()}</div>
-    </div>`).join("");
+  try {
+    const data = await fetchJSON("/api/current");
+    document.getElementById("cards").innerHTML = data.map(s => `
+      <div class="card">
+        <div class="label">${s.label || s.address}</div>
+        <div class="temp">${s.temp_f.toFixed(1)}&deg;F</div>
+        <div class="hum">${s.humidity.toFixed(1)}% RH</div>
+        <div class="ts">${new Date(s.ts).toLocaleString()}</div>
+      </div>`).join("");
+  } catch(e) { showError("sensors"); }
 }
 async function loadPresence() {
-  const data = await fetch("/api/presence").then(r => r.json());
-  const el = document.getElementById("presence-cards");
-  if (!data.length) { el.innerHTML = ""; return; }
-  el.innerHTML = data.map(d => {
-    const ago = d.last_seen ? timeSince(new Date(d.last_seen)) : "never";
-    return `<a href="/presence" class="presence-card" style="text-decoration:none;color:inherit">
-      <div class="presence-dot ${d.status}"></div>
-      <div class="presence-info">
-        <div class="name">${d.name}</div>
-        <div class="status">${d.status} &middot; ${ago}</div>
-      </div>
-    </a>`;
-  }).join("");
+  try {
+    const data = await fetchJSON("/api/presence");
+    const el = document.getElementById("presence-cards");
+    if (!data.length) { el.innerHTML = ""; return; }
+    el.innerHTML = data.map(d => {
+      const ago = d.last_seen ? timeSince(new Date(d.last_seen)) : "never";
+      return `<a href="/presence" class="presence-card" style="text-decoration:none;color:inherit">
+        <div class="presence-dot ${d.status}"></div>
+        <div class="presence-info">
+          <div class="name">${d.name}</div>
+          <div class="status">${d.status} &middot; ${ago}</div>
+        </div>
+      </a>`;
+    }).join("");
+  } catch(e) { showError("presence"); }
 }
 function timeSince(date) {
   const s = Math.floor((Date.now() - date) / 1000);
@@ -3192,21 +3412,23 @@ const EV_LABELS = {
   inside_outside_parity: ["Inside / Outside Parity", "b-io"],
 };
 async function loadEvents() {
-  const data = await fetch("/api/events?limit=15").then(r => r.json());
-  const wrap = document.getElementById("events-wrap");
-  const el = document.getElementById("events-list");
-  if (!data.length) { wrap.style.display = "none"; return; }
-  wrap.style.display = "";
-  el.innerHTML = data.map(e => {
-    const [label, cls] = EV_LABELS[e.event_type] || [e.event_type, "b-io"];
-    const timeStr = new Date(e.ts.replace(" ", "T")).toLocaleString();
-    const detail = e.details || (e.value != null ? `${e.value.toFixed(1)}°F` : "");
-    return `<div class="ev-row">
-      <span class="ev-badge ${cls}">${label}</span>
-      <span class="ev-detail">${detail}</span>
-      <span class="ev-time">${timeStr}</span>
-    </div>`;
-  }).join("");
+  try {
+    const data = await fetchJSON("/api/events?limit=15");
+    const wrap = document.getElementById("events-wrap");
+    const el = document.getElementById("events-list");
+    if (!data.length) { wrap.style.display = "none"; return; }
+    wrap.style.display = "";
+    el.innerHTML = data.map(e => {
+      const [label, cls] = EV_LABELS[e.event_type] || [e.event_type, "b-io"];
+      const timeStr = new Date(e.ts.replace(" ", "T")).toLocaleString();
+      const detail = e.details || (e.value != null ? `${e.value.toFixed(1)}°F` : "");
+      return `<div class="ev-row">
+        <span class="ev-badge ${cls}">${label}</span>
+        <span class="ev-detail">${detail}</span>
+        <span class="ev-time">${timeStr}</span>
+      </div>`;
+    }).join("");
+  } catch(e) { showError("events"); }
 }
 const garageOpenSince = {};  // name -> ms timestamp when last opened
 function fmtDur(ms) {
@@ -3225,10 +3447,10 @@ function tickGarageTimers() {
 }
 setInterval(tickGarageTimers, 1000);
 async function loadGarage() {
-  const garages = await fetch("/api/garage").then(r => r.json());
+  const garages = await fetchJSON("/api/garage");
   if (!garages.length) return;
   const results = await Promise.all(garages.map(g =>
-    fetch(`/api/garage/${encodeURIComponent(g.name)}/status`).then(r => r.json())
+    fetchJSON(`/api/garage/${encodeURIComponent(g.name)}/status`)
       .then(s => ({ name: g.name, ...s })).catch(() => ({ name: g.name, ok: false }))
   ));
   const el = document.getElementById("garage-cards");
@@ -3325,6 +3547,26 @@ _PROCESS_STATS_PAGE = """\
   <div class="chart-wrap"><h2>CPU %</h2><canvas id="cpu-chart" height="80"></canvas></div>
   <div class="chart-wrap"><h2>Memory (MB)</h2><canvas id="mem-chart" height="80"></canvas></div>
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 let rangeDays = 1;
 
 function makeChart(id, label, color, yLabel) {
@@ -3357,7 +3599,7 @@ function setRange(days) {
 }
 
 async function load() {
-  const data = await fetch(`/api/process-stats?days=${rangeDays}`).then(r => r.json());
+  const data = await fetchJSON(`/api/process-stats?days=${rangeDays}`);
   const now = new Date();
   const xMin = new Date(now - rangeDays * 86400000);
   [cpuChart, memChart].forEach(c => { c.options.scales.x.min = xMin; c.options.scales.x.max = now;
@@ -3601,6 +3843,26 @@ _CAMERA_VIEW_PAGE = """\
   </div>
 
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 let cameras = [], activeCam = null, liveInterval = null, live = true;
 
 function fmtDt(ts) {
@@ -3627,14 +3889,14 @@ function refreshFrame() {
 
 async function flipCam() {
   if (!activeCam) return;
-  const data = await fetch(`/api/camera/flip/${encodeURIComponent(activeCam)}`, { method: "POST" }).then(r => r.json());
+  const data = await fetchJSON(`/api/camera/flip/${encodeURIComponent(activeCam)}`, { method: "POST" });
   document.getElementById("flip-btn").textContent = data.flipped ? "Unflip" : "Flip 180°";
   refreshFrame();
 }
 
 async function loadEvents() {
   if (!activeCam) return;
-  const data = await fetch(`/api/camera/events/${encodeURIComponent(activeCam)}`).then(r => r.json());
+  const data = await fetchJSON(`/api/camera/events/${encodeURIComponent(activeCam)}`);
   const wrap = document.getElementById("events-wrap");
   if (!data.length) {
     wrap.innerHTML = '<p class="empty">No motion events recorded yet.</p>';
@@ -3716,7 +3978,7 @@ async function loadVitals(days) {
       b.style.borderColor = active ? "#2e7dd4" : "#d0dce8";
     });
   }
-  const data = await fetch(`/api/camera/vitals/${encodeURIComponent(activeCam)}?days=${vitalsRangeDays}`).then(r => r.json());
+  const data = await fetchJSON(`/api/camera/vitals/${encodeURIComponent(activeCam)}?days=${vitalsRangeDays}`);
   const panel = document.getElementById("vitals-panel");
   if (!data.length) { panel.style.display = "none"; return; }
   panel.style.display = "";
@@ -3759,7 +4021,7 @@ function switchCam(name) {
 }
 
 async function init() {
-  const data = await fetch("/api/cameras").then(r => r.json());
+  const data = await fetchJSON("/api/cameras");
   cameras = data;
   if (!cameras.length) {
     document.getElementById("no-cameras").style.display = "";
@@ -3854,6 +4116,26 @@ _CAMERA_PAGE = """\
     <div class="zones-list" id="zones-list"></div>
   </div>
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad"];
 let cameras = [], activeCam = null;
 let zones = [], selectedIdx = -1;
@@ -4076,7 +4358,7 @@ async function refreshFrame() {
 }
 
 async function loadZones() {
-  const data = await fetch(`/api/camera/zones/${encodeURIComponent(activeCam)}`).then(r => r.json());
+  const data = await fetchJSON(`/api/camera/zones/${encodeURIComponent(activeCam)}`);
   zones = data;
   renderZoneList();
   redraw();
@@ -4110,7 +4392,7 @@ function switchCam(name) {
 }
 
 async function init() {
-  const data = await fetch("/api/cameras").then(r => r.json());
+  const data = await fetchJSON("/api/cameras");
   cameras = data;
   const tabs = document.getElementById("cam-tabs");
   if (!cameras.length) {
@@ -4271,6 +4553,26 @@ _GARAGE_PAGE = """\
     </table>
   </div>
 <script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
 const openSince = {};  // name -> Date when door first seen open
 
 function fmtDuration(ms) {
@@ -4352,14 +4654,14 @@ function applyStatus(name, data) {
 }
 
 async function refreshStatus(name) {
-  const data = await fetch(`/api/garage/${encodeURIComponent(name)}/status`).then(r => r.json());
+  const data = await fetchJSON(`/api/garage/${encodeURIComponent(name)}/status`);
   applyStatus(name, data);
 }
 
 async function loadHistory(garages) {
   const allEvents = [];
   for (const g of garages) {
-    const evts = await fetch(`/api/garage/${encodeURIComponent(g.name)}/events`).then(r => r.json());
+    const evts = await fetchJSON(`/api/garage/${encodeURIComponent(g.name)}/events`);
     for (const e of evts) allEvents.push({name: g.name, ...e});
   }
   allEvents.sort((a, b) => b.ts.localeCompare(a.ts));
@@ -4374,7 +4676,7 @@ async function loadHistory(garages) {
 }
 
 async function load() {
-  const garages = await fetch("/api/garage").then(r => r.json());
+  const garages = await fetchJSON("/api/garage");
   const el = document.getElementById("doors");
   if (!garages.length) {
     document.getElementById("no-garages").style.display = "";
@@ -4404,7 +4706,7 @@ async function load() {
 }
 
 load();
-setInterval(() => fetch("/api/garage").then(r => r.json()).then(gs => gs.forEach(g => refreshStatus(g.name))), 10000);
+setInterval(() => fetchJSON("/api/garage").then(gs => gs.forEach(g => refreshStatus(g.name))), 10000);
 </script>
 </body>
 </html>"""
