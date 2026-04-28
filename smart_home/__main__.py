@@ -1689,6 +1689,7 @@ def monitor(duration, verbose, db, no_db):
                             conn, p["device"], p.get("ip"),
                             reading["watts"], reading["volts"], reading["amps"],
                             reading["energy_wh"], reading["power_factor"], reading["is_on"],
+                            reading["today_kwh"], reading["yesterday_kwh"],
                         )
                 except Exception as e:
                     ts = datetime.datetime.now().strftime("%H:%M:%S")

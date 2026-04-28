@@ -442,6 +442,40 @@ def plug_history_year():
     return jsonify(result)
 
 
+@app.get("/api/plug_daily")
+def plug_daily():
+    """Daily energy totals from the device's own accumulator.
+    Returns the MAX(today_kwh) per calendar day per label — the end-of-day
+    device reading, which is more accurate than integrating sampled watts.
+    Query params: start, end (ISO date), label.
+    """
+    label = request.args.get("label")
+    start = (request.args.get("start") or "").replace("T", " ") or None
+    end   = (request.args.get("end")   or "").replace("T", " ") or None
+
+    where, params = ["today_kwh IS NOT NULL", "label IS NOT NULL"], []
+    if label:
+        where.append("label = ?")
+        params.append(label)
+    if start:
+        where.append("ts >= ?")
+        params.append(start)
+    if end:
+        where.append("ts <= ?")
+        params.append(end)
+
+    where_sql = " WHERE " + " AND ".join(where)
+    sql = f"""
+        SELECT DATE(ts) AS date, label, ROUND(MAX(today_kwh), 3) AS kwh
+        FROM plug_readings{where_sql}
+        GROUP BY DATE(ts), label
+        ORDER BY date ASC
+    """
+    with _conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
 @app.get("/presence")
 def presence_page():
     return Response("""<!DOCTYPE html>
@@ -2108,6 +2142,7 @@ _ENERGY_PAGE = """\
     </div>
   </div>
   <div class="chart-wrap"><h2>Power (W)</h2><canvas id="chart-watts" height="120"></canvas></div>
+  <div class="chart-wrap"><h2>Daily Energy (kWh) &mdash; device accumulator</h2><canvas id="chart-daily" height="80"></canvas></div>
 <script>
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
 const colorMap = {};
@@ -2237,6 +2272,47 @@ const wattsChart = new Chart(document.getElementById("chart-watts"), {
     }
   }
 });
+const dailyChart = new Chart(document.getElementById("chart-daily"), {
+  type: "bar", data: { datasets: [] },
+  options: {
+    animation: false, parsing: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        enabled: false,
+        external: function({ chart, tooltip }) {
+          let el = document.getElementById('chartjs-tt-daily');
+          if (!el) {
+            el = document.createElement('div');
+            el.id = 'chartjs-tt-daily';
+            el.style.cssText = 'position:absolute;pointer-events:none;background:rgba(0,0,0,.75);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;font-family:system-ui,sans-serif;white-space:nowrap;z-index:10;';
+            chart.canvas.parentNode.style.position = 'relative';
+            chart.canvas.parentNode.appendChild(el);
+          }
+          if (tooltip.opacity === 0) { el.style.display = 'none'; return; }
+          const title = (tooltip.title || [])[0] || '';
+          let html = title ? '<div style="font-weight:600;margin-bottom:3px;">' + title + '</div>' : '';
+          for (const item of (tooltip.dataPoints || [])) {
+            if (item.raw == null || item.raw.y == null) continue;
+            const color = item.dataset.backgroundColor || '#ccc';
+            html += '<div style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:' + color + ';flex-shrink:0;"></span><span>' + (item.dataset.label || '') + ': ' + item.raw.y.toFixed(3) + ' kWh</span></div>';
+          }
+          el.innerHTML = html;
+          el.style.display = 'block';
+          const pw = chart.canvas.parentNode.offsetWidth;
+          const tw = el.offsetWidth || 160;
+          el.style.left = (tooltip.caretX + tw + 14 > pw ? tooltip.caretX - tw - 4 : tooltip.caretX + 14) + 'px';
+          el.style.top = Math.max(0, tooltip.caretY - 20) + 'px';
+        }
+      }
+    },
+    scales: {
+      x: { type: "time", time: { unit: "day", tooltipFormat: "MMM d, yyyy" }, ticks: { color: "#7a90a8", maxTicksLimit: 14 }, grid: { color: "#e8eef4" } },
+      y: { min: 0, ticks: { color: "#7a90a8", callback: v => v + " kWh" }, grid: { color: "#e8eef4" } }
+    }
+  }
+});
 function buildDatasets(data) {
   const byKey = {};
   const yearMode = mode !== "recent";
@@ -2256,13 +2332,27 @@ function buildDatasets(data) {
     borderWidth: 1.5, pointRadius: 0, tension: 0,
   }));
 }
+function buildDailyDatasets(daily) {
+  const byDevice = {};
+  for (const row of daily) {
+    if (row.label == null) continue;
+    (byDevice[row.label] ??= []).push({ x: new Date(row.date), y: row.kwh });
+  }
+  return Object.keys(byDevice).sort().map(dev => ({
+    label: dev, device: dev, data: byDevice[dev],
+    backgroundColor: colorMap[dev] || COLORS[0],
+    borderWidth: 0,
+  }));
+}
 async function loadChart() {
   let data, xMin, xMax, timeUnit;
   if (mode === "recent") {
     xMax = new Date(Date.now() + offsetMs);
     xMin = new Date(xMax - rangeDays * 86400000);
     const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
-    data = await fetch(`/api/plug_history?${params}`).then(r => r.json());
+    [data] = await Promise.all([
+      fetch(`/api/plug_history?${params}`).then(r => r.json()),
+    ]);
     timeUnit = rangeDays >= 3 ? "day" : "hour";
     const peek = await fetch(`/api/plug_history?end=${localISO(xMin)}&limit=1`).then(r => r.json());
     document.getElementById('btn-prev').disabled = peek.length === 0;
@@ -2285,6 +2375,18 @@ async function loadChart() {
   wattsChart.options.scales.x.max = xMax;
   wattsChart.options.scales.x.time.unit = timeUnit;
   wattsChart.update();
+
+  const dailyStart = mode === "recent" ? localISO(new Date(Date.now() + offsetMs - Math.max(rangeDays, 7) * 86400000)) : null;
+  const dailyEnd   = mode === "recent" ? localISO(new Date(Date.now() + offsetMs)) : null;
+  const dailyParams = [dailyStart && `start=${dailyStart}`, dailyEnd && `end=${dailyEnd}`].filter(Boolean).join("&");
+  const daily = await fetch(`/api/plug_daily${dailyParams ? "?" + dailyParams : ""}`).then(r => r.json());
+  dailyChart.data.datasets = buildDailyDatasets(daily);
+  dailyChart.data.datasets.forEach((ds, i) =>
+    dailyChart.setDatasetVisibility(i, !hiddenDevices.has(ds.device)));
+  dailyChart.options.scales.x.min = mode === "recent" ? new Date(Date.now() + offsetMs - Math.max(rangeDays, 7) * 86400000) : xMin;
+  dailyChart.options.scales.x.max = mode === "recent" ? new Date(Date.now() + offsetMs) : xMax;
+  dailyChart.options.scales.x.time.unit = mode === "year" ? "month" : "day";
+  dailyChart.update();
 }
 loadChart();
 setInterval(loadChart, 30000);

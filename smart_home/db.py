@@ -41,20 +41,28 @@ def open_db(path: str) -> sqlite3.Connection:
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS plug_readings (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts           TEXT NOT NULL,
-            address      TEXT,
-            label        TEXT,
-            watts        REAL,
-            volts        REAL,
-            amps         REAL,
-            energy_wh    REAL,
-            power_factor INTEGER,
-            is_on        INTEGER,
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts            TEXT NOT NULL,
+            address       TEXT,
+            label         TEXT,
+            watts         REAL,
+            volts         REAL,
+            amps          REAL,
+            energy_wh     REAL,
+            power_factor  INTEGER,
+            is_on         INTEGER,
+            today_kwh     REAL,
+            yesterday_kwh REAL,
             UNIQUE(ts, label)
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS plug_readings_label_ts ON plug_readings (label, ts DESC)")
+    for col in ("today_kwh REAL", "yesterday_kwh REAL"):
+        try:
+            conn.execute(f"ALTER TABLE plug_readings ADD COLUMN {col}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS garage_events (
             id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,14 +132,15 @@ def insert_no_reading(conn: sqlite3.Connection, label: str, address: str | None 
 
 def insert_plug_reading(conn: sqlite3.Connection, label: str, address: str | None,
                         watts: float | None, volts: float | None, amps: float | None,
-                        energy_wh: float | None, power_factor: int | None, is_on: bool | None) -> None:
+                        energy_wh: float | None, power_factor: int | None, is_on: bool | None,
+                        today_kwh: float | None = None, yesterday_kwh: float | None = None) -> None:
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
         "INSERT OR IGNORE INTO plug_readings "
-        "(ts, address, label, watts, volts, amps, energy_wh, power_factor, is_on) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "(ts, address, label, watts, volts, amps, energy_wh, power_factor, is_on, today_kwh, yesterday_kwh) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (ts, address, label, watts, volts, amps, energy_wh, power_factor,
-         int(is_on) if is_on is not None else None),
+         int(is_on) if is_on is not None else None, today_kwh, yesterday_kwh),
     )
     conn.commit()
 
