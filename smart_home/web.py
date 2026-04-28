@@ -2200,6 +2200,12 @@ _ENERGY_PAGE = """\
     .res-row { display: flex; align-items: center; gap: .6rem; margin-bottom: 1.2rem; }
     .res-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
     .res-row select { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; cursor: pointer; }
+    .cost-row { display: flex; align-items: center; gap: .6rem; margin-bottom: 1.2rem; flex-wrap: wrap; }
+    .cost-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+    .cost-row input[type=number] { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; width: 110px; }
+    .cost-row button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; font-size: .85rem; font-weight: 500; cursor: pointer; transition: all .15s; }
+    .cost-row button:disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+    .cost-row button.active { background: #2e7dd4; color: #fff; border-color: #2e7dd4; }
   </style>
 </head>
 <body>
@@ -2248,7 +2254,12 @@ _ENERGY_PAGE = """\
     </div>
   </div>
   <div class="chart-wrap"><h2>Power (W)</h2><canvas id="chart-watts" height="120"></canvas></div>
-  <div class="chart-wrap"><h2>Daily Energy (kWh) &mdash; device accumulator</h2><canvas id="chart-daily" height="80"></canvas></div>
+  <div class="cost-row">
+    <label for="cost-rate">Electricity cost ($/kWh)</label>
+    <input type="number" id="cost-rate" min="0" step="0.001" placeholder="e.g. 0.12" oninput="onCostChange()">
+    <button id="cost-toggle" onclick="toggleCostMode()" disabled>Show $</button>
+  </div>
+  <div class="chart-wrap"><h2 id="daily-chart-title">Daily Energy (kWh) &mdash; device accumulator</h2><canvas id="chart-daily" height="80"></canvas></div>
 <script>
 function showNetworkError(msg) {
   let el = document.getElementById('_net_err');
@@ -2274,6 +2285,7 @@ const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d3
 const colorMap = {};
 const hiddenDevices = new Set();
 let mode = "recent", rangeDays = 1, activeMonth = null, offsetMs = 0;
+let showCost = false, lastDailyRaw = [], dailyXMin = null, dailyXMax = null, dailyXUnit = "day";
 const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 const isLocal = /^192\\.168\\./.test(location.hostname) || /\\.local$/.test(location.hostname);
 let resolution = isLocal ? "max" : isMobile ? "low" : "medium";
@@ -2422,7 +2434,10 @@ const dailyChart = new Chart(document.getElementById("chart-daily"), {
           for (const item of (tooltip.dataPoints || [])) {
             if (item.raw == null || item.raw.y == null) continue;
             const color = item.dataset.backgroundColor || '#ccc';
-            html += '<div style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:' + color + ';flex-shrink:0;"></span><span>' + (item.dataset.label || '') + ': ' + item.raw.y.toFixed(3) + ' kWh</span></div>';
+            const rate = parseFloat(document.getElementById('cost-rate').value) || 0;
+            const useCost = showCost && rate > 0;
+            const valStr = useCost ? '$' + item.raw.y.toFixed(2) : item.raw.y.toFixed(3) + ' kWh';
+            html += '<div style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:' + color + ';flex-shrink:0;"></span><span>' + (item.dataset.label || '') + ': ' + valStr + '</span></div>';
           }
           el.innerHTML = html;
           el.style.display = 'block';
@@ -2458,17 +2473,47 @@ function buildDatasets(data) {
     borderWidth: 1.5, pointRadius: 0, tension: 0,
   }));
 }
-function buildDailyDatasets(daily) {
+function buildDailyDatasets(daily, costRate) {
   const byDevice = {};
   for (const row of daily) {
     if (row.label == null) continue;
-    (byDevice[row.label] ??= []).push({ x: new Date(row.date), y: row.kwh });
+    const y = costRate ? row.kwh * costRate : row.kwh;
+    (byDevice[row.label] ??= []).push({ x: new Date(row.date), y });
   }
   return Object.keys(byDevice).sort().map(dev => ({
     label: dev, device: dev, data: byDevice[dev],
     backgroundColor: colorMap[dev] || COLORS[0],
     borderWidth: 0,
   }));
+}
+function onCostChange() {
+  const val = parseFloat(document.getElementById('cost-rate').value);
+  const btn = document.getElementById('cost-toggle');
+  const valid = val > 0;
+  btn.disabled = !valid;
+  if (!valid && showCost) { showCost = false; btn.textContent = 'Show $'; btn.classList.remove('active'); }
+  if (lastDailyRaw.length) renderDailyChart();
+}
+function toggleCostMode() {
+  showCost = !showCost;
+  const btn = document.getElementById('cost-toggle');
+  btn.textContent = showCost ? 'Show kWh' : 'Show $';
+  btn.classList.toggle('active', showCost);
+  renderDailyChart();
+}
+function renderDailyChart() {
+  const rate = parseFloat(document.getElementById('cost-rate').value) || 0;
+  const useCost = showCost && rate > 0;
+  document.getElementById('daily-chart-title').textContent =
+    (useCost ? 'Daily Cost ($)' : 'Daily Energy (kWh)') + ' — device accumulator';
+  dailyChart.data.datasets = buildDailyDatasets(lastDailyRaw, useCost ? rate : null);
+  dailyChart.data.datasets.forEach((ds, i) =>
+    dailyChart.setDatasetVisibility(i, !hiddenDevices.has(ds.device)));
+  dailyChart.options.scales.x.min = dailyXMin;
+  dailyChart.options.scales.x.max = dailyXMax;
+  dailyChart.options.scales.x.time.unit = dailyXUnit;
+  dailyChart.options.scales.y.ticks.callback = useCost ? v => '$' + v.toFixed(2) : v => v + ' kWh';
+  dailyChart.update();
 }
 async function loadChart() {
   let data, xMin, xMax, timeUnit;
@@ -2506,13 +2551,11 @@ async function loadChart() {
   const dailyEnd   = mode === "recent" ? localISO(new Date(Date.now() + offsetMs)) : null;
   const dailyParams = [dailyStart && `start=${dailyStart}`, dailyEnd && `end=${dailyEnd}`].filter(Boolean).join("&");
   const daily = await fetchJSON(`/api/plug_daily${dailyParams ? "?" + dailyParams : ""}`);
-  dailyChart.data.datasets = buildDailyDatasets(daily);
-  dailyChart.data.datasets.forEach((ds, i) =>
-    dailyChart.setDatasetVisibility(i, !hiddenDevices.has(ds.device)));
-  dailyChart.options.scales.x.min = mode === "recent" ? new Date(Date.now() + offsetMs - Math.max(rangeDays, 7) * 86400000) : xMin;
-  dailyChart.options.scales.x.max = mode === "recent" ? new Date(Date.now() + offsetMs) : xMax;
-  dailyChart.options.scales.x.time.unit = mode === "year" ? "month" : "day";
-  dailyChart.update();
+  lastDailyRaw = daily;
+  dailyXMin = mode === "recent" ? new Date(Date.now() + offsetMs - Math.max(rangeDays, 7) * 86400000) : xMin;
+  dailyXMax = mode === "recent" ? new Date(Date.now() + offsetMs) : xMax;
+  dailyXUnit = mode === "year" ? "month" : "day";
+  renderDailyChart();
 }
 loadChart();
 setInterval(loadChart, 30000);
