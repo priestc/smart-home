@@ -294,3 +294,79 @@ Scan for a fixed duration and show decoded readings:
 ```bash
 smart-home scan-once
 ```
+
+---
+
+## Command-line Reference
+
+All commands are invoked as `smart-home <command>`.
+
+### Device Management
+
+| Command | Description |
+|---|---|
+| `add-device` | Register a new device (BLE sensor, smart plug, thermostat, presence, garage, or camera) |
+| `remove-device <name>` | Remove a registered device by name. Add `--purge` to also delete its DB history (BLE sensors only) |
+| `list-devices` | Show all registered devices of every type |
+| `label` | Scan for BLE sensors and assign labels interactively |
+
+### Smart Plugs
+
+| Command | Description |
+|---|---|
+| `set-plug-threshold <device> <watts>` | Set the minimum watt threshold that marks a plug as "on" (see below) |
+
+#### Why `set-plug-threshold` is needed
+
+Many devices draw a small standby/phantom load even when switched "off" — a TV may idle at 2–4 W, a game console at 1–3 W. Without a threshold the monitor records these as always-on, making the daily on-time chart useless.
+
+Set the threshold just above the standby draw so that only genuine active use is counted:
+
+```bash
+# TV idles at ~3 W in standby; anything above 5 W means it's actually on
+smart-home set-plug-threshold "TV" 5
+```
+
+The threshold is stored in `~/.config/smart-home/smart_plugs.json` and applied immediately on the next monitor poll cycle. Historical readings are also re-evaluated against the current threshold when the on-time chart is rendered.
+
+### Monitoring & Data
+
+| Command | Description |
+|---|---|
+| `monitor` | Run the background monitor: polls BLE sensors, smart plugs, thermostats, cameras, and garage doors continuously |
+| `serve` | Run the HTTP API and web dashboard |
+| `scan-once` | Scan for a fixed duration and print decoded readings |
+| `scan-all` | Scan for all nearby BLE devices and dump raw advertisement data |
+
+### Sensor History & Diagnostics
+
+| Command | Description |
+|---|---|
+| `recent-readings <label>` | Show the most recent readings for a sensor label |
+| `sensor-history` | Show recent sensor readings from the database |
+| `presence-history` | Show presence history (away count and time breakdown) |
+| `gatt-dump [sensor]` | Dump all GATT services for a BLE sensor |
+| `pvvx-history <sensor>` | Read and display internal history stored on a PVVX sensor |
+| `backfill` | Pull stored history from PVVX sensors to fill gaps in the database |
+
+### Data Import/Export
+
+| Command | Description |
+|---|---|
+| `import <zipfile> --label <name>` | Import temperature history from a Govee app export zip |
+
+### Firmware
+
+| Command | Description |
+|---|---|
+| `flash [address]` | Flash PVVX custom firmware onto a Xiaomi LYWSD03MMC sensor |
+| `mark-pvvx <address>` | Mark a sensor as already running PVVX firmware |
+
+### System & Notifications
+
+| Command | Description |
+|---|---|
+| `install-services` | Copy systemd service files and reload the daemon |
+| `configure-push` | Set up Apple Push Notification (APNs) credentials |
+| `test-push` | Send a test push notification to all registered devices |
+| `see-monitor` | Stream the live monitor service log (`journalctl -u smart-home.service -f`) |

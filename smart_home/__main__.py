@@ -811,6 +811,36 @@ def remove_device(name, purge, db):
         click.echo("Run 'smart-home list-devices' to see all registered devices.")
 
 
+@main.command("set-plug-threshold")
+@click.argument("device")
+@click.argument("watts", type=float)
+def set_plug_threshold(device, watts):
+    """Set the minimum watt threshold that marks a plug as 'on'.
+
+    DEVICE is the device name (what is plugged into the smart plug, as set
+    during add-device). WATTS is the threshold in watts — readings at or below
+    this value will be treated as 'off'.
+
+    Some devices (TVs, game consoles, etc.) draw a small standby current even
+    when switched off. Without a threshold the monitor would log them as always
+    on. Set the threshold just above the standby draw to get accurate on-time
+    tracking in the daily on-time chart.
+
+    Example: if your TV idles at ~3W in standby, run:
+
+        smart-home set-plug-threshold "TV" 5
+    """
+    plugs = _smart_plug.load_config()
+    match = next((p for p in plugs if p.get("device") == device), None)
+    if match is None:
+        names = [p.get("device", "?") for p in plugs]
+        click.echo(f"Device '{device}' not found. Known devices: {', '.join(names)}", err=True)
+        raise SystemExit(1)
+    match["threshold_watts"] = watts
+    _smart_plug.save_config(plugs)
+    click.echo(f"Threshold for '{device}' set to {watts} W. Readings above this will be marked as on.")
+
+
 @main.command("test-push")
 def test_push():
     """Send a test push notification to all registered devices."""
@@ -1678,6 +1708,9 @@ def monitor(duration, verbose, db, no_db):
                 try:
                     loop = asyncio.get_running_loop()
                     reading = await loop.run_in_executor(None, _smart_plug.fetch_reading, p["ip"])
+                    threshold = p.get("threshold_watts", 0)
+                    w = reading.get("watts_calc") if reading.get("watts_calc") is not None else (reading.get("watts") or 0)
+                    reading["is_on"] = w > threshold
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
                     click.echo(
                         f"[{ts}] Plug '{p['name']}' ({p['device']}): "

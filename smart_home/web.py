@@ -476,6 +476,53 @@ def plug_daily():
     return jsonify([dict(r) for r in rows])
 
 
+@app.get("/api/plug_cumulative_on")
+def plug_cumulative_on():
+    """Daily on-time in hours per plug, computed from watt readings vs per-device threshold.
+    Query params: start, end (ISO datetime), label.
+    """
+    from smart_home import smart_plug as _sp
+    plugs_cfg = _sp.load_config()
+    thresholds = {p["device"]: p.get("threshold_watts", 0) for p in plugs_cfg}
+
+    label = request.args.get("label")
+    start = (request.args.get("start") or "").replace("T", " ") or None
+    end   = (request.args.get("end")   or "").replace("T", " ") or None
+
+    where, params = ["label IS NOT NULL"], []
+    if label:
+        where.append("label = ?")
+        params.append(label)
+    if start:
+        where.append("ts >= ?")
+        params.append(start)
+    if end:
+        where.append("ts <= ?")
+        params.append(end)
+    where_sql = " WHERE " + " AND ".join(where)
+
+    with _conn() as conn:
+        rows = conn.execute(
+            f"SELECT strftime('%Y-%m-%d', ts) AS date, label, COALESCE(watts_calc, watts) AS w "
+            f"FROM plug_readings{where_sql} ORDER BY ts",
+            params,
+        ).fetchall()
+
+    POLL_INTERVAL_SECS = 30
+    totals: dict = {}
+    for row in rows:
+        d, lbl, w = row["date"], row["label"], row["w"]
+        if w is not None and w > thresholds.get(lbl, 0):
+            key = (d, lbl)
+            totals[key] = totals.get(key, 0) + POLL_INTERVAL_SECS / 3600
+
+    result = [
+        {"date": k[0], "label": k[1], "on_hours": round(v, 3)}
+        for k, v in sorted(totals.items())
+    ]
+    return jsonify(result)
+
+
 @app.get("/presence")
 def presence_page():
     return Response("""<!DOCTYPE html>
@@ -2260,6 +2307,7 @@ _ENERGY_PAGE = """\
     <button id="cost-toggle" onclick="toggleCostMode()" disabled>Show $</button>
   </div>
   <div class="chart-wrap"><h2 id="daily-chart-title">Daily Energy (kWh) &mdash; device accumulator</h2><canvas id="chart-daily" height="80"></canvas></div>
+  <div class="chart-wrap"><h2>Daily On-Time (hours)</h2><canvas id="chart-ontime" height="80"></canvas></div>
 <script>
 function showNetworkError(msg) {
   let el = document.getElementById('_net_err');
@@ -2323,9 +2371,10 @@ function toggleDevice(device, btn) {
   else { hiddenDevices.add(device); }
   const active = !hiddenDevices.has(device);
   applyBtnColor(btn, colorMap[device] || COLORS[0], active);
-  wattsChart.data.datasets.forEach((ds, i) =>
-    wattsChart.setDatasetVisibility(i, !hiddenDevices.has(ds.device)));
-  wattsChart.update();
+  for (const ch of [wattsChart, dailyChart, onTimeChart]) {
+    ch.data.datasets.forEach((ds, i) => ch.setDatasetVisibility(i, !hiddenDevices.has(ds.device)));
+    ch.update();
+  }
 }
 function updateDeviceButtons(devices) {
   const container = document.getElementById('device-btns');
@@ -2454,6 +2503,50 @@ const dailyChart = new Chart(document.getElementById("chart-daily"), {
     }
   }
 });
+const onTimeChart = new Chart(document.getElementById("chart-ontime"), {
+  type: "bar", data: { datasets: [] },
+  options: {
+    animation: false, parsing: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        enabled: false,
+        external: function({ chart, tooltip }) {
+          let el = document.getElementById('chartjs-tt-ontime');
+          if (!el) {
+            el = document.createElement('div');
+            el.id = 'chartjs-tt-ontime';
+            el.style.cssText = 'position:absolute;pointer-events:none;background:rgba(0,0,0,.75);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;font-family:system-ui,sans-serif;white-space:nowrap;z-index:10;';
+            chart.canvas.parentNode.style.position = 'relative';
+            chart.canvas.parentNode.appendChild(el);
+          }
+          if (tooltip.opacity === 0) { el.style.display = 'none'; return; }
+          const title = (tooltip.title || [])[0] || '';
+          let html = title ? '<div style="font-weight:600;margin-bottom:3px;">' + title + '</div>' : '';
+          for (const item of (tooltip.dataPoints || [])) {
+            if (item.raw == null || item.raw.y == null) continue;
+            const color = item.dataset.backgroundColor || '#ccc';
+            const h = Math.floor(item.raw.y);
+            const m = Math.round((item.raw.y - h) * 60);
+            const valStr = h > 0 ? `${h}h ${m}m` : `${m}m`;
+            html += '<div style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:' + color + ';flex-shrink:0;"></span><span>' + (item.dataset.label || '') + ': ' + valStr + '</span></div>';
+          }
+          el.innerHTML = html;
+          el.style.display = 'block';
+          const pw = chart.canvas.parentNode.offsetWidth;
+          const tw = el.offsetWidth || 160;
+          el.style.left = (tooltip.caretX + tw + 14 > pw ? tooltip.caretX - tw - 4 : tooltip.caretX + 14) + 'px';
+          el.style.top = Math.max(0, tooltip.caretY - 20) + 'px';
+        }
+      }
+    },
+    scales: {
+      x: { type: "time", time: { unit: "day", tooltipFormat: "MMM d, yyyy" }, ticks: { color: "#7a90a8", maxTicksLimit: 14 }, grid: { color: "#e8eef4" } },
+      y: { min: 0, max: 24, ticks: { color: "#7a90a8", callback: v => v + "h" }, grid: { color: "#e8eef4" } }
+    }
+  }
+});
 function buildDatasets(data) {
   const byKey = {};
   const yearMode = mode !== "recent";
@@ -2515,6 +2608,28 @@ function renderDailyChart() {
   dailyChart.options.scales.y.ticks.callback = useCost ? v => '$' + v.toFixed(2) : v => v + ' kWh';
   dailyChart.update();
 }
+let lastOnTimeRaw = [];
+function buildOnTimeDatasets(ontime) {
+  const byDevice = {};
+  for (const row of ontime) {
+    if (row.label == null) continue;
+    (byDevice[row.label] ??= []).push({ x: new Date(row.date), y: row.on_hours });
+  }
+  return Object.keys(byDevice).sort().map(dev => ({
+    label: dev, device: dev, data: byDevice[dev],
+    backgroundColor: colorMap[dev] || COLORS[0],
+    borderWidth: 0,
+  }));
+}
+function renderOnTimeChart(xMin, xMax, xUnit) {
+  onTimeChart.data.datasets = buildOnTimeDatasets(lastOnTimeRaw);
+  onTimeChart.data.datasets.forEach((ds, i) =>
+    onTimeChart.setDatasetVisibility(i, !hiddenDevices.has(ds.device)));
+  onTimeChart.options.scales.x.min = xMin;
+  onTimeChart.options.scales.x.max = xMax;
+  onTimeChart.options.scales.x.time.unit = xUnit || "day";
+  onTimeChart.update();
+}
 async function loadChart() {
   let data, xMin, xMax, timeUnit;
   if (mode === "recent") {
@@ -2550,12 +2665,17 @@ async function loadChart() {
   const dailyStart = mode === "recent" ? localISO(new Date(Date.now() + offsetMs - Math.max(rangeDays, 7) * 86400000)) : null;
   const dailyEnd   = mode === "recent" ? localISO(new Date(Date.now() + offsetMs)) : null;
   const dailyParams = [dailyStart && `start=${dailyStart}`, dailyEnd && `end=${dailyEnd}`].filter(Boolean).join("&");
-  const daily = await fetchJSON(`/api/plug_daily${dailyParams ? "?" + dailyParams : ""}`);
+  const [daily, ontime] = await Promise.all([
+    fetchJSON(`/api/plug_daily${dailyParams ? "?" + dailyParams : ""}`),
+    fetchJSON(`/api/plug_cumulative_on${dailyParams ? "?" + dailyParams : ""}`),
+  ]);
   lastDailyRaw = daily;
+  lastOnTimeRaw = ontime;
   dailyXMin = mode === "recent" ? new Date(Date.now() + offsetMs - Math.max(rangeDays, 7) * 86400000) : xMin;
   dailyXMax = mode === "recent" ? new Date(Date.now() + offsetMs) : xMax;
   dailyXUnit = mode === "year" ? "month" : "day";
   renderDailyChart();
+  renderOnTimeChart(dailyXMin, dailyXMax, dailyXUnit);
 }
 loadChart();
 setInterval(loadChart, 30000);
