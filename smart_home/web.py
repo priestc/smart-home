@@ -522,6 +522,68 @@ def plug_cumulative_on():
     return jsonify(result)
 
 
+@app.get("/api/plug_on_off_stats")
+def plug_on_off_stats():
+    """Per-device on/off stats for an interval.
+    Query params: start, end (ISO datetime), month (1-12), label.
+    Returns per-device: on_hours, off_hours, avg_watts_on, avg_watts_off.
+    """
+    from smart_home import smart_plug as _sp
+    thresholds = _sp.load_thresholds()
+
+    label = request.args.get("label")
+    start = (request.args.get("start") or "").replace("T", " ") or None
+    end   = (request.args.get("end")   or "").replace("T", " ") or None
+    month = request.args.get("month", type=int)
+
+    where, params = ["label IS NOT NULL", "(watts_calc IS NOT NULL OR watts IS NOT NULL)"], []
+    if label:
+        where.append("label = ?")
+        params.append(label)
+    if month:
+        where.append("strftime('%m', ts) = ?")
+        params.append(f"{month:02d}")
+    if start:
+        where.append("ts >= ?")
+        params.append(start)
+    if end:
+        where.append("ts <= ?")
+        params.append(end)
+    where_sql = " WHERE " + " AND ".join(where)
+
+    POLL_INTERVAL_SECS = 30
+    with _conn() as conn:
+        rows = conn.execute(
+            f"SELECT label, COALESCE(watts_calc, watts) AS w FROM plug_readings{where_sql}",
+            params,
+        ).fetchall()
+
+    stats: dict = {}
+    for row in rows:
+        lbl, w = row["label"], row["w"]
+        if lbl not in stats:
+            stats[lbl] = {"on_count": 0, "off_count": 0, "on_watts_sum": 0.0, "off_watts_sum": 0.0}
+        if w > thresholds.get(lbl, 0):
+            stats[lbl]["on_count"] += 1
+            stats[lbl]["on_watts_sum"] += w
+        else:
+            stats[lbl]["off_count"] += 1
+            stats[lbl]["off_watts_sum"] += w
+
+    result = []
+    for lbl, s in sorted(stats.items()):
+        on_h  = s["on_count"]  * POLL_INTERVAL_SECS / 3600
+        off_h = s["off_count"] * POLL_INTERVAL_SECS / 3600
+        result.append({
+            "label":         lbl,
+            "on_hours":      round(on_h,  3),
+            "off_hours":     round(off_h, 3),
+            "avg_watts_on":  round(s["on_watts_sum"]  / s["on_count"],  2) if s["on_count"]  else None,
+            "avg_watts_off": round(s["off_watts_sum"] / s["off_count"], 2) if s["off_count"] else None,
+        })
+    return jsonify(result)
+
+
 @app.get("/presence")
 def presence_page():
     return Response("""<!DOCTYPE html>
@@ -2252,6 +2314,15 @@ _ENERGY_PAGE = """\
     .cost-row button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; font-size: .85rem; font-weight: 500; cursor: pointer; transition: all .15s; }
     .cost-row button:disabled { opacity: 0.4; cursor: default; pointer-events: none; }
     .cost-row button.active { background: #2e7dd4; color: #fff; border-color: #2e7dd4; }
+    .stats-wrap { background: #fff; border-radius: 12px; padding: 1.4rem 1.4rem 1rem; margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); overflow-x: auto; }
+    .stats-wrap h2 { font-size: 0.85rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: 1rem; }
+    .stats-table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+    .stats-table th { color: #7a90a8; font-weight: 600; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; border-bottom: 2px solid #e8eef4; padding: .4rem .7rem; text-align: left; white-space: nowrap; }
+    .stats-table td { padding: .45rem .7rem; border-bottom: 1px solid #f0f4f8; color: #1a2535; white-space: nowrap; }
+    .stats-table tr:last-child td { border-bottom: none; }
+    .stats-table td.device-cell { font-weight: 600; }
+    .stats-table td.on-cell { color: #2a9d6e; }
+    .stats-table td.off-cell { color: #7a90a8; }
   </style>
 </head>
 <body>
@@ -2300,6 +2371,13 @@ _ENERGY_PAGE = """\
     </div>
   </div>
   <div class="chart-wrap"><h2>Power (W)</h2><canvas id="chart-watts" height="120"></canvas></div>
+  <div id="stats-wrap" class="stats-wrap" style="display:none;">
+    <h2>Interval Summary</h2>
+    <table class="stats-table" id="stats-table">
+      <thead><tr id="stats-thead"></tr></thead>
+      <tbody id="stats-tbody"></tbody>
+    </table>
+  </div>
   <div class="cost-row">
     <label for="cost-rate">Electricity cost ($/kWh)</label>
     <input type="number" id="cost-rate" min="0" step="0.001" placeholder="e.g. 0.12" oninput="onCostChange()">
@@ -2332,7 +2410,7 @@ const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d3
 const colorMap = {};
 const hiddenDevices = new Set();
 let mode = "recent", rangeDays = 1, activeMonth = null, offsetMs = 0;
-let showCost = false, lastDailyRaw = [], dailyXMin = null, dailyXMax = null, dailyXUnit = "day";
+let showCost = false, lastDailyRaw = [], lastStatsRaw = [], dailyXMin = null, dailyXMax = null, dailyXUnit = "day";
 const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 const isLocal = /^192\\.168\\./.test(location.hostname) || /\\.local$/.test(location.hostname);
 let resolution = isLocal ? "max" : isMobile ? "low" : "medium";
@@ -2585,6 +2663,7 @@ function onCostChange() {
   btn.disabled = !valid;
   if (!valid && showCost) { showCost = false; btn.textContent = 'Show $'; btn.classList.remove('active'); }
   if (lastDailyRaw.length) renderDailyChart();
+  renderStatsTable();
 }
 function toggleCostMode() {
   showCost = !showCost;
@@ -2592,6 +2671,7 @@ function toggleCostMode() {
   btn.textContent = showCost ? 'Show kWh' : 'Show $';
   btn.classList.toggle('active', showCost);
   renderDailyChart();
+  renderStatsTable();
 }
 function renderDailyChart() {
   const rate = parseFloat(document.getElementById('cost-rate').value) || 0;
@@ -2629,8 +2709,39 @@ function renderOnTimeChart(xMin, xMax, xUnit) {
   onTimeChart.options.scales.x.time.unit = xUnit || "day";
   onTimeChart.update();
 }
+function fmtHours(h) {
+  if (h == null) return '—';
+  const hrs = Math.floor(h), mins = Math.round((h - hrs) * 60);
+  return hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+}
+function renderStatsTable() {
+  const wrap = document.getElementById('stats-wrap');
+  if (!lastStatsRaw.length) { wrap.style.display = 'none'; return; }
+  const rate = parseFloat(document.getElementById('cost-rate').value) || 0;
+  const showRate = rate > 0;
+  const thead = document.getElementById('stats-thead');
+  const tbody = document.getElementById('stats-tbody');
+  const costCols = showRate ? '<th>Cost/hr (on)</th><th>Cost/hr (off)</th>' : '';
+  thead.innerHTML = `<th>Device</th><th>On Time</th><th>Off Time</th><th>Avg W (on)</th><th>Avg W (off)</th>${costCols}`;
+  tbody.innerHTML = '';
+  for (const row of lastStatsRaw) {
+    const costOnStr  = showRate && row.avg_watts_on  != null ? '$' + (row.avg_watts_on  / 1000 * rate).toFixed(4) : '';
+    const costOffStr = showRate && row.avg_watts_off != null ? '$' + (row.avg_watts_off / 1000 * rate).toFixed(4) : '';
+    const costCells = showRate ? `<td class="on-cell">${costOnStr || '—'}</td><td class="off-cell">${costOffStr || '—'}</td>` : '';
+    const dot = colorMap[row.label] ? `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${colorMap[row.label]};margin-right:5px;vertical-align:middle;"></span>` : '';
+    tbody.innerHTML += `<tr>
+      <td class="device-cell">${dot}${row.label}</td>
+      <td class="on-cell">${fmtHours(row.on_hours)}</td>
+      <td class="off-cell">${fmtHours(row.off_hours)}</td>
+      <td class="on-cell">${row.avg_watts_on != null ? row.avg_watts_on.toFixed(1) + ' W' : '—'}</td>
+      <td class="off-cell">${row.avg_watts_off != null ? row.avg_watts_off.toFixed(1) + ' W' : '—'}</td>
+      ${costCells}
+    </tr>`;
+  }
+  wrap.style.display = '';
+}
 async function loadChart() {
-  let data, xMin, xMax, timeUnit;
+  let data, xMin, xMax, timeUnit, statsParams;
   if (mode === "recent") {
     xMax = new Date(Date.now() + offsetMs);
     xMin = new Date(xMax - rangeDays * 86400000);
@@ -2642,16 +2753,19 @@ async function loadChart() {
     const peek = await fetchJSON(`/api/plug_history?end=${localISO(xMin)}&limit=1`);
     document.getElementById('btn-prev').disabled = peek.length === 0;
     document.getElementById('btn-next').disabled = offsetMs >= 0;
+    statsParams = `start=${localISO(xMin)}&end=${localISO(xMax)}`;
   } else if (mode === "month") {
     data = await fetchJSON(`/api/plug_history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`);
     xMin = new Date(2000, activeMonth - 1, 1);
     xMax = new Date(2000, activeMonth, 0, 23, 59, 59);
     timeUnit = "day";
+    statsParams = `month=${activeMonth}`;
   } else {
     data = await fetchJSON(`/api/plug_history/year?bucket_minutes=${getBucket()}`);
     xMin = new Date(2000, 0, 1);
     xMax = new Date(2000, 11, 31, 23, 59, 59);
     timeUnit = "month";
+    statsParams = '';
   }
   wattsChart.data.datasets = buildDatasets(data);
   wattsChart.data.datasets.forEach((ds, i) =>
@@ -2664,17 +2778,20 @@ async function loadChart() {
   const dailyStart = mode === "recent" ? localISO(new Date(Date.now() + offsetMs - Math.max(rangeDays, 7) * 86400000)) : null;
   const dailyEnd   = mode === "recent" ? localISO(new Date(Date.now() + offsetMs)) : null;
   const dailyParams = [dailyStart && `start=${dailyStart}`, dailyEnd && `end=${dailyEnd}`].filter(Boolean).join("&");
-  const [daily, ontime] = await Promise.all([
+  const [daily, ontime, stats] = await Promise.all([
     fetchJSON(`/api/plug_daily${dailyParams ? "?" + dailyParams : ""}`),
     fetchJSON(`/api/plug_cumulative_on${dailyParams ? "?" + dailyParams : ""}`),
+    fetchJSON(`/api/plug_on_off_stats${statsParams ? "?" + statsParams : ""}`),
   ]);
   lastDailyRaw = daily;
   lastOnTimeRaw = ontime;
+  lastStatsRaw = stats;
   dailyXMin = mode === "recent" ? new Date(Date.now() + offsetMs - Math.max(rangeDays, 7) * 86400000) : xMin;
   dailyXMax = mode === "recent" ? new Date(Date.now() + offsetMs) : xMax;
   dailyXUnit = mode === "year" ? "month" : "day";
   renderDailyChart();
   renderOnTimeChart(dailyXMin, dailyXMax, dailyXUnit);
+  renderStatsTable();
 }
 fetchJSON('/api/energy-cost').then(d => {
   if (d.rate != null) {
