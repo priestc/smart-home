@@ -315,6 +315,7 @@ All commands are invoked as `smart-home <command>`.
 | Command | Description |
 |---|---|
 | `set-on-threshold <device_label> <watts>` | Set the minimum watt threshold that marks a measured device as "on" (see below) |
+| `set-energy-cost <rate>` | Set the electricity cost ($/kWh) pre-filled in energy charts (see below) |
 
 #### Why `set-on-threshold` is needed
 
@@ -328,6 +329,17 @@ smart-home set-on-threshold Entertainment 14
 ```
 
 The threshold is tied to the **device label** (the name of what is plugged in), not to the plug itself. If you reassign the plug to monitor a different device, the old threshold is automatically invalidated and the new label starts at zero. Thresholds are stored in `~/.config/smart-home/on_thresholds.json` and applied immediately on the next monitor poll cycle. Historical readings are also re-evaluated against the current threshold when the on-time chart is rendered.
+
+#### `set-energy-cost`
+
+Sets the electricity rate used to convert kWh readings into dollar amounts in the web UI. Once set, the value is pre-filled in the "Electricity cost ($/kWh)" input on every energy chart so you don't have to type it each visit.
+
+```bash
+# 12 cents per kWh
+smart-home set-energy-cost 0.12
+```
+
+The rate is stored in `~/.config/smart-home/energy_cost.json`.
 
 ### Monitoring & Data
 

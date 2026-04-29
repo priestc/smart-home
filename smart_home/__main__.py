@@ -840,6 +840,26 @@ def set_on_threshold(device_label, watts):
     click.echo(f"On-threshold for '{device_label}' set to {watts} W.")
 
 
+@main.command("set-energy-cost")
+@click.argument("rate", type=float)
+def set_energy_cost(rate):
+    """Set the electricity cost used to calculate energy spend in the web UI.
+
+    RATE is the cost in dollars per kWh (e.g. 0.12 for 12 cents/kWh).
+    The value is stored in ~/.config/smart-home/energy_cost.json and
+    pre-filled automatically in the electricity cost input on all energy charts.
+
+    Example:
+
+        smart-home set-energy-cost 0.12
+    """
+    if rate <= 0:
+        click.echo("Rate must be greater than zero.", err=True)
+        raise SystemExit(1)
+    _smart_plug.save_energy_cost(rate)
+    click.echo(f"Energy cost set to ${rate:.4f}/kWh.")
+
+
 @main.command("test-push")
 def test_push():
     """Send a test push notification to all registered devices."""

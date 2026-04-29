@@ -7,6 +7,7 @@ from pathlib import Path
 _CONFIG_DIR = Path.home() / ".config" / "smart-home"
 _PLUGS_FILE = _CONFIG_DIR / "smart_plugs.json"
 _THRESHOLDS_FILE = _CONFIG_DIR / "on_thresholds.json"
+_ENERGY_COST_FILE = _CONFIG_DIR / "energy_cost.json"
 
 
 def load_config() -> list[dict]:
@@ -40,6 +41,24 @@ def save_thresholds(thresholds: dict[str, float]) -> None:
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(_THRESHOLDS_FILE, "w") as f:
         json.dump(thresholds, f, indent=2)
+
+
+def load_energy_cost() -> float | None:
+    """Return stored $/kWh rate, or None if not set."""
+    if _ENERGY_COST_FILE.exists():
+        try:
+            with open(_ENERGY_COST_FILE) as f:
+                data = json.load(f)
+                return data.get("rate")
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return None
+
+
+def save_energy_cost(rate: float) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_ENERGY_COST_FILE, "w") as f:
+        json.dump({"rate": rate}, f, indent=2)
 
 
 def local_subnet() -> str:

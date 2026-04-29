@@ -2676,11 +2676,24 @@ async function loadChart() {
   renderDailyChart();
   renderOnTimeChart(dailyXMin, dailyXMax, dailyXUnit);
 }
+fetchJSON('/api/energy-cost').then(d => {
+  if (d.rate != null) {
+    document.getElementById('cost-rate').value = d.rate;
+    onCostChange();
+  }
+}).catch(() => {});
 loadChart();
 setInterval(loadChart, 30000);
 </script>
 </body>
 </html>"""
+
+
+@app.get("/api/energy-cost")
+def get_energy_cost():
+    from smart_home import smart_plug as _sp
+    rate = _sp.load_energy_cost()
+    return jsonify({"rate": rate})
 
 
 @app.get("/chart/energy")
