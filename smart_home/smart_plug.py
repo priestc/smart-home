@@ -78,12 +78,15 @@ def fetch_reading(ip: str) -> dict:
     r.raise_for_status()
     data = r.json()
     energy = data.get("StatusSNS", {}).get("ENERGY", {})
+    v, i, pf = energy.get("Voltage"), energy.get("Current"), energy.get("Factor")
+    watts_calc = round(v * i * pf, 2) if None not in (v, i, pf) else None
     return {
         "watts":         energy.get("Power"),
-        "volts":         energy.get("Voltage"),
-        "amps":          energy.get("Current"),
+        "watts_calc":    watts_calc,
+        "volts":         v,
+        "amps":          i,
         "energy_wh":     energy.get("Total", 0) * 1000 if energy.get("Total") is not None else None,
-        "power_factor":  energy.get("Factor"),
+        "power_factor":  pf,
         "is_on":         energy.get("Power", 0) > 0,
         "today_kwh":     energy.get("Today"),
         "yesterday_kwh": energy.get("Yesterday"),

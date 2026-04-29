@@ -366,7 +366,7 @@ def plug_history():
             SELECT
                 strftime('%Y-%m-%d %H:%M:%S', CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs}, 'unixepoch') AS ts,
                 label,
-                ROUND(AVG(watts), 2)        AS watts,
+                ROUND(AVG(COALESCE(watts_calc, watts)), 2) AS watts,
                 ROUND(AVG(amps), 3)         AS amps,
                 ROUND(AVG(volts), 1)        AS volts,
                 ROUND(AVG(power_factor), 0) AS power_factor
@@ -375,7 +375,7 @@ def plug_history():
             ORDER BY ts ASC LIMIT ?
         """
     else:
-        sql = f"SELECT ts, label, watts, amps, volts, power_factor FROM plug_readings{where_sql} ORDER BY ts ASC LIMIT ?"
+        sql = f"SELECT ts, label, COALESCE(watts_calc, watts) AS watts, amps, volts, power_factor FROM plug_readings{where_sql} ORDER BY ts ASC LIMIT ?"
 
     params.append(limit)
     with _conn() as conn:
@@ -399,10 +399,10 @@ def plug_history_month():
                 strftime('%Y', ts) AS year,
                 CAST(strftime('%s', '2000' || substr(ts, 5)) AS INTEGER) / ? * ? AS bucket,
                 label,
-                ROUND(AVG(watts), 2) AS watts
+                ROUND(AVG(COALESCE(watts_calc, watts)), 2) AS watts
             FROM plug_readings
             WHERE strftime('%m', ts) = ?
-              AND watts IS NOT NULL AND label IS NOT NULL
+              AND (watts_calc IS NOT NULL OR watts IS NOT NULL) AND label IS NOT NULL
             GROUP BY bucket, label, year
             ORDER BY bucket ASC
         """, (bucket_secs, bucket_secs, month_str)).fetchall()
@@ -428,9 +428,9 @@ def plug_history_year():
                 strftime('%Y', ts) AS year,
                 CAST(strftime('%s', '2000' || substr(ts, 5)) AS INTEGER) / ? * ? AS bucket,
                 label,
-                ROUND(AVG(watts), 2) AS watts
+                ROUND(AVG(COALESCE(watts_calc, watts)), 2) AS watts
             FROM plug_readings
-            WHERE watts IS NOT NULL AND label IS NOT NULL
+            WHERE (watts_calc IS NOT NULL OR watts IS NOT NULL) AND label IS NOT NULL
             GROUP BY bucket, label, year
             ORDER BY bucket ASC
         """, (bucket_secs, bucket_secs)).fetchall()
