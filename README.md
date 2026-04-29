@@ -314,20 +314,20 @@ All commands are invoked as `smart-home <command>`.
 
 | Command | Description |
 |---|---|
-| `set-plug-threshold <device> <watts>` | Set the minimum watt threshold that marks a plug as "on" (see below) |
+| `set-on-threshold <device_label> <watts>` | Set the minimum watt threshold that marks a measured device as "on" (see below) |
 
-#### Why `set-plug-threshold` is needed
+#### Why `set-on-threshold` is needed
 
 Many devices draw a small standby/phantom load even when switched "off" — a TV may idle at 2–4 W, a game console at 1–3 W. Without a threshold the monitor records these as always-on, making the daily on-time chart useless.
 
 Set the threshold just above the standby draw so that only genuine active use is counted:
 
 ```bash
-# TV idles at ~3 W in standby; anything above 5 W means it's actually on
-smart-home set-plug-threshold "TV" 5
+# Entertainment center idles at ~10 W in standby; anything above 14 W means it's actually in use
+smart-home set-on-threshold Entertainment 14
 ```
 
-The threshold is stored in `~/.config/smart-home/smart_plugs.json` and applied immediately on the next monitor poll cycle. Historical readings are also re-evaluated against the current threshold when the on-time chart is rendered.
+The threshold is tied to the **device label** (the name of what is plugged in), not to the plug itself. If you reassign the plug to monitor a different device, the old threshold is automatically invalidated and the new label starts at zero. Thresholds are stored in `~/.config/smart-home/on_thresholds.json` and applied immediately on the next monitor poll cycle. Historical readings are also re-evaluated against the current threshold when the on-time chart is rendered.
 
 ### Monitoring & Data
 

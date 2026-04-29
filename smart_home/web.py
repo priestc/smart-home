@@ -482,8 +482,7 @@ def plug_cumulative_on():
     Query params: start, end (ISO datetime), label.
     """
     from smart_home import smart_plug as _sp
-    plugs_cfg = _sp.load_config()
-    thresholds = {p["device"]: p.get("threshold_watts", 0) for p in plugs_cfg}
+    thresholds = _sp.load_thresholds()
 
     label = request.args.get("label")
     start = (request.args.get("start") or "").replace("T", " ") or None

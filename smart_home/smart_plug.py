@@ -6,6 +6,7 @@ from pathlib import Path
 
 _CONFIG_DIR = Path.home() / ".config" / "smart-home"
 _PLUGS_FILE = _CONFIG_DIR / "smart_plugs.json"
+_THRESHOLDS_FILE = _CONFIG_DIR / "on_thresholds.json"
 
 
 def load_config() -> list[dict]:
@@ -22,6 +23,23 @@ def save_config(plugs: list[dict]) -> None:
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(_PLUGS_FILE, "w") as f:
         json.dump(plugs, f, indent=2)
+
+
+def load_thresholds() -> dict[str, float]:
+    """Return {device_label: threshold_watts} from on_thresholds.json."""
+    if _THRESHOLDS_FILE.exists():
+        try:
+            with open(_THRESHOLDS_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return {}
+
+
+def save_thresholds(thresholds: dict[str, float]) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_THRESHOLDS_FILE, "w") as f:
+        json.dump(thresholds, f, indent=2)
 
 
 def local_subnet() -> str:

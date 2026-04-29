@@ -811,34 +811,33 @@ def remove_device(name, purge, db):
         click.echo("Run 'smart-home list-devices' to see all registered devices.")
 
 
-@main.command("set-plug-threshold")
-@click.argument("device")
+@main.command("set-on-threshold")
+@click.argument("device_label")
 @click.argument("watts", type=float)
-def set_plug_threshold(device, watts):
-    """Set the minimum watt threshold that marks a plug as 'on'.
+def set_on_threshold(device_label, watts):
+    """Set the minimum watt threshold that marks a measured device as 'on'.
 
-    DEVICE is the device name (what is plugged into the smart plug, as set
-    during add-device). WATTS is the threshold in watts — readings at or below
-    this value will be treated as 'off'.
+    DEVICE_LABEL is the name of what is plugged into the smart plug (as set
+    during add-device, e.g. "Entertainment" or "TV"). WATTS is the threshold —
+    readings at or below this value are treated as 'off'.
 
-    Some devices (TVs, game consoles, etc.) draw a small standby current even
-    when switched off. Without a threshold the monitor would log them as always
-    on. Set the threshold just above the standby draw to get accurate on-time
-    tracking in the daily on-time chart.
+    The threshold is stored by device label, not by plug. If you later change
+    what the plug monitors (i.e. change the device label), the old threshold is
+    automatically invalidated and the new label starts at zero.
 
-    Example: if your TV idles at ~3W in standby, run:
+    Example:
 
-        smart-home set-plug-threshold "TV" 5
+        smart-home set-on-threshold Entertainment 14
     """
     plugs = _smart_plug.load_config()
-    match = next((p for p in plugs if p.get("device") == device), None)
-    if match is None:
-        names = [p.get("device", "?") for p in plugs]
-        click.echo(f"Device '{device}' not found. Known devices: {', '.join(names)}", err=True)
+    known = [p.get("device", "?") for p in plugs]
+    if device_label not in known:
+        click.echo(f"Device label '{device_label}' not found. Known labels: {', '.join(known)}", err=True)
         raise SystemExit(1)
-    match["threshold_watts"] = watts
-    _smart_plug.save_config(plugs)
-    click.echo(f"Threshold for '{device}' set to {watts} W. Readings above this will be marked as on.")
+    thresholds = _smart_plug.load_thresholds()
+    thresholds[device_label] = watts
+    _smart_plug.save_thresholds(thresholds)
+    click.echo(f"On-threshold for '{device_label}' set to {watts} W.")
 
 
 @main.command("test-push")
@@ -1704,11 +1703,12 @@ def monitor(duration, verbose, db, no_db):
         for p in plugs_cfg:
             click.echo(f"Smart plug configured: {p['name']} ({p['device']}) at {p['ip']}")
         while True:
+            thresholds = _smart_plug.load_thresholds()
             for p in plugs_cfg:
                 try:
                     loop = asyncio.get_running_loop()
                     reading = await loop.run_in_executor(None, _smart_plug.fetch_reading, p["ip"])
-                    threshold = p.get("threshold_watts", 0)
+                    threshold = thresholds.get(p["device"], 0)
                     w = reading.get("watts_calc") if reading.get("watts_calc") is not None else (reading.get("watts") or 0)
                     reading["is_on"] = w > threshold
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
