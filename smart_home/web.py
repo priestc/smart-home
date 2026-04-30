@@ -5201,13 +5201,42 @@ def api_garage_status(name):
 
 @app.get("/api/garage/<name>/events")
 def api_garage_events(name):
+    import datetime
     limit = min(int(request.args.get("limit", 200)), 1000)
     with _conn() as conn:
+        # Fetch one extra row so the oldest visible event has a duration too
         rows = conn.execute(
             "SELECT ts, state FROM garage_events WHERE name=? ORDER BY ts DESC LIMIT ?",
-            (name, limit),
+            (name, limit + 1),
         ).fetchall()
-    return jsonify([{"ts": r["ts"], "state": r["state"]} for r in rows])
+    if not rows:
+        return jsonify([])
+
+    def fmt_duration(seconds):
+        seconds = int(seconds)
+        d, rem = divmod(seconds, 86400)
+        h, rem = divmod(rem, 3600)
+        m, s   = divmod(rem, 60)
+        parts = []
+        if d: parts.append(f"{d}d")
+        if h: parts.append(f"{h}h")
+        if m: parts.append(f"{m}m")
+        parts.append(f"{s}s")
+        return " ".join(parts)
+
+    result = []
+    for i, r in enumerate(rows[:-1]):
+        prev = rows[i + 1]
+        t_current = datetime.datetime.fromisoformat(r["ts"])
+        t_prev    = datetime.datetime.fromisoformat(prev["ts"])
+        delta     = (t_current - t_prev).total_seconds()
+        prev_state = "open" if r["state"] == "closed" else "closed"
+        duration = f"{prev_state} for {fmt_duration(delta)}"
+        result.append({"ts": r["ts"], "state": r["state"], "duration": duration})
+    # oldest visible row has no prior event in this window
+    if len(rows) <= limit:
+        result.append({"ts": rows[-1]["ts"], "state": rows[-1]["state"], "duration": ""})
+    return jsonify(result)
 
 
 @app.post("/api/garage/<name>/auto")
@@ -5294,7 +5323,7 @@ _GARAGE_PAGE = """\
   <div class="history" id="history" style="display:none">
     <h2>Event History</h2>
     <table class="history-table">
-      <thead><tr><th>Door</th><th>State</th><th>Time</th></tr></thead>
+      <thead><tr><th>Door</th><th>State</th><th>Time</th><th>Duration</th></tr></thead>
       <tbody id="history-body"></tbody>
     </table>
   </div>
@@ -5418,6 +5447,7 @@ async function loadHistory(garages) {
       <td>${e.name}</td>
       <td class="state-${e.state}">${e.state.toUpperCase()}</td>
       <td>${e.ts}</td>
+      <td style="color:#7a90a8">${e.duration || ""}</td>
     </tr>`).join("");
 }
 
