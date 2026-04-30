@@ -4180,7 +4180,8 @@ const garageOpenSince = {};    // name -> ms timestamp when last opened
 const garageClosedSince = {};  // name -> ms timestamp when last closed
 function fmtDur(ms) {
   const s = Math.floor(ms / 1000);
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sc = s % 60;
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sc = s % 60;
+  if (d > 0) return `${d}d ${h}h ${m}m ${sc}s`;
   if (h > 0) return `${h}h ${m}m ${sc}s`;
   if (m > 0) return `${m}m ${sc}s`;
   return `${sc}s`;
@@ -4229,6 +4230,7 @@ async function loadGarage() {
       <div class="gtimer" id="gtimer-${d.name}"></div>
     </a>`;
   }).join("");
+  tickGarageTimers();
 }
 loadCurrent();
 loadPresence();
@@ -5368,9 +5370,9 @@ const openSince = {};  // name -> Date when door first seen open
 
 function fmtDuration(ms) {
   const s = Math.floor(ms / 1000);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sc = s % 60;
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60), sc = s % 60;
+  if (d > 0) return `${d}d ${h}h ${m}m ${sc}s`;
   if (h > 0) return `${h}h ${m}m ${sc}s`;
   if (m > 0) return `${m}m ${sc}s`;
   return `${sc}s`;
