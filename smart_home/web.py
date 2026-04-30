@@ -5332,7 +5332,7 @@ _GARAGE_PAGE = """\
     .history { margin-top: 2rem; }
     .history h2 { font-size: 1rem; font-weight: 700; color: #1a2535; margin-bottom: .8rem;
                   letter-spacing: -.01em; }
-    .history-table { width: 100%; max-width: 540px; border-collapse: collapse; font-size: .85rem; }
+    .history-table { width: 100%; border-collapse: collapse; font-size: .85rem; white-space: nowrap; }
     .history-table th { text-align: left; color: #7a90a8; font-weight: 600; padding: .3rem .6rem;
                         border-bottom: 1px solid #e0e8f0; }
     .history-table td { padding: .35rem .6rem; border-bottom: 1px solid #f0f4f8; color: #1a2535; }
@@ -5496,7 +5496,7 @@ async function loadHistory(garages) {
   document.getElementById("history-body").innerHTML = allEvents.map(e => `
     <tr>
       <td>${e.name}</td>
-      <td class="state-${e.state}">${e.state.toUpperCase()}</td>
+      <td class="state-${e.state}">${e.state === 'open' ? 'OPENED' : 'CLOSED'}</td>
       <td>${e.ts}</td>
       <td style="color:#7a90a8">${e.duration || ""}</td>
     </tr>`).join("");
