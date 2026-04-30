@@ -33,6 +33,18 @@ def set_auto(name: str, enabled: bool) -> None:
     save_config(garages)
 
 
+def set_presence_device(name: str, ble_name: str | None) -> None:
+    """Set which presence device (by ble_name) triggers auto open/close for this door."""
+    garages = load_config()
+    for g in garages:
+        if g["name"] == name:
+            if ble_name:
+                g["presence_device"] = ble_name
+            else:
+                g.pop("presence_device", None)
+    save_config(garages)
+
+
 def local_subnet() -> str:
     """Return the /24 subnet of the primary outbound interface, e.g. '192.168.1'."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

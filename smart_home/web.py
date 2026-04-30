@@ -5266,6 +5266,15 @@ def api_garage_auto(name):
     return jsonify({"ok": True})
 
 
+@app.post("/api/garage/<name>/presence-device")
+def api_garage_set_presence_device(name):
+    from smart_home import garage as _garage
+    data = request.get_json(silent=True) or {}
+    ble_name = data.get("ble_name") or None
+    _garage.set_presence_device(name, ble_name)
+    return jsonify({"ok": True})
+
+
 @app.post("/api/garage/<name>/trigger")
 def api_garage_trigger(name):
     from smart_home import garage as _garage
@@ -5318,6 +5327,8 @@ _GARAGE_PAGE = """\
     .auto-label { display: flex; align-items: center; gap: .5rem; font-size: .8rem; color: #4a6080;
                   cursor: pointer; user-select: none; }
     .auto-label input[type=checkbox] { width: 1rem; height: 1rem; cursor: pointer; accent-color: #2e7dd4; }
+    .presence-device-row { font-size: .8rem; color: #4a6080; margin-top: .4rem; display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+    .presence-device-row select { font-size: .8rem; color: #1a2535; border: 1px solid #d0dce8; border-radius: 6px; padding: .15rem .4rem; background: #f7fafc; cursor: pointer; }
     #no-garages { color: #7a90a8; font-size: .9rem; }
     .history { margin-top: 2rem; }
     .history h2 { font-size: 1rem; font-weight: 700; color: #1a2535; margin-bottom: .8rem;
@@ -5397,6 +5408,14 @@ async function setAuto(name, enabled) {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({auto: enabled}),
+  });
+}
+
+async function setPresenceDevice(name, ble_name) {
+  await fetch(`/api/garage/${encodeURIComponent(name)}/presence-device`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ble_name: ble_name || null}),
   });
 }
 
@@ -5485,12 +5504,21 @@ async function loadHistory(garages) {
 }
 
 async function load() {
-  const garages = await fetchJSON("/api/garage");
+  const [garages, presenceDevices] = await Promise.all([
+    fetchJSON("/api/garage"),
+    fetchJSON("/api/presence"),
+  ]);
   const el = document.getElementById("doors");
   if (!garages.length) {
     document.getElementById("no-garages").style.display = "";
     return;
   }
+  const deviceOptions = [
+    `<option value="">any device</option>`,
+    ...presenceDevices.map(d =>
+      `<option value="${d.ble_name}">${d.name}</option>`
+    ),
+  ].join("");
   el.innerHTML = garages.map(g => `
     <div class="door-card">
       <div class="door-name">${g.name}</div>
@@ -5504,11 +5532,18 @@ async function load() {
           onchange="setAuto('${g.name}', this.checked)">
         Automatically open/close
       </label>
+      <div class="presence-device-row">
+        when <select id="presence-${g.name}"
+          onchange="setPresenceDevice('${g.name}', this.value)">${deviceOptions}</select>
+        is detected to arrive/depart
+      </div>
     </div>`).join("");
 
   for (const g of garages) {
     const autoEl = document.getElementById(`auto-${g.name}`);
     if (autoEl) autoEl.checked = !!g.auto;
+    const presEl = document.getElementById(`presence-${g.name}`);
+    if (presEl) presEl.value = g.presence_device || "";
     refreshStatus(g.name);
   }
   loadHistory(garages);

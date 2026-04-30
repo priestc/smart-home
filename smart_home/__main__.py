@@ -1050,6 +1050,9 @@ def monitor(duration, verbose, db, no_db):
         for g in _garage.load_config():
             if not g.get("auto"):
                 continue
+            configured = g.get("presence_device")
+            if configured and configured != ble_name:
+                continue
             name, ip, pulse = g["name"], g["ip"], g.get("pulse_seconds", 0.5)
             if name not in _auto_closed_doors:
                 click.echo(f"[{log_ts}] Skipping '{name}' — not auto-closed on departure")
@@ -1151,7 +1154,8 @@ def monitor(duration, verbose, db, no_db):
                             body=f"{label} left home",
                         )
                         for g in _garage.load_config():
-                            if g.get("auto"):
+                            configured = g.get("presence_device")
+                            if g.get("auto") and (not configured or configured == ble_name):
                                 try:
                                     door_status = _garage.get_status(g["ip"])
                                     if door_status.get("door_closed") is False:
