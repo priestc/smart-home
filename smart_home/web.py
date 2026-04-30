@@ -5416,12 +5416,13 @@ async function trigger(name, btn, lastEl) {
     alert("Network error: " + e);
   }
   btn.disabled = false;
-  btn.textContent = "Trigger";
+  refreshStatus(name);
 }
 
 function applyStatus(name, data) {
   const stateEl = document.getElementById(`state-${name}`);
   const timerEl = document.getElementById(`timer-${name}`);
+  const btnEl   = document.getElementById(`btn-${name}`);
   if (!data.ok) {
     stateEl.textContent = "⚠️ unreachable";
     stateEl.className = "door-state unknown";
@@ -5432,6 +5433,7 @@ function applyStatus(name, data) {
   if (data.door_closed === true) {
     stateEl.textContent = "CLOSED";
     stateEl.className = "door-state closed";
+    if (btnEl && !btnEl.disabled) btnEl.textContent = "Click to open";
     delete openSince[name];
     if (data.last_closed) {
       closedSince[name] = new Date(data.last_closed.replace(" ", "T")).getTime();
@@ -5441,6 +5443,7 @@ function applyStatus(name, data) {
   } else if (data.door_closed === false) {
     stateEl.textContent = "OPEN";
     stateEl.className = "door-state open";
+    if (btnEl && !btnEl.disabled) btnEl.textContent = "Click to close";
     delete closedSince[name];
     if (data.last_opened) {
       // Server timestamp is local time ("YYYY-MM-DD HH:MM:SS"); parse as local
@@ -5451,6 +5454,7 @@ function applyStatus(name, data) {
   } else {
     stateEl.textContent = "UNKNOWN";
     stateEl.className = "door-state unknown";
+    if (btnEl && !btnEl.disabled) btnEl.textContent = "Trigger";
     timerEl.textContent = "";
     delete openSince[name];
     delete closedSince[name];
@@ -5493,7 +5497,7 @@ async function load() {
       <div class="door-state unknown" id="state-${g.name}">…</div>
       <div class="open-timer" id="timer-${g.name}"></div>
       <button class="trigger-btn" id="btn-${g.name}"
-        onclick="trigger('${g.name}', this, document.getElementById('last-${g.name}'))">Trigger</button>
+        onclick="trigger('${g.name}', this, document.getElementById('last-${g.name}'))">…</button>
       <div class="last-triggered" id="last-${g.name}"></div>
       <label class="auto-label">
         <input type="checkbox" id="auto-${g.name}"
