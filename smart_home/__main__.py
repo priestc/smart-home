@@ -1634,6 +1634,14 @@ def monitor(duration, verbose, db, no_db):
 
     garages_cfg = _garage.load_config()
     _door_states: dict[str, bool | None] = {}  # name -> door_closed (True=closed, False=open)
+    if conn:
+        for g in garages_cfg:
+            row = conn.execute(
+                "SELECT state FROM garage_events WHERE name=? ORDER BY ts DESC LIMIT 1",
+                (g["name"],),
+            ).fetchone()
+            if row:
+                _door_states[g["name"]] = (row[0] == "closed")
 
     async def garage_door_loop():
         """Poll Shelly garage doors every 15s; log open/closed transitions to garage_events."""
