@@ -43,6 +43,39 @@ def register_push_token():
     return jsonify({"ok": True})
 
 
+@app.post("/api/bandwidth")
+def bandwidth_ingest():
+    """Receive bandwidth readings from BandwidthByDevice (OpenWRT)."""
+    from smart_home import bandwidth as _bandwidth
+    from smart_home.db import insert_bandwidth_readings
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return jsonify({"error": "missing or invalid Authorization header"}), 401
+    token = auth[len("Bearer "):]
+
+    monitor = _bandwidth.find_monitor_by_token(token)
+    if monitor is None:
+        return jsonify({"error": "unknown token"}), 401
+
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "invalid JSON body"}), 400
+
+    raw_ts = data.get("ts")
+    devices = data.get("devices", [])
+    if raw_ts is None:
+        return jsonify({"error": "missing ts field"}), 400
+
+    ts = datetime.datetime.fromtimestamp(int(raw_ts)).strftime("%Y-%m-%d %H:%M:%S")
+
+    if devices:
+        with _conn() as conn:
+            insert_bandwidth_readings(conn, monitor["label"], ts, devices)
+
+    return "", 204
+
+
 @app.get("/api/presence/history")
 def presence_history_api():
     """Per-device presence stats (7d / 30d) and recent away periods."""

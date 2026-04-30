@@ -93,6 +93,7 @@ DEVICE_CATEGORIES = {
     "2": "Thermostat",
     "3": "Smart Plug",
     "4": "Presence Device",
+    "5": "Bandwidth Monitoring",
 }
 
 DEVICE_TYPES = {
@@ -154,6 +155,34 @@ def _add_smart_plug():
 
     click.echo(f"\nSaved. Plug '{name}' monitoring '{device}' ({plug_type} at {ip}) has been registered.")
     click.echo("Run 'smart-home monitor' to start polling this plug.")
+
+
+BANDWIDTH_MONITOR_TYPES = {
+    "1": "BandwidthByDevice (OpenWRT)",
+}
+
+
+def _add_bandwidth_monitor():
+    from smart_home import bandwidth as _bandwidth
+
+    click.echo("What type of bandwidth monitor do you want to add?\n")
+    for key, name in BANDWIDTH_MONITOR_TYPES.items():
+        click.echo(f"  {key}. {name}")
+    click.prompt("\nEnter choice", type=click.Choice(list(BANDWIDTH_MONITOR_TYPES)))
+
+    label = click.prompt("\nWhat do you want to label this router?").strip()
+
+    token = _bandwidth.generate_token()
+    monitors = _bandwidth.load_config()
+    monitors.append({"label": label, "token": token})
+    _bandwidth.save_config(monitors)
+
+    click.echo(f"\nRouter '{label}' registered.")
+    click.echo("\nBearer token (copy this into BandwidthByDevice settings):")
+    click.echo(f"\n  {token}\n")
+    click.echo("In BandwidthByDevice, set the Smart Home API URL to:")
+    click.echo("  http://<your-smart-home-server>:<port>/api/bandwidth")
+    click.echo("and paste the token above as the Bearer Token.")
 
 
 def _add_thermostat():
@@ -464,6 +493,8 @@ def add_device(timeout):
         _add_smart_plug()
     elif choice == "4":
         _add_presence_device(timeout)
+    elif choice == "5":
+        _add_bandwidth_monitor()
 
 
 def _add_ble_sensor(timeout):

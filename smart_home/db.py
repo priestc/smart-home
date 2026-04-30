@@ -109,6 +109,19 @@ def open_db(path: str) -> sqlite3.Connection:
         conn.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bandwidth_readings (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts           TEXT    NOT NULL,
+            router_label TEXT    NOT NULL,
+            mac          TEXT    NOT NULL,
+            hostname     TEXT,
+            down         INTEGER NOT NULL,
+            up           INTEGER NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS bandwidth_readings_router_ts ON bandwidth_readings (router_label, ts DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS bandwidth_readings_mac_ts ON bandwidth_readings (mac, ts DESC)")
     conn.commit()
     return conn
 
@@ -143,6 +156,15 @@ def insert_plug_reading(conn: sqlite3.Connection, label: str, address: str | Non
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (ts, address, label, watts, watts_calc, volts, amps, energy_wh, power_factor,
          int(is_on) if is_on is not None else None, today_kwh, yesterday_kwh),
+    )
+    conn.commit()
+
+
+def insert_bandwidth_readings(conn: sqlite3.Connection, router_label: str,
+                              ts: str, devices: list[dict]) -> None:
+    conn.executemany(
+        "INSERT INTO bandwidth_readings (ts, router_label, mac, hostname, down, up) VALUES (?,?,?,?,?,?)",
+        [(ts, router_label, d["mac"], d.get("hostname"), d["down"], d["up"]) for d in devices],
     )
     conn.commit()
 
