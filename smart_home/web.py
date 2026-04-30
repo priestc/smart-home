@@ -4176,7 +4176,8 @@ async function loadEvents() {
     }).join("");
   } catch(e) { showError("events"); }
 }
-const garageOpenSince = {};  // name -> ms timestamp when last opened
+const garageOpenSince = {};    // name -> ms timestamp when last opened
+const garageClosedSince = {};  // name -> ms timestamp when last closed
 function fmtDur(ms) {
   const s = Math.floor(ms / 1000);
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sc = s % 60;
@@ -4189,6 +4190,10 @@ function tickGarageTimers() {
   for (const [name, since] of Object.entries(garageOpenSince)) {
     const el = document.getElementById(`gtimer-${name}`);
     if (el) el.textContent = "Open " + fmtDur(now - since);
+  }
+  for (const [name, since] of Object.entries(garageClosedSince)) {
+    const el = document.getElementById(`gtimer-${name}`);
+    if (el) el.textContent = "Closed " + fmtDur(now - since);
   }
 }
 setInterval(tickGarageTimers, 1000);
@@ -4206,10 +4211,17 @@ async function loadGarage() {
       if (d.door_closed === true)  { stateClass = "closed"; stateText = "CLOSED"; }
       else if (d.door_closed === false) { stateClass = "open"; stateText = "OPEN"; }
     } else { stateText = "⚠"; }
-    if (d.door_closed === false && d.last_opened) {
-      garageOpenSince[d.name] = new Date(d.last_opened.replace(" ", "T")).getTime();
-    } else if (d.door_closed !== false) {
+    if (d.door_closed === false) {
+      delete garageClosedSince[d.name];
+      if (d.last_opened) garageOpenSince[d.name] = new Date(d.last_opened.replace(" ", "T")).getTime();
+      else if (!garageOpenSince[d.name]) garageOpenSince[d.name] = Date.now();
+    } else if (d.door_closed === true) {
       delete garageOpenSince[d.name];
+      if (d.last_closed) garageClosedSince[d.name] = new Date(d.last_closed.replace(" ", "T")).getTime();
+      else if (!garageClosedSince[d.name]) garageClosedSince[d.name] = Date.now();
+    } else {
+      delete garageOpenSince[d.name];
+      delete garageClosedSince[d.name];
     }
     return `<a href="/garage" class="garage-card">
       <div class="label">${d.name}</div>
@@ -5184,16 +5196,20 @@ def api_garage_status(name):
     try:
         status = _garage.get_status(g["ip"])
         with _conn() as conn:
-            row = conn.execute(
+            row_open = conn.execute(
                 "SELECT ts FROM garage_events WHERE name=? AND state='open' ORDER BY ts DESC LIMIT 1",
                 (name,),
             ).fetchone()
-        last_opened = row["ts"] if row else None
+            row_closed = conn.execute(
+                "SELECT ts FROM garage_events WHERE name=? AND state='closed' ORDER BY ts DESC LIMIT 1",
+                (name,),
+            ).fetchone()
         return jsonify({
             "ok": True,
             "output": status.get("output", False),
             "door_closed": status.get("door_closed"),
-            "last_opened": last_opened,
+            "last_opened": row_open["ts"] if row_open else None,
+            "last_closed": row_closed["ts"] if row_closed else None,
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
@@ -5360,11 +5376,16 @@ function fmtDuration(ms) {
   return `${sc}s`;
 }
 
+const closedSince = {};
 function tickTimers() {
   const now = Date.now();
   for (const [name, since] of Object.entries(openSince)) {
     const el = document.getElementById(`timer-${name}`);
     if (el) el.textContent = "Open for " + fmtDuration(now - since);
+  }
+  for (const [name, since] of Object.entries(closedSince)) {
+    const el = document.getElementById(`timer-${name}`);
+    if (el) el.textContent = "Closed for " + fmtDuration(now - since);
   }
 }
 setInterval(tickTimers, 1000);
@@ -5409,11 +5430,16 @@ function applyStatus(name, data) {
   if (data.door_closed === true) {
     stateEl.textContent = "CLOSED";
     stateEl.className = "door-state closed";
-    timerEl.textContent = "";
     delete openSince[name];
+    if (data.last_closed) {
+      closedSince[name] = new Date(data.last_closed.replace(" ", "T")).getTime();
+    } else if (!closedSince[name]) {
+      closedSince[name] = Date.now();
+    }
   } else if (data.door_closed === false) {
     stateEl.textContent = "OPEN";
     stateEl.className = "door-state open";
+    delete closedSince[name];
     if (data.last_opened) {
       // Server timestamp is local time ("YYYY-MM-DD HH:MM:SS"); parse as local
       openSince[name] = new Date(data.last_opened.replace(" ", "T")).getTime();
@@ -5425,6 +5451,7 @@ function applyStatus(name, data) {
     stateEl.className = "door-state unknown";
     timerEl.textContent = "";
     delete openSince[name];
+    delete closedSince[name];
   }
 }
 
