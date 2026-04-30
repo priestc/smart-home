@@ -76,6 +76,127 @@ def bandwidth_ingest():
     return "", 204
 
 
+@app.get("/api/bandwidth/devices")
+def bandwidth_devices():
+    """Return distinct devices seen in bandwidth_readings with their most recent hostname."""
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT mac, hostname, router_label
+            FROM bandwidth_readings
+            WHERE id IN (SELECT MAX(id) FROM bandwidth_readings GROUP BY mac)
+            ORDER BY COALESCE(hostname, mac)
+        """).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.get("/api/bandwidth/history")
+def bandwidth_history():
+    """Bandwidth history. Query params: start, end, limit, bucket_minutes, mac."""
+    start  = (request.args.get("start") or "").replace("T", " ") or None
+    end    = (request.args.get("end")   or "").replace("T", " ") or None
+    mac    = request.args.get("mac")
+    try:
+        limit  = min(int(request.args.get("limit",  8000)), 200000)
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+    try:
+        bucket = max(1, int(request.args.get("bucket_minutes", 1)))
+    except ValueError:
+        return jsonify({"error": "bucket_minutes must be an integer"}), 400
+
+    where, params = [], []
+    if mac:
+        where.append("mac = ?")
+        params.append(mac)
+    if start:
+        where.append("ts >= ?")
+        params.append(start)
+    if end:
+        where.append("ts <= ?")
+        params.append(end)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    bucket_secs = bucket * 60
+    if bucket > 1:
+        sql = f"""
+            SELECT
+                strftime('%Y-%m-%d %H:%M:%S', CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs}, 'unixepoch') AS ts,
+                mac, hostname, router_label,
+                ROUND(AVG(down) / 10.0 / 1024.0, 3) AS down_kbps,
+                ROUND(AVG(up)   / 10.0 / 1024.0, 3) AS up_kbps
+            FROM bandwidth_readings{where_sql}
+            GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, mac
+            ORDER BY ts ASC LIMIT ?
+        """
+    else:
+        sql = f"""
+            SELECT ts, mac, hostname, router_label,
+                   ROUND(down / 10.0 / 1024.0, 3) AS down_kbps,
+                   ROUND(up   / 10.0 / 1024.0, 3) AS up_kbps
+            FROM bandwidth_readings{where_sql}
+            ORDER BY ts ASC LIMIT ?
+        """
+    params.append(limit)
+    with _conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.get("/api/bandwidth/history/month")
+def bandwidth_history_month():
+    """Bandwidth for a calendar month, ts normalized to year 2000, averaged across all years."""
+    import datetime as _dt
+    month = max(1, min(12, request.args.get("month", 1, type=int)))
+    bucket_minutes = max(1, request.args.get("bucket_minutes", 60, type=int))
+    bucket_secs = bucket_minutes * 60
+    month_str = f"{month:02d}"
+    with _conn() as conn:
+        rows = conn.execute(f"""
+            SELECT
+                CAST(strftime('%s', '2000' || substr(ts, 5)) AS INTEGER) / {bucket_secs} * {bucket_secs} AS bucket,
+                mac, hostname,
+                ROUND(AVG(down) / 10.0 / 1024.0, 3) AS down_kbps,
+                ROUND(AVG(up)   / 10.0 / 1024.0, 3) AS up_kbps
+            FROM bandwidth_readings
+            WHERE strftime('%m', ts) = ?
+            GROUP BY bucket, mac
+            ORDER BY bucket ASC
+        """, (month_str,)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        ts = _dt.datetime.utcfromtimestamp(d["bucket"]).strftime("%Y-%m-%d %H:%M:%S")
+        result.append({"ts": ts, "mac": d["mac"], "hostname": d["hostname"],
+                        "down_kbps": d["down_kbps"], "up_kbps": d["up_kbps"]})
+    return jsonify(result)
+
+
+@app.get("/api/bandwidth/history/year")
+def bandwidth_history_year():
+    """All bandwidth normalized to year 2000 for year-over-year overlay."""
+    import datetime as _dt
+    bucket_minutes = max(1, request.args.get("bucket_minutes", 360, type=int))
+    bucket_secs = bucket_minutes * 60
+    with _conn() as conn:
+        rows = conn.execute(f"""
+            SELECT
+                CAST(strftime('%s', '2000' || substr(ts, 5)) AS INTEGER) / {bucket_secs} * {bucket_secs} AS bucket,
+                mac, hostname,
+                ROUND(AVG(down) / 10.0 / 1024.0, 3) AS down_kbps,
+                ROUND(AVG(up)   / 10.0 / 1024.0, 3) AS up_kbps
+            FROM bandwidth_readings
+            GROUP BY bucket, mac
+            ORDER BY bucket ASC
+        """).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        ts = _dt.datetime.utcfromtimestamp(d["bucket"]).strftime("%Y-%m-%d %H:%M:%S")
+        result.append({"ts": ts, "mac": d["mac"], "hostname": d["hostname"],
+                        "down_kbps": d["down_kbps"], "up_kbps": d["up_kbps"]})
+    return jsonify(result)
+
+
 @app.get("/api/presence/history")
 def presence_history_api():
     """Per-device presence stats (7d / 30d) and recent away periods."""
@@ -2281,6 +2402,305 @@ def chart_temperature():
     return Response(_TEMP_PAGE, mimetype="text/html")
 
 
+_BANDWIDTH_PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bandwidth &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; color: #1a2535; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1.5rem; }
+    .nav a { font-size: .85rem; color: #2e7dd4; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .chart-wrap { background: #fff; border-radius: 12px; padding: 1.4rem 1.4rem 1rem; margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .chart-wrap h2 { font-size: 0.85rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: 1rem; }
+    .btn-group { margin-bottom: 1.2rem; }
+    .btn-group-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .4rem; }
+    .range-btns { display: flex; gap: .4rem; flex-wrap: wrap; }
+    .range-btns button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s; }
+    .range-btns button:hover { background: #f0f4f8; border-color: #aabbc8; }
+    .range-btns button.active { background: #2e7dd4; color: #fff; border-color: #2e7dd4; }
+    .range-btns button:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
+    .res-row { display: flex; align-items: center; gap: .6rem; margin-bottom: 1.2rem; }
+    .res-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+    .res-row select { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; cursor: pointer; }
+    #resp-size { font-size: .72rem; color: #4a6080; }
+  </style>
+</head>
+<body>
+  <h1>Bandwidth</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div class="res-row">
+    <label for="res">Resolution</label>
+    <select id="res" onchange="resolution=this.value; loadChart()">
+      <option value="low">Low</option>
+      <option value="medium">Medium</option>
+      <option value="max">Max</option>
+    </select>
+    <span id="resp-size"></span>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">Devices &mdash; solid line = download &nbsp; dashed line = upload</div>
+    <div class="range-btns" id="device-btns"></div>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">Most Recent</div>
+    <div class="range-btns" id="recent-btns">
+      <button id="btn-prev" onclick="shiftView(-1)">&#8592;</button>
+      <button onclick="setRange(0.125)" data-days="0.125">3h</button>
+      <button onclick="setRange(1)" data-days="1" class="active">24h</button>
+      <button onclick="setRange(3)" data-days="3">3d</button>
+      <button onclick="setRange(7)" data-days="7">7d</button>
+      <button onclick="setRange(30)" data-days="30">30d</button>
+      <button id="btn-next" onclick="shiftView(1)" disabled>&#8594;</button>
+    </div>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">By Month</div>
+    <div class="range-btns" id="month-btns">
+      <button onclick="setAllMonths()">All Months</button>
+      <button onclick="setMonth(1)">Jan</button>
+      <button onclick="setMonth(2)">Feb</button>
+      <button onclick="setMonth(3)">Mar</button>
+      <button onclick="setMonth(4)">Apr</button>
+      <button onclick="setMonth(5)">May</button>
+      <button onclick="setMonth(6)">Jun</button>
+      <button onclick="setMonth(7)">Jul</button>
+      <button onclick="setMonth(8)">Aug</button>
+      <button onclick="setMonth(9)">Sep</button>
+      <button onclick="setMonth(10)">Oct</button>
+      <button onclick="setMonth(11)">Nov</button>
+      <button onclick="setMonth(12)">Dec</button>
+    </div>
+  </div>
+  <div class="chart-wrap"><h2>Download &amp; Upload (KB/s)</h2><canvas id="chart" height="120"></canvas></div>
+<script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) { showNetworkError(e.message); throw e; }
+}
+async function fetchJSONBytes(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    const cl = r.headers.get('content-length');
+    const text = await r.text();
+    const bytes = cl !== null ? parseInt(cl) : new TextEncoder().encode(text).length;
+    return { data: JSON.parse(text), bytes };
+  } catch(e) { showNetworkError(e.message); throw e; }
+}
+const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
+const colorMap = {};
+const hiddenMacs = new Set();
+let colorIdx = 0;
+let mode = "recent", rangeDays = 1, activeMonth = null, offsetMs = 0;
+const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const isLocal = /^192\\.168\\./.test(location.hostname) || /\\.local$/.test(location.hostname);
+let resolution = isLocal ? "max" : isMobile ? "low" : "medium";
+document.getElementById("res").value = resolution;
+const BUCKETS = {
+  recent: {
+    low:    {0.125:10, 1:30,  3:60,  7:120, 30:360},
+    medium: {0.125:3,  1:10,  3:20,  7:30,  30:60 },
+    max:    {0.125:1,  1:2,   3:5,   7:10,  30:20 },
+  },
+  month: { low: 240, medium: 60, max: 10 },
+  year:  { low: 1440, medium: 360, max: 60 },
+};
+function getBucket() {
+  if (mode === "recent") return BUCKETS.recent[resolution][rangeDays] || 60;
+  return (BUCKETS[mode] || BUCKETS.month)[resolution];
+}
+function localISO(d) {
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function fmtKbps(v) {
+  return v >= 1024 ? (v/1024).toFixed(2)+' MB/s' : v.toFixed(1)+' KB/s';
+}
+function fmtBytes(n) {
+  return n >= 1048576 ? (n/1048576).toFixed(1)+' MB' : n >= 1024 ? (n/1024).toFixed(1)+' KB' : n+' B';
+}
+function hexToRgb(hex) { return [parseInt(hex.slice(1,3),16),parseInt(hex.slice(3,5),16),parseInt(hex.slice(5,7),16)]; }
+function applyBtnColor(btn, color, active) {
+  const [r,g,b] = hexToRgb(color);
+  if (active) {
+    btn.style.background = color; btn.style.borderColor = color; btn.style.color = '#fff';
+  } else {
+    btn.style.background = `rgba(${r},${g},${b},0.06)`;
+    btn.style.borderColor = `rgba(${r},${g},${b},0.2)`;
+    btn.style.color = '#7a90a8';
+  }
+}
+function toggleDevice(mac, btn) {
+  if (hiddenMacs.has(mac)) hiddenMacs.delete(mac); else hiddenMacs.add(mac);
+  applyBtnColor(btn, colorMap[mac] || COLORS[0], !hiddenMacs.has(mac));
+  chart.data.datasets.forEach((ds, i) => chart.setDatasetVisibility(i, !hiddenMacs.has(ds.mac)));
+  chart.update();
+}
+function updateDeviceButtons(devices) {
+  const container = document.getElementById('device-btns');
+  for (const dev of devices) {
+    const btnId = 'dev-btn-' + dev.mac.replace(/:/g,'');
+    let btn = document.getElementById(btnId);
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.id = btnId;
+      btn.onclick = () => toggleDevice(dev.mac, btn);
+      container.appendChild(btn);
+    }
+    btn.textContent = dev.hostname || dev.mac;
+    applyBtnColor(btn, colorMap[dev.mac] || COLORS[0], !hiddenMacs.has(dev.mac));
+  }
+}
+function buildDatasets(data) {
+  const byMac = {};
+  for (const row of data) {
+    if (!byMac[row.mac]) byMac[row.mac] = {hostname: row.hostname, down: [], up: []};
+    const t = new Date(row.ts.replace(' ', 'T'));
+    byMac[row.mac].down.push({x: t, y: row.down_kbps});
+    byMac[row.mac].up.push({x: t, y: row.up_kbps});
+  }
+  const datasets = [];
+  for (const [mac, grp] of Object.entries(byMac)) {
+    const color = colorMap[mac] || COLORS[0];
+    const name = grp.hostname || mac;
+    grp.down.sort((a,b) => a.x - b.x);
+    grp.up.sort((a,b) => a.x - b.x);
+    datasets.push({label: name+' \\u2193', mac, data: grp.down, borderColor: color,
+      backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: []});
+    datasets.push({label: name+' \\u2191', mac, data: grp.up, borderColor: color,
+      backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: [4,3]});
+  }
+  return datasets;
+}
+const chart = new Chart(document.getElementById("chart"), {
+  type: "line", data: { datasets: [] },
+  options: {
+    animation: false, parsing: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          label(item) {
+            if (item.raw == null || item.raw.y == null || item.raw.y === 0) return null;
+            return item.dataset.label + ': ' + fmtKbps(item.raw.y);
+          }
+        }
+      }
+    },
+    scales: {
+      x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" }, ticks: { color: "#7a90a8", maxTicksLimit: 8 }, grid: { color: "#e8eef4" } },
+      y: { min: 0, ticks: { color: "#7a90a8", callback: v => v >= 1024 ? (v/1024).toFixed(1)+' MB/s' : v+' KB/s' }, grid: { color: "#e8eef4" } }
+    }
+  }
+});
+function shiftView(dir) {
+  offsetMs += dir * rangeDays * 86400000;
+  if (offsetMs > 0) offsetMs = 0;
+  loadChart();
+}
+function setRange(days) {
+  mode = "recent"; rangeDays = days; offsetMs = 0;
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b =>
+    b.classList.toggle("active", parseFloat(b.dataset.days) === days));
+  document.querySelectorAll("#month-btns button").forEach(b => b.classList.remove("active"));
+  document.getElementById('btn-prev').disabled = false;
+  document.getElementById('btn-next').disabled = offsetMs >= 0;
+  loadChart();
+}
+function setAllMonths() {
+  mode = "year";
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll("#month-btns button").forEach((b,i) => b.classList.toggle("active", i===0));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
+  loadChart();
+}
+function setMonth(m) {
+  mode = "month"; activeMonth = m;
+  document.querySelectorAll("#recent-btns button[data-days]").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll("#month-btns button").forEach((b,i) => b.classList.toggle("active", i===m));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
+  loadChart();
+}
+async function loadDevices() {
+  const devices = await fetchJSON('/api/bandwidth/devices');
+  for (const dev of devices) {
+    if (!(dev.mac in colorMap)) colorMap[dev.mac] = COLORS[colorIdx++ % COLORS.length];
+  }
+  updateDeviceButtons(devices);
+}
+async function loadChart() {
+  let url, xMin, xMax, timeUnit, totalBytes;
+  if (mode === "recent") {
+    const xEnd = new Date(Date.now() + offsetMs);
+    const xStart = new Date(xEnd - rangeDays * 86400000);
+    xMin = xStart; xMax = xEnd;
+    const params = `start=${localISO(xStart)}&end=${localISO(xEnd)}&bucket_minutes=${getBucket()}&limit=8000`;
+    const { data, bytes } = await fetchJSONBytes(`/api/bandwidth/history?${params}`);
+    totalBytes = bytes;
+    chart.data.datasets = buildDatasets(data);
+    timeUnit = rangeDays <= 0.125 ? "minute" : rangeDays <= 1 ? "hour" : "day";
+    const peek = await fetchJSON(`/api/bandwidth/history?end=${localISO(xStart)}&limit=1&bucket_minutes=${getBucket()}`);
+    document.getElementById('btn-prev').disabled = peek.length === 0;
+    document.getElementById('btn-next').disabled = offsetMs >= 0;
+  } else if (mode === "month") {
+    const { data, bytes } = await fetchJSONBytes(`/api/bandwidth/history/month?month=${activeMonth}&bucket_minutes=${getBucket()}`);
+    totalBytes = bytes;
+    chart.data.datasets = buildDatasets(data);
+    xMin = new Date(2000, activeMonth - 1, 1);
+    xMax = new Date(2000, activeMonth, 0, 23, 59, 59);
+    timeUnit = "day";
+  } else {
+    const { data, bytes } = await fetchJSONBytes(`/api/bandwidth/history/year?bucket_minutes=${getBucket()}`);
+    totalBytes = bytes;
+    chart.data.datasets = buildDatasets(data);
+    xMin = new Date(2000, 0, 1);
+    xMax = new Date(2000, 11, 31, 23, 59, 59);
+    timeUnit = "month";
+  }
+  chart.data.datasets.forEach((ds, i) => chart.setDatasetVisibility(i, !hiddenMacs.has(ds.mac)));
+  chart.options.scales.x.min = xMin;
+  chart.options.scales.x.max = xMax;
+  chart.options.scales.x.time.unit = timeUnit;
+  chart.update();
+  document.getElementById('resp-size').textContent = fmtBytes(totalBytes);
+}
+async function refresh() { await loadDevices(); await loadChart(); }
+refresh();
+setInterval(() => { if (mode === "recent") refresh(); }, 30000);
+</script>
+</body>
+</html>"""
+
+
+@app.get("/chart/bandwidth")
+def chart_bandwidth():
+    return Response(_BANDWIDTH_PAGE, mimetype="text/html")
+
+
 @app.get("/chart/humidity")
 def chart_humidity():
     return _chart_page(
@@ -3652,6 +4072,7 @@ def index():
     <a href="/chart/energy"      class="chart-link"><span class="cl-title">Energy Usage</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/differential" class="chart-link"><span class="cl-title">Differentials</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/sensors"     class="chart-link"><span class="cl-title">Sensor Battery Life</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/chart/bandwidth"   class="chart-link"><span class="cl-title">Bandwidth</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/chart/signal"      class="chart-link"><span class="cl-title">Signal Strength</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/events"            class="chart-link"><span class="cl-title">Temperature Events</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/process-stats"     class="chart-link"><span class="cl-title">Process Stats</span><span class="cl-arrow">&#8594;</span></a>
