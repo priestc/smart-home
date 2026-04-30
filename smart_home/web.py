@@ -5325,10 +5325,9 @@ _GARAGE_PAGE = """\
     .last-triggered { font-size: .75rem; color: #aabbc8; text-align: center; min-height: 1em; }
     .open-timer { font-size: .85rem; font-weight: 600; color: #c0392b; min-height: 1.2em; }
     .auto-label { display: flex; align-items: center; gap: .5rem; font-size: .8rem; color: #4a6080;
-                  cursor: pointer; user-select: none; }
-    .auto-label input[type=checkbox] { width: 1rem; height: 1rem; cursor: pointer; accent-color: #2e7dd4; }
-    .presence-device-row { font-size: .8rem; color: #4a6080; margin-top: .4rem; display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
-    .presence-device-row select { font-size: .8rem; color: #1a2535; border: 1px solid #d0dce8; border-radius: 6px; padding: .15rem .4rem; background: #f7fafc; cursor: pointer; }
+                  cursor: pointer; user-select: none; flex-wrap: wrap; }
+    .auto-label input[type=checkbox] { width: 1rem; height: 1rem; cursor: pointer; accent-color: #2e7dd4; flex-shrink: 0; }
+    .auto-label select { font-size: .8rem; color: #1a2535; border: 1px solid #d0dce8; border-radius: 6px; padding: .15rem .4rem; background: #f7fafc; cursor: pointer; }
     #no-garages { color: #7a90a8; font-size: .9rem; }
     .history { margin-top: 2rem; }
     .history h2 { font-size: 1rem; font-weight: 700; color: #1a2535; margin-bottom: .8rem;
@@ -5530,13 +5529,11 @@ async function load() {
       <label class="auto-label">
         <input type="checkbox" id="auto-${g.name}"
           onchange="setAuto('${g.name}', this.checked)">
-        Automatically open/close
-      </label>
-      <div class="presence-device-row">
-        when <select id="presence-${g.name}"
+        Automatically open/close when
+        <select id="presence-${g.name}"
           onchange="setPresenceDevice('${g.name}', this.value)">${deviceOptions}</select>
         is detected to arrive/depart
-      </div>
+      </label>
     </div>`).join("");
 
   for (const g of garages) {
