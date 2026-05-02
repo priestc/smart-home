@@ -10,6 +10,7 @@ from smart_home.decoder import (
     PVVX_SERVICE_UUID,
     Reading,
 )
+from smart_home.pool import READ_UUID as _YC01_READ_UUID, parse_gatt_data, PoolReading
 
 # LYWSD03MMC GATT characteristic: temp (int16 LE, 0.01°C) + humidity (uint8, %) + voltage (uint16 LE, mV)
 _LYWSD03MMC_CHAR = "EBE0CCC1-7A0A-4B0C-8A1A-6FF2997DA3A6"
@@ -53,6 +54,28 @@ def is_pvvx_lywsd03mmc(device: BLEDevice, adv: AdvertisementData) -> bool:
     if name.startswith("ATC_"):
         return True
     return PVVX_SERVICE_UUID in (adv.service_data or {})
+
+
+def is_ble_yc01(device: BLEDevice, adv: AdvertisementData) -> bool:
+    name = device.name or adv.local_name or ""
+    return name.startswith("BLE_YC01") or name.startswith("BLE-YC01")
+
+
+async def read_ble_yc01(device: BLEDevice, label: str) -> tuple[PoolReading | None, str | None]:
+    """Actively connect to a BLE_YC01 and read all pool metrics via GATT.
+    Returns (PoolReading, None) on success or (None, error_message) on failure.
+    """
+    try:
+        async with BleakClient(device, timeout=10.0) as client:
+            raw = await client.read_gatt_char(_YC01_READ_UUID)
+    except Exception as e:
+        return None, str(e) or type(e).__name__
+    reading = parse_gatt_data(raw)
+    if reading is None:
+        return None, f"GATT data too short ({len(raw)} bytes)"
+    reading.address = device.address
+    reading.label = label
+    return reading, None
 
 
 def is_govee_h5074(device: BLEDevice, adv: AdvertisementData) -> bool:

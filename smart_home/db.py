@@ -122,6 +122,24 @@ def open_db(path: str) -> sqlite3.Connection:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS bandwidth_readings_router_ts ON bandwidth_readings (router_label, ts DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS bandwidth_readings_mac_ts ON bandwidth_readings (mac, ts DESC)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pool_readings (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts       TEXT NOT NULL,
+            address  TEXT,
+            label    TEXT,
+            temp_c   REAL,
+            ph       REAL,
+            ec       INTEGER,
+            tds      INTEGER,
+            orp      INTEGER,
+            chlorine REAL,
+            battery  INTEGER,
+            rssi     INTEGER,
+            UNIQUE(ts, label)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS pool_readings_label_ts ON pool_readings (label, ts DESC)")
     conn.commit()
     return conn
 
@@ -165,6 +183,18 @@ def insert_bandwidth_readings(conn: sqlite3.Connection, router_label: str,
     conn.executemany(
         "INSERT INTO bandwidth_readings (ts, router_label, mac, hostname, down, up) VALUES (?,?,?,?,?,?)",
         [(ts, router_label, d["mac"], d.get("hostname"), d["down"], d["up"]) for d in devices],
+    )
+    conn.commit()
+
+
+def insert_pool_reading(conn: sqlite3.Connection, reading) -> None:
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT OR IGNORE INTO pool_readings "
+        "(ts, address, label, temp_c, ph, ec, tds, orp, chlorine, battery, rssi) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (ts, reading.address, reading.label, reading.temp_c, reading.ph,
+         reading.ec, reading.tds, reading.orp, reading.chlorine, reading.battery, reading.rssi),
     )
     conn.commit()
 

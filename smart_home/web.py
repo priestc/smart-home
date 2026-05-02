@@ -4078,6 +4078,7 @@ def index():
     <a href="/process-stats"     class="chart-link"><span class="cl-title">Process Stats</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/camera"            class="chart-link"><span class="cl-title">Cameras</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/pool"              class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Pool Monitor</span><span class="cl-arrow">&#8594;</span></a>
   </div>
 
   <div id="events-wrap" style="display:none">
@@ -4232,10 +4233,18 @@ async function loadGarage() {
   }).join("");
   tickGarageTimers();
 }
+async function loadPool() {
+  try {
+    const rows = await fetchJSON('/api/pool/current');
+    if (!rows.length) return;
+    document.getElementById('pool-link').style.display = '';
+  } catch(e) { /* pool not configured — silently skip */ }
+}
 loadCurrent();
 loadPresence();
 loadEvents();
 loadGarage();
+loadPool();
 setInterval(loadCurrent, 30000);
 setInterval(loadPresence, 30000);
 setInterval(loadEvents, 60000);
@@ -5556,6 +5565,235 @@ setInterval(() => fetchJSON("/api/garage").then(gs => gs.forEach(g => refreshSta
 @app.get("/garage")
 def garage_page():
     return Response(_GARAGE_PAGE, mimetype="text/html")
+
+
+# Pool monitor
+# ---------------------------------------------------------------------------
+
+@app.get("/api/pool/current")
+def api_pool_current():
+    """Latest reading for each pool monitor."""
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT label, address, temp_c, ph, ec, tds, orp, chlorine, battery, rssi, ts
+            FROM pool_readings
+            WHERE id IN (
+                SELECT MAX(id) FROM pool_readings GROUP BY label
+            )
+            ORDER BY label
+        """).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
+        result.append(d)
+    return jsonify(result)
+
+
+@app.get("/api/pool/history")
+def api_pool_history():
+    """Pool readings history. Query params: label, start, end, limit."""
+    label = request.args.get("label")
+    start = (request.args.get("start") or "").replace("T", " ") or None
+    end   = (request.args.get("end")   or "").replace("T", " ") or None
+    try:
+        limit = min(int(request.args.get("limit", 2000)), 50000)
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+
+    where, params = [], []
+    if label:
+        where.append("label = ?")
+        params.append(label)
+    if start:
+        where.append("ts >= ?")
+        params.append(start)
+    if end:
+        where.append("ts <= ?")
+        params.append(end)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    params.append(limit)
+
+    with _conn() as conn:
+        rows = conn.execute(
+            f"SELECT ts, label, temp_c, ph, ec, tds, orp, chlorine, battery "
+            f"FROM pool_readings{where_sql} ORDER BY ts DESC LIMIT ?",
+            params,
+        ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
+        result.append(d)
+    return jsonify(list(reversed(result)))
+
+
+_POOL_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pool Monitor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 1.5rem; color: #1a2535; letter-spacing: -.02em; }
+    .back { font-size: .85rem; font-weight: 500; color: #2e7dd4; text-decoration: none; margin-left: .75rem; }
+    .cards { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 2rem; }
+    .card { background: #fff; border-radius: 12px; padding: 1.2rem 1.5rem; min-width: 180px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .card .metric-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .2rem; }
+    .card .metric-value { font-size: 2rem; font-weight: 700; line-height: 1; }
+    .card .metric-unit  { font-size: .85rem; color: #7a90a8; margin-left: .2rem; }
+    .card .metric-ts    { font-size: .7rem; color: #aabbc8; margin-top: .5rem; }
+    .temp  { color: #e07820; }
+    .ph    { color: #2e7dd4; }
+    .orp   { color: #7b4fb5; }
+    .cl    { color: #2a9d6e; }
+    .ec    { color: #c0662b; }
+    .tds   { color: #1a6db5; }
+    .bat   { color: #7a90a8; }
+    .section { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .75rem; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.08); font-size: .85rem; }
+    th { background: #f8fafc; color: #7a90a8; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; padding: .6rem 1rem; text-align: left; border-bottom: 1px solid #eef2f7; white-space: nowrap; }
+    td { padding: .55rem 1rem; border-bottom: 1px solid #f0f4f8; white-space: nowrap; }
+    tr:last-child td { border-bottom: none; }
+    #error-bar { display:none; background:#fde8e8; color:#c0392b; border-radius:8px; padding:.6rem 1rem; margin-bottom:1rem; font-size:.85rem; font-weight:500; }
+    .no-data { color: #aabbc8; font-style: italic; padding: 1rem; }
+    .label-select { font-size: .9rem; padding: .4rem .75rem; border: 1px solid #d0dce8; border-radius: 8px; background: #fff; color: #1a2535; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="error-bar"></div>
+  <h1>Pool Monitor <a class="back" href="/">&larr; Home</a></h1>
+
+  <div id="current-wrap">
+    <div class="section" style="margin-bottom:.75rem">Current readings</div>
+    <div class="cards" id="cards"><span class="no-data">Loading&hellip;</span></div>
+  </div>
+
+  <div style="display:flex;align-items:center;gap:1rem;margin-bottom:.75rem">
+    <div class="section" style="margin-bottom:0">History</div>
+    <select class="label-select" id="label-sel" onchange="loadHistory()"></select>
+  </div>
+  <table id="hist-table">
+    <thead>
+      <tr>
+        <th>Time</th><th>Temp</th><th>pH</th><th>ORP (mV)</th><th>Cl (mg/L)</th>
+        <th>EC (µS/cm)</th><th>TDS (ppm)</th><th>Battery</th>
+      </tr>
+    </thead>
+    <tbody id="hist-body"><tr><td colspan="8" class="no-data">Loading&hellip;</td></tr></tbody>
+  </table>
+
+<script>
+function showError(msg) {
+  const el = document.getElementById('error-bar');
+  el.textContent = '⚠ ' + msg;
+  el.style.display = 'block';
+}
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+function agо(ts) {
+  const secs = Math.floor((Date.now() - new Date(ts + 'Z').getTime()) / 1000);
+  if (secs < 0) return 'just now';
+  if (secs < 60) return secs + 's ago';
+  if (secs < 3600) return Math.floor(secs/60) + 'm ago';
+  if (secs < 86400) return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm ago';
+  return Math.floor(secs/86400) + 'd ago';
+}
+
+function phColor(ph) {
+  if (ph < 7.0) return '#c0392b';
+  if (ph > 7.8) return '#c0392b';
+  if (ph >= 7.2 && ph <= 7.6) return '#2a9d6e';
+  return '#e07820';
+}
+function orpColor(orp) {
+  if (orp >= 650 && orp <= 750) return '#2a9d6e';
+  if (orp < 400 || orp > 900) return '#c0392b';
+  return '#e07820';
+}
+function clColor(cl) {
+  if (cl >= 1.0 && cl <= 3.0) return '#2a9d6e';
+  if (cl < 0.5 || cl > 5.0) return '#c0392b';
+  return '#e07820';
+}
+
+async function loadCurrent() {
+  try {
+    const rows = await fetchJSON('/api/pool/current');
+    const container = document.getElementById('cards');
+    if (!rows.length) {
+      container.innerHTML = '<span class="no-data">No pool monitor readings yet.</span>';
+      return;
+    }
+    const sel = document.getElementById('label-sel');
+    const existing = new Set(Array.from(sel.options).map(o => o.value));
+    rows.forEach(r => {
+      if (!existing.has(r.label)) {
+        const o = document.createElement('option');
+        o.value = o.textContent = r.label;
+        sel.appendChild(o);
+      }
+    });
+    container.innerHTML = rows.map(r => `
+      <div style="min-width:220px">
+        <div class="card metric-label" style="margin-bottom:.5rem;font-size:.8rem;color:#7a90a8;font-weight:600">${r.label}</div>
+        <div class="cards" style="margin-bottom:0;gap:.75rem">
+          <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '—'}<span class="metric-unit">°F</span></div><div class="metric-ts">${agо(r.ts)}</div></div>
+          <div class="card"><div class="metric-label">pH</div><div class="metric-value" style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '—'}</div></div>
+          <div class="card"><div class="metric-label">ORP</div><div class="metric-value" style="color:${orpColor(r.orp)}">${r.orp != null ? r.orp : '—'}<span class="metric-unit">mV</span></div></div>
+          <div class="card"><div class="metric-label">Free Cl</div><div class="metric-value" style="color:${clColor(r.chlorine)}">${r.chlorine != null ? r.chlorine.toFixed(1) : '—'}<span class="metric-unit">mg/L</span></div></div>
+          <div class="card"><div class="metric-label">EC</div><div class="metric-value ec">${r.ec != null ? r.ec : '—'}<span class="metric-unit">µS/cm</span></div></div>
+          <div class="card"><div class="metric-label">TDS</div><div class="metric-value tds">${r.tds != null ? r.tds : '—'}<span class="metric-unit">ppm</span></div></div>
+          <div class="card"><div class="metric-label">Battery</div><div class="metric-value bat">${r.battery != null ? r.battery : '—'}<span class="metric-unit">%</span></div></div>
+        </div>
+      </div>
+    `).join('');
+  } catch(e) {
+    showError('Failed to load current readings: ' + e.message);
+  }
+}
+
+async function loadHistory() {
+  const label = document.getElementById('label-sel').value;
+  if (!label) return;
+  try {
+    const rows = await fetchJSON('/api/pool/history?label=' + encodeURIComponent(label) + '&limit=200');
+    const tbody = document.getElementById('hist-body');
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="no-data">No history yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = [...rows].reverse().map(r => `<tr>
+      <td>${r.ts}</td>
+      <td>${r.temp_f != null ? r.temp_f.toFixed(1) + '°F' : '—'}</td>
+      <td style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '—'}</td>
+      <td style="color:${orpColor(r.orp)}">${r.orp != null ? r.orp : '—'}</td>
+      <td style="color:${clColor(r.chlorine)}">${r.chlorine != null ? r.chlorine.toFixed(1) : '—'}</td>
+      <td>${r.ec != null ? r.ec : '—'}</td>
+      <td>${r.tds != null ? r.tds : '—'}</td>
+      <td>${r.battery != null ? r.battery + '%' : '—'}</td>
+    </tr>`).join('');
+  } catch(e) {
+    showError('Failed to load history: ' + e.message);
+  }
+}
+
+loadCurrent().then(() => loadHistory());
+setInterval(loadCurrent, 30000);
+</script>
+</body>
+</html>"""
+
+
+@app.get("/pool")
+def pool_page():
+    return Response(_POOL_PAGE, mimetype="text/html")
 
 
 def run(db_path: str, host: str, port: int, debug: bool) -> None:

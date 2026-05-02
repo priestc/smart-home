@@ -9,16 +9,18 @@ import os
 from pathlib import Path
 import click
 from bleak import BleakScanner
-from smart_home.scanner import scan, is_xiaomi_lywsd03mmc, is_pvvx_lywsd03mmc, read_lywsd03mmc
+from smart_home.scanner import scan, is_xiaomi_lywsd03mmc, is_pvvx_lywsd03mmc, read_lywsd03mmc, is_ble_yc01, read_ble_yc01
 from smart_home import labels as _labels
+from smart_home import alert_config as _alert_config
 from smart_home import pvvx as _pvvx
 from smart_home import presence as _presence
 from smart_home import push as _push
 from smart_home import camera as _camera
 from smart_home import garage as _garage
 from smart_home import smart_plug as _smart_plug
+from smart_home import pool as _pool
 from smart_home.battery import dump_gatt
-from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading, insert_plug_reading
+from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading, insert_plug_reading, insert_pool_reading
 
 DEFAULT_DB = os.path.expanduser("~/.local/share/smart-home/readings.db")
 
@@ -345,10 +347,12 @@ def list_devices():
     label_map = _labels.load()
     if label_map:
         any_found = True
+        suppressed_offline = _alert_config.get_suppressed_offline()
         click.echo("\n  BLE Sensors:")
         click.echo("  " + "-" * 50)
         for addr, lbl in sorted(label_map.items(), key=lambda x: x[1]):
-            click.echo(f"  {lbl:<24} {addr}")
+            note = "  [offline alerts off]" if lbl in suppressed_offline else ""
+            click.echo(f"  {lbl:<24} {addr}{note}")
 
     ecobee_cfg = _ecobee.load_config()
     ha_cfg = _ha.load_config()
@@ -402,6 +406,14 @@ def list_devices():
                      (now - datetime.datetime.fromisoformat(s["last_seen"])).total_seconds() > 300)
             flag = "  (stale?)" if stale else ""
             click.echo(f"  {lbl:<24} {ble_name:<24} {status:<10} {last_seen}{flag}")
+
+    pool_monitors = _pool.load_config()
+    if pool_monitors:
+        any_found = True
+        click.echo("\n  Pool Monitors:")
+        click.echo("  " + "-" * 50)
+        for p in pool_monitors:
+            click.echo(f"  {p.get('label', ''):<24} BLE_YC01 ({p.get('address', '')})")
 
     if not any_found:
         click.echo("No devices registered. Run 'smart-home add-device' to add one.")
@@ -777,6 +789,63 @@ def configure_garage():
     click.echo(f"\nDone. Control it at: http://<your-server>:5000/garage")
 
 
+@main.command("configure-pool-monitor")
+@click.option("--timeout", "-t", type=float, default=20.0,
+              help="Seconds to scan for BLE_YC01 devices (default: 20).")
+def configure_pool_monitor(timeout):
+    """Register a BLE_YC01 pool monitor.
+
+    Scans for BLE_YC01 advertisements and saves the device's MAC address and
+    a user-assigned label to ~/.config/smart-home/pool_monitors.json.
+    """
+    click.echo("\nPool Monitor Setup\n")
+    click.echo(f"Scanning for BLE_YC01 devices ({int(timeout)}s)...")
+    found: dict[str, str] = {}  # address -> ble name
+
+    def callback(device, adv):
+        if is_ble_yc01(device, adv):
+            name = device.name or adv.local_name or device.address
+            found[device.address] = name
+
+    async def _run():
+        async with BleakScanner(detection_callback=callback):
+            await asyncio.sleep(timeout)
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        pass
+
+    if not found:
+        click.echo("No BLE_YC01 devices found. Make sure the device is powered on and nearby.")
+        return
+
+    if len(found) == 1:
+        addr, ble_name = next(iter(found.items()))
+        click.echo(f"Found: {ble_name} ({addr})")
+    else:
+        click.echo(f"\nFound {len(found)} device(s):\n")
+        items = list(found.items())
+        for i, (addr, ble_name) in enumerate(items, 1):
+            click.echo(f"  {i}. {ble_name} ({addr})")
+        idx = click.prompt("\nWhich one?", type=click.IntRange(1, len(items))) - 1
+        addr, ble_name = items[idx]
+
+    label = click.prompt("Label for this pool monitor (e.g. 'pool')").strip()
+
+    monitors = _pool.load_config()
+    existing = next((m for m in monitors if m["address"] == addr), None)
+    if existing:
+        existing["label"] = label
+        click.echo(f"Updated existing entry for {addr}.")
+    else:
+        monitors.append({"address": addr, "label": label})
+        click.echo(f"Added pool monitor '{label}' ({addr}).")
+
+    _pool.save_config(monitors)
+    click.echo("\nSaved. Run 'smart-home monitor' to start polling this device.")
+
+
 @main.command("remove-device")
 @click.argument("name")
 @click.option("--purge", is_flag=True, help="Also delete DB readings (BLE sensors only).")
@@ -836,6 +905,13 @@ def remove_device(name, purge, db):
         _presence.save_devices(presence)
         click.echo(f"Removed presence device '{lbl}' ({match}).")
         removed.append("presence device")
+
+    pool_monitors = _pool.load_config()
+    new_pool = [p for p in pool_monitors if p.get("label", "").lower() != name_lower and p.get("address", "").lower() != name_lower]
+    if len(new_pool) < len(pool_monitors):
+        _pool.save_config(new_pool)
+        click.echo(f"Removed pool monitor '{name}'.")
+        removed.append("pool monitor")
 
     if not removed:
         click.echo(f"No device found matching {name!r}.")
@@ -905,6 +981,45 @@ def test_push():
     click.echo(f"Sending test notification to {len(tokens)} device(s)...")
     _push.send_notification(title="Smart Home", body="Test notification — push is working!")
     click.echo("Done.")
+
+
+@main.command("toggle-offline-alert")
+@click.argument("label", required=False)
+def toggle_offline_alert(label):
+    """Toggle offline push alerts on or off for a sensor.
+
+    LABEL is the friendly name of the sensor (as shown in the UI and by
+    'smart-home list-devices'). When suppressed, the sensor going offline is
+    still logged to the database but no push notification is sent.
+
+    Omit LABEL to list current suppression state.
+    """
+    label_map = _labels.load()
+    known_labels = set(label_map.values())
+
+    if not label:
+        suppressed = _alert_config.get_suppressed_offline()
+        if not suppressed:
+            click.echo("No sensors have offline alerts suppressed.")
+        else:
+            click.echo("Offline alerts suppressed for:")
+            for lbl in sorted(suppressed):
+                click.echo(f"  {lbl}")
+        return
+
+    if label not in known_labels:
+        click.echo(f"Label '{label}' not found. Known labels: {', '.join(sorted(known_labels))}", err=True)
+        raise SystemExit(1)
+
+    suppressed = _alert_config.get_suppressed_offline()
+    if label in suppressed:
+        suppressed.discard(label)
+        _alert_config.set_suppressed_offline(suppressed)
+        click.echo(f"Offline alerts for '{label}' are now ENABLED.")
+    else:
+        suppressed.add(label)
+        _alert_config.set_suppressed_offline(suppressed)
+        click.echo(f"Offline alerts for '{label}' are now SUPPRESSED.")
 
 
 @main.command("presence-history")
@@ -1025,6 +1140,12 @@ def monitor(duration, verbose, db, no_db):
     _last_poll_ok: dict[str, datetime.datetime] = {}  # address -> last successful poll time
     POLL_COOLDOWN = datetime.timedelta(seconds=30)
 
+    # BLE_YC01 pool monitors — same active-GATT-on-advertisement pattern as Xiaomi.
+    pool_config = {m["address"].upper(): m["label"] for m in _pool.load_config()}
+    yc01_devices: dict[str, tuple] = {}  # address -> (BLEDevice, last_rssi)
+    _yc01_poll_active: set[str] = set()
+    _yc01_last_poll_ok: dict[str, datetime.datetime] = {}
+
     scanner_ref: list = []
 
     # presence tracking
@@ -1122,6 +1243,20 @@ def monitor(duration, verbose, db, no_db):
                     asyncio.get_running_loop().create_task(_poll_xiaomi(addr))
                 except RuntimeError:
                     _poll_active.discard(addr)
+
+        if is_ble_yc01(device, adv) and device.address.upper() in pool_config:
+            is_new = device.address not in yc01_devices
+            yc01_devices[device.address] = (device, adv.rssi)
+            if is_new:
+                click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered pool monitor: {pool_config[device.address.upper()]} ({device.address})")
+            addr = device.address
+            last_ok = _yc01_last_poll_ok.get(addr, datetime.datetime.min)
+            if addr not in _yc01_poll_active and (now - last_ok) >= POLL_COOLDOWN:
+                _yc01_poll_active.add(addr)
+                try:
+                    asyncio.get_running_loop().create_task(_poll_yc01(addr))
+                except RuntimeError:
+                    _yc01_poll_active.discard(addr)
 
         if verbose and ble_name:
             click.echo(f"[presence] untracked: {ble_name!r} ({device.address})")
@@ -1324,6 +1459,33 @@ def monitor(duration, verbose, db, no_db):
         finally:
             _poll_active.discard(addr)
 
+    async def _poll_yc01(addr: str) -> None:
+        """Poll one BLE_YC01 pool monitor immediately after it has been seen advertising."""
+        try:
+            await asyncio.sleep(0.5)
+            entry = yc01_devices.get(addr)
+            if entry is None:
+                return
+            ble_device, last_rssi = entry
+            label = pool_config.get(addr.upper(), addr)
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            click.echo(f"[{ts}] Polling pool monitor: {label} ({addr})...")
+            reading, err = await read_ble_yc01(ble_device, label)
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            if reading is not None:
+                _yc01_last_poll_ok[addr] = datetime.datetime.now()
+                _, last_rssi = yc01_devices.get(addr, (None, last_rssi))
+                reading.rssi = last_rssi
+                click.echo(f"[{ts}] Pool: {reading}")
+                if conn:
+                    insert_pool_reading(conn, reading)
+            else:
+                click.echo(f"[{ts}] Pool poll FAILED: {label} ({addr}): {err}")
+                if err and "not found" in err:
+                    yc01_devices.pop(addr, None)
+        finally:
+            _yc01_poll_active.discard(addr)
+
     # latest reading per address, updated on every advertisement
     latest_reading: dict[str, object] = {}
     # high-res buffer: label -> [(epoch_time, temp_f), ...] kept for ~60 seconds
@@ -1462,7 +1624,8 @@ def monitor(duration, verbose, db, no_db):
                             "INSERT OR IGNORE INTO temperature_events (ts, event_type, value, details) VALUES (?,?,?,?)",
                             (ts, "sensor_online", None, online_details),
                         )
-                        _push.send_notification(title="Sensor Online", body=f"{label} is back online")
+                        if label not in _alert_config.get_suppressed_offline():
+                            _push.send_notification(title="Sensor Online", body=f"{label} is back online")
                         click.echo(f"[{log_ts}] Sensor back online: {label}")
                         # Backfill PVVX history for the offline period
                         if addr in pvvx_addresses and offline_row:
@@ -1491,7 +1654,8 @@ def monitor(duration, verbose, db, no_db):
                                 "INSERT OR IGNORE INTO temperature_events (ts, event_type, value, details) VALUES (?,?,?,?)",
                                 (ts, "sensor_offline", None, label),
                             )
-                            _push.send_notification(title="Sensor Offline", body=f"{label} has stopped responding")
+                            if label not in _alert_config.get_suppressed_offline():
+                                _push.send_notification(title="Sensor Offline", body=f"{label} has stopped responding")
                             click.echo(f"[{log_ts}] Sensor offline: {label}")
 
             conn.commit()
