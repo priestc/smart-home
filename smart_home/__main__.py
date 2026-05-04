@@ -1608,12 +1608,23 @@ def monitor(duration, verbose, db, no_db):
             await asyncio.sleep(60)
             if not conn or not latest_reading:
                 continue
-            ts = datetime.datetime.now().replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+            now_dt = datetime.datetime.now()
+            ts = now_dt.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
             for addr, reading in list(latest_reading.items()):
-                conn.execute(
-                    "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity, rssi, battery, raw_reading) VALUES (?,?,?,?,?,?,?,?)",
-                    (ts, reading.address, reading.label, reading.temp_f, reading.humidity, reading.rssi, reading.battery, reading.raw_reading),
-                )
+                last = last_seen.get(addr)
+                # For BLE sensors (tracked via last_seen), write NULL if not recently broadcasting.
+                # For polled sensors (HA, Ecobee — no last_seen entry), always write the reading.
+                if last is not None and (now_dt - last).total_seconds() >= 70:
+                    if reading.label:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity) VALUES (?,?,?,NULL,NULL)",
+                            (ts, reading.address, reading.label),
+                        )
+                else:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity, rssi, battery, raw_reading) VALUES (?,?,?,?,?,?,?,?)",
+                        (ts, reading.address, reading.label, reading.temp_f, reading.humidity, reading.rssi, reading.battery, reading.raw_reading),
+                    )
             # Null readings for labeled sensors that didn't report this cycle
             for addr, label in label_map.items():
                 if label and addr not in latest_reading:
@@ -1622,7 +1633,6 @@ def monitor(duration, verbose, db, no_db):
                         (ts, addr, label),
                     )
             # Evaluate sensor events for every labeled sensor
-            now_dt = datetime.datetime.now()
             log_ts = now_dt.strftime("%H:%M:%S")
             for addr, label in label_map.items():
                 if not label:
