@@ -1267,6 +1267,38 @@ def monitor(duration, verbose, db, no_db):
                 for uuid, data in adv.service_data.items():
                     click.echo(f"  service_data[{uuid}] = {data.hex()}")
 
+    async def _verify_and_retry_close(name: str, ip: str, pulse: float, ble_name: str) -> None:
+        """Poll every 30s after auto-close; re-trigger if still open. Notifies when confirmed closed."""
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(30)
+            now = datetime.datetime.now()
+            last_seen = presence_last_seen.get(ble_name)
+            is_home = (
+                presence_state.get(ble_name, {}).get("status") == "home"
+                or (last_seen and (now - last_seen) < datetime.timedelta(seconds=60))
+            )
+            if is_home:
+                ts = now.strftime("%H:%M:%S")
+                click.echo(f"[{ts}] Verify-close aborted for '{name}' — device returned home")
+                break
+            try:
+                status = await loop.run_in_executor(None, _garage.get_status, ip)
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                if status.get("door_closed") is True:
+                    click.echo(f"[{ts}] Verified closed: garage '{name}'")
+                    _push.send_notification(
+                        title="Garage door closed",
+                        body=f"'{name}' is now closed",
+                    )
+                    break
+                else:
+                    click.echo(f"[{ts}] Garage '{name}' still open — retrying close")
+                    await loop.run_in_executor(None, _garage.trigger, ip, pulse)
+            except Exception as e:
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                click.echo(f"[{ts}] Verify-close check failed for '{name}': {e}")
+
     async def check_presence():
         while True:
             await asyncio.sleep(30)
@@ -1284,10 +1316,6 @@ def monitor(duration, verbose, db, no_db):
                     if new_status == "away":
                         _auto_open_done.discard(ble_name)
                         _auto_closed_doors.clear()
-                        _push.send_notification(
-                            title="Left home",
-                            body=f"{label} left home",
-                        )
                         for g in _garage.load_config():
                             configured = g.get("presence_device")
                             if g.get("auto") and (not configured or configured == ble_name):
@@ -1296,10 +1324,9 @@ def monitor(duration, verbose, db, no_db):
                                     if door_status.get("door_closed") is False:
                                         _garage.trigger(g["ip"], g.get("pulse_seconds", 0.5))
                                         _auto_closed_doors.add(g["name"])
-                                        click.echo(f"[{ts}] Auto-closed garage '{g['name']}' ({label} left)")
-                                        _push.send_notification(
-                                            title="Garage closing",
-                                            body=f"{g['name']} garage door closing",
+                                        click.echo(f"[{ts}] Auto-closing garage '{g['name']}' ({label} left)")
+                                        asyncio.get_running_loop().create_task(
+                                            _verify_and_retry_close(g["name"], g["ip"], g.get("pulse_seconds", 0.5), ble_name)
                                         )
                                 except Exception as e:
                                     click.echo(f"[{ts}] Auto-close failed for '{g['name']}': {e}")
