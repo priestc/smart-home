@@ -4407,6 +4407,26 @@ def api_db_sizes():
     return jsonify(result)
 
 
+@app.get("/api/db-sizes/stats")
+def api_db_sizes_stats():
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT name,
+              FIRST_VALUE(ts)    OVER (PARTITION BY name ORDER BY ts ASC)  AS first_ts,
+              FIRST_VALUE(bytes) OVER (PARTITION BY name ORDER BY ts ASC)  AS first_bytes,
+              FIRST_VALUE(ts)    OVER (PARTITION BY name ORDER BY ts DESC) AS last_ts,
+              FIRST_VALUE(bytes) OVER (PARTITION BY name ORDER BY ts DESC) AS last_bytes
+            FROM db_size_readings
+        """).fetchall()
+    result = {}
+    for name, first_ts, first_bytes, last_ts, last_bytes in rows:
+        result[name] = {
+            "first_ts": first_ts, "first_bytes": first_bytes,
+            "last_ts": last_ts, "last_bytes": last_bytes,
+        }
+    return jsonify(result)
+
+
 _DB_SIZE_PAGE = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -4431,6 +4451,16 @@ _DB_SIZE_PAGE = """\
     .range-btns button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s; }
     .range-btns button:hover { background: #f0f4f8; border-color: #aabbc8; }
     .range-btns button.active { background: #e07820; color: #fff; border-color: #e07820; }
+    .proj-wrap { background: #fff; border-radius: 12px; padding: 1.4rem; margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); overflow-x: auto; }
+    .proj-wrap h2 { font-size: 0.85rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: 1rem; }
+    .proj-table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+    .proj-table th { text-align: left; color: #7a90a8; font-weight: 600; font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; padding: .4rem .75rem; border-bottom: 1px solid #e8eef4; white-space: nowrap; }
+    .proj-table td { padding: .55rem .75rem; border-bottom: 1px solid #f0f4f8; color: #1a2535; white-space: nowrap; }
+    .proj-table tr:last-child td { border-bottom: none; }
+    .proj-table td.name { font-weight: 600; font-family: monospace; font-size: .82rem; }
+    .proj-table td.num { text-align: right; }
+    .proj-table th.num { text-align: right; }
+    .proj-note { font-size: .75rem; color: #7a90a8; margin-top: .75rem; }
   </style>
 </head>
 <body>
@@ -4447,6 +4477,24 @@ _DB_SIZE_PAGE = """\
     </div>
   </div>
   <div class="chart-wrap"><h2>Database Sizes</h2><canvas id="db-chart" height="80"></canvas></div>
+  <div class="proj-wrap">
+    <h2>Growth Projections</h2>
+    <table class="proj-table">
+      <thead>
+        <tr>
+          <th>Database</th>
+          <th class="num">Current Size</th>
+          <th class="num">MB / hour</th>
+          <th class="num">MB / day</th>
+          <th class="num">MB / month</th>
+          <th class="num">MB / year</th>
+          <th class="num">Size at End of Year</th>
+        </tr>
+      </thead>
+      <tbody id="proj-tbody"><tr><td colspan="7" style="color:#7a90a8;padding:.75rem">Loading&hellip;</td></tr></tbody>
+    </table>
+    <div class="proj-note" id="proj-note"></div>
+  </div>
 <script>
 function showNetworkError(msg) {
   let el = document.getElementById('_net_err');
@@ -4470,11 +4518,19 @@ async function fetchJSON(url, opts) {
 }
 
 function fmtBytes(bytes) {
-  if (bytes === null || bytes === undefined) return '—';
+  if (bytes === null || bytes === undefined) return '\\u2014';
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
   if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
   return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+function fmtMB(mb) {
+  if (mb === null || !isFinite(mb) || mb < 0) return '\\u2014';
+  if (mb < 0.001) return '< 0.001';
+  if (mb < 1) return mb.toFixed(3);
+  if (mb < 1000) return mb.toFixed(2);
+  return mb.toFixed(0);
 }
 
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400"];
@@ -4526,10 +4582,7 @@ function makeChart(names) {
         },
         y: {
           min: 0,
-          ticks: {
-            color: '#7a90a8',
-            callback: v => fmtBytes(v)
-          },
+          ticks: { color: '#7a90a8', callback: v => fmtBytes(v) },
           grid: { color: '#e8eef4' }
         }
       }
@@ -4556,8 +4609,63 @@ async function load() {
   chart.update();
 }
 
+async function loadStats() {
+  const stats = await fetchJSON('/api/db-sizes/stats');
+  const names = Object.keys(stats).sort();
+  const now = new Date();
+  const endOfYear = new Date(now.getFullYear(), 11, 31, 23, 59, 59);
+  const secsToEOY = (endOfYear - now) / 1000;
+  const MB = 1024 * 1024;
+
+  let earliestDate = null;
+  const rows = names.map(name => {
+    const s = stats[name];
+    const firstDate = new Date(s.first_ts);
+    const lastDate  = new Date(s.last_ts);
+    if (!earliestDate || firstDate < earliestDate) earliestDate = firstDate;
+
+    const elapsedSecs = (lastDate - firstDate) / 1000;
+    const growthBytes = s.last_bytes - s.first_bytes;
+
+    if (elapsedSecs < 60 || growthBytes <= 0) {
+      return `<tr>
+        <td class="name">${name}</td>
+        <td class="num">${fmtBytes(s.last_bytes)}</td>
+        <td class="num" colspan="5" style="color:#7a90a8">not enough data yet</td>
+      </tr>`;
+    }
+
+    const bps       = growthBytes / elapsedSecs;
+    const mbPerHour = bps * 3600 / MB;
+    const mbPerDay  = bps * 86400 / MB;
+    const mbPerMonth = bps * 86400 * 30.44 / MB;
+    const mbPerYear  = bps * 86400 * 365.25 / MB;
+    const projBytes  = s.last_bytes + bps * secsToEOY;
+
+    return `<tr>
+      <td class="name">${name}</td>
+      <td class="num">${fmtBytes(s.last_bytes)}</td>
+      <td class="num">${fmtMB(mbPerHour)}</td>
+      <td class="num">${fmtMB(mbPerDay)}</td>
+      <td class="num">${fmtMB(mbPerMonth)}</td>
+      <td class="num">${fmtMB(mbPerYear)}</td>
+      <td class="num"><strong>${fmtBytes(projBytes)}</strong></td>
+    </tr>`;
+  });
+
+  document.getElementById('proj-tbody').innerHTML = rows.join('') || '<tr><td colspan="7" style="color:#7a90a8;padding:.75rem">No data yet.</td></tr>';
+
+  if (earliestDate) {
+    const daysTracked = ((now - earliestDate) / 86400000).toFixed(1);
+    document.getElementById('proj-note').textContent =
+      `Rates calculated from ${earliestDate.toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'})} to now (${daysTracked} days of data). End-of-year projection is ${endOfYear.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})}.`;
+  }
+}
+
 load();
+loadStats();
 setInterval(load, 300000);
+setInterval(loadStats, 300000);
 </script>
 </body>
 </html>"""
