@@ -1601,21 +1601,23 @@ def monitor(duration, verbose, db, no_db):
             conn.commit()
 
     async def db_size_loop():
-        """Every 5 minutes, record the file size of every .db file in the data directory."""
+        """Every 5 minutes, record the allocated size of each table in the database via dbstat."""
         while True:
             await asyncio.sleep(300)
             if not conn:
                 continue
             ts = datetime.datetime.now().replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
-            for db_file in sorted(Path(db).parent.glob("*.db")):
-                try:
-                    size = db_file.stat().st_size
-                    conn.execute(
-                        "INSERT OR REPLACE INTO db_size_readings (ts, name, bytes) VALUES (?,?,?)",
-                        (ts, db_file.name, size),
-                    )
-                except OSError:
-                    pass
+            rows = conn.execute("""
+                SELECT d.name, SUM(d.pgsize)
+                FROM dbstat d
+                JOIN sqlite_master m ON m.name = d.name AND m.type = 'table'
+                GROUP BY d.name
+            """).fetchall()
+            for name, size in rows:
+                conn.execute(
+                    "INSERT OR REPLACE INTO db_size_readings (ts, name, bytes) VALUES (?,?,?)",
+                    (ts, name, size),
+                )
             conn.commit()
 
     async def snapshot_loop():
