@@ -140,6 +140,14 @@ def open_db(path: str) -> sqlite3.Connection:
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS pool_readings_label_ts ON pool_readings (label, ts DESC)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS db_size_readings (
+            ts    TEXT NOT NULL,
+            name  TEXT NOT NULL,
+            bytes INTEGER NOT NULL,
+            PRIMARY KEY (ts, name)
+        )
+    """)
     conn.commit()
     return conn
 

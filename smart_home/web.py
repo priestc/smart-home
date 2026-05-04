@@ -4076,6 +4076,7 @@ def index():
     <a href="/chart/signal"      class="chart-link"><span class="cl-title">Signal Strength</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/events"            class="chart-link"><span class="cl-title">Temperature Events</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/process-stats"     class="chart-link"><span class="cl-title">Process Stats</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/chart/db-sizes"   class="chart-link"><span class="cl-title">Database Growth</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/camera"            class="chart-link"><span class="cl-title">Cameras</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/pool"              class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Pool Monitor</span><span class="cl-arrow">&#8594;</span></a>
@@ -4389,6 +4390,182 @@ setInterval(load, 60000);
 @app.get("/process-stats")
 def process_stats_page():
     return Response(_PROCESS_STATS_PAGE, mimetype="text/html")
+
+
+@app.get("/api/db-sizes")
+def api_db_sizes():
+    days = float(request.args.get("days", 7))
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT ts, name, bytes FROM db_size_readings WHERE ts >= ? ORDER BY ts",
+            (cutoff,),
+        ).fetchall()
+    result = {}
+    for ts, name, size in rows:
+        result.setdefault(name, []).append({"ts": ts, "bytes": size})
+    return jsonify(result)
+
+
+_DB_SIZE_PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Database Growth &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; color: #1a2535; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1.5rem; }
+    .nav a { font-size: .85rem; color: #2e7dd4; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .chart-wrap { background: #fff; border-radius: 12px; padding: 1.4rem 1.4rem 1rem; margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .chart-wrap h2 { font-size: 0.85rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: 1rem; }
+    .btn-group { margin-bottom: 1.2rem; }
+    .btn-group-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .4rem; }
+    .range-btns { display: flex; gap: .4rem; flex-wrap: wrap; }
+    .range-btns button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s; }
+    .range-btns button:hover { background: #f0f4f8; border-color: #aabbc8; }
+    .range-btns button.active { background: #e07820; color: #fff; border-color: #e07820; }
+  </style>
+</head>
+<body>
+  <h1>Database Growth</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div class="btn-group">
+    <div class="btn-group-label">Time Range</div>
+    <div class="range-btns">
+      <button onclick="setRange(1)"   data-days="1">24h</button>
+      <button onclick="setRange(7)"   data-days="7" class="active">7d</button>
+      <button onclick="setRange(30)"  data-days="30">30d</button>
+      <button onclick="setRange(90)"  data-days="90">90d</button>
+      <button onclick="setRange(365)" data-days="365">1yr</button>
+    </div>
+  </div>
+  <div class="chart-wrap"><h2>Database Sizes</h2><canvas id="db-chart" height="80"></canvas></div>
+<script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
+
+function fmtBytes(bytes) {
+  if (bytes === null || bytes === undefined) return '—';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+  return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400"];
+let rangeDays = 7;
+let chart = null;
+
+function setRange(days) {
+  rangeDays = days;
+  document.querySelectorAll('.range-btns button[data-days]').forEach(b =>
+    b.classList.toggle('active', parseFloat(b.dataset.days) === days));
+  load();
+}
+
+function makeChart(names) {
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('db-chart'), {
+    type: 'line',
+    data: {
+      datasets: names.map((name, i) => ({
+        label: name,
+        data: [],
+        borderColor: COLORS[i % COLORS.length],
+        backgroundColor: COLORS[i % COLORS.length] + '18',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0,
+        fill: false,
+      }))
+    },
+    options: {
+      animation: false,
+      parsing: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, position: 'top',
+          labels: { color: '#1a2535', usePointStyle: true, pointStyleWidth: 10 } },
+        tooltip: {
+          callbacks: {
+            label: ctx => ` ${ctx.dataset.label}: ${fmtBytes(ctx.raw.y)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'time',
+          time: { tooltipFormat: 'MMM d, h:mm a' },
+          ticks: { color: '#7a90a8', maxTicksLimit: 20 },
+          grid: { color: '#e8eef4' }
+        },
+        y: {
+          min: 0,
+          ticks: {
+            color: '#7a90a8',
+            callback: v => fmtBytes(v)
+          },
+          grid: { color: '#e8eef4' }
+        }
+      }
+    }
+  });
+  return chart;
+}
+
+async function load() {
+  const data = await fetchJSON(`/api/db-sizes?days=${rangeDays}`);
+  const names = Object.keys(data).sort();
+  if (!chart || chart.data.datasets.length !== names.length ||
+      chart.data.datasets.some((ds, i) => ds.label !== names[i])) {
+    makeChart(names);
+  }
+  const now = new Date();
+  const xMin = new Date(now - rangeDays * 86400000);
+  chart.options.scales.x.min = xMin;
+  chart.options.scales.x.max = now;
+  chart.options.scales.x.time.unit = rangeDays <= 1 ? 'hour' : rangeDays <= 14 ? 'day' : 'week';
+  names.forEach((name, i) => {
+    chart.data.datasets[i].data = (data[name] || []).map(r => ({ x: new Date(r.ts), y: r.bytes }));
+  });
+  chart.update();
+}
+
+load();
+setInterval(load, 300000);
+</script>
+</body>
+</html>"""
+
+
+@app.get("/chart/db-sizes")
+def chart_db_sizes():
+    return Response(_DB_SIZE_PAGE, mimetype="text/html")
 
 
 # ---------------------------------------------------------------------------

@@ -1600,6 +1600,24 @@ def monitor(duration, verbose, db, no_db):
             )
             conn.commit()
 
+    async def db_size_loop():
+        """Every 5 minutes, record the file size of every .db file in the data directory."""
+        while True:
+            await asyncio.sleep(300)
+            if not conn:
+                continue
+            ts = datetime.datetime.now().replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+            for db_file in sorted(Path(db).parent.glob("*.db")):
+                try:
+                    size = db_file.stat().st_size
+                    conn.execute(
+                        "INSERT OR REPLACE INTO db_size_readings (ts, name, bytes) VALUES (?,?,?)",
+                        (ts, db_file.name, size),
+                    )
+                except OSError:
+                    pass
+            conn.commit()
+
     async def snapshot_loop():
         """Once per minute, write the latest reading for every sensor to the DB
         using a single shared timestamp so all readings align in the database."""
@@ -1996,7 +2014,7 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
-        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop()]
+        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop()]
         if cameras_cfg:
             extra.append(camera_watch_loop())
             extra.append(camera_vitals_loop())
