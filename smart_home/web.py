@@ -431,6 +431,55 @@ def history_day():
     return jsonify(result)
 
 
+@app.get("/api/history/typical-day")
+def history_typical_day():
+    """Average all readings into a single representative day.
+    Groups readings by time-of-day bucket, averaging across all days in the selected range.
+    Query params:
+      range_type: 'all', 'days', 'month'
+      days: 7 or 30 (when range_type=days)
+      month: 1-12 (when range_type=month)
+      bucket_minutes: default 10
+    """
+    import datetime as _dt
+    range_type = request.args.get("range_type", "all")
+    bucket_minutes = max(1, request.args.get("bucket_minutes", 10, type=int))
+    bucket_secs = bucket_minutes * 60
+
+    where_parts = ["temp_f IS NOT NULL", "label IS NOT NULL"]
+    params = [bucket_secs, bucket_secs]
+
+    if range_type == "days":
+        days = max(2, request.args.get("days", 7, type=int))
+        where_parts.append(f"ts >= DATE('now', '-{days} days')")
+    elif range_type == "month":
+        month = max(1, min(12, request.args.get("month", 1, type=int)))
+        where_parts.append("strftime('%m', ts) = ?")
+        params.append(f"{month:02d}")
+
+    where_sql = " AND ".join(where_parts)
+
+    with _conn() as conn:
+        rows = conn.execute(f"""
+            SELECT
+                (CAST(strftime('%H', ts) AS INTEGER) * 3600 +
+                 CAST(strftime('%M', ts) AS INTEGER) * 60) / ? * ? AS time_bucket,
+                label,
+                ROUND(AVG(temp_f), 2) AS temp_f
+            FROM readings
+            WHERE {where_sql}
+            GROUP BY time_bucket, label
+            ORDER BY time_bucket ASC
+        """, params).fetchall()
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        ts = (_dt.datetime(2000, 1, 1) + _dt.timedelta(seconds=d["time_bucket"])).strftime("%Y-%m-%d %H:%M:%S")
+        result.append({"ts": ts, "label": d["label"], "temp_f": d["temp_f"]})
+    return jsonify(result)
+
+
 @app.get("/api/history/year")
 def history_year():
     """All temperature readings across the full year, normalized to year 2000 for overlay.
@@ -1775,7 +1824,7 @@ _TEMP_PAGE = """\
 </head>
 <body>
   <h1>Temperature</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div class="nav"><a href="/">&larr; Dashboard</a> &nbsp;|&nbsp; <a href="/chart/typical-day">Typical Day &rarr;</a></div>
   <div class="res-row">
     <label for="res">Resolution</label>
     <select id="res" onchange="resolution=this.value; loadChart()">
@@ -2400,6 +2449,337 @@ setInterval(() => { if (mode !== "day") loadColors().then(loadChart); }, 30000);
 @app.get("/chart/temperature")
 def chart_temperature():
     return Response(_TEMP_PAGE, mimetype="text/html")
+
+
+_TYPICAL_DAY_PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Typical Temperature Day &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; color: #1a2535; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1.5rem; }
+    .nav a { font-size: .85rem; color: #2e7dd4; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .chart-wrap { background: #fff; border-radius: 12px; padding: 1.4rem 1.4rem 1rem; margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .chart-wrap h2 { font-size: 0.85rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: 1rem; }
+    .btn-group { margin-bottom: 1.2rem; }
+    .btn-group-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .4rem; }
+    .range-btns { display: flex; gap: .4rem; flex-wrap: wrap; }
+    .range-btns button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s; }
+    .range-btns button:hover { background: #f0f4f8; border-color: #aabbc8; }
+    .range-btns button.active { background: #e07820; color: #fff; border-color: #e07820; }
+    .res-row { display: flex; align-items: center; gap: .6rem; margin-bottom: 1.2rem; }
+    .res-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+    .res-row select { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; cursor: pointer; }
+    #resp-size { font-size: .72rem; color: #4a6080; }
+  </style>
+</head>
+<body>
+  <h1>Typical Temperature Day</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a> &nbsp;|&nbsp; <a href="/chart/temperature">&larr; Temperature</a></div>
+  <div class="res-row">
+    <label for="res">Resolution</label>
+    <select id="res" onchange="resolution=this.value; loadChart()">
+      <option value="low">Low</option>
+      <option value="medium">Medium</option>
+      <option value="max">Max</option>
+    </select>
+    <span id="resp-size"></span>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">Sensors</div>
+    <div class="range-btns" id="sensor-btns">
+      <button onclick="toggleSensor('outside-sun', this)" id="btn-outside-sun">Outside (sun)</button>
+      <button onclick="toggleSensor('outside-shade', this)" id="btn-outside-shade">Outside (shade)</button>
+      <button onclick="toggleSensor('indoor-avg', this)" id="btn-indoor-avg">Indoor average</button>
+    </div>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">Range</div>
+    <div class="range-btns" id="range-btns">
+      <button onclick="setRange('days', 7, this)">Last 7 Days</button>
+      <button onclick="setRange('days', 30, this)">Last 30 Days</button>
+      <button onclick="setRange('all', null, this)" id="btn-all-time">All Time</button>
+    </div>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">By Month</div>
+    <div class="range-btns" id="month-btns">
+      <button onclick="setRange('month', 1, this)">Jan</button>
+      <button onclick="setRange('month', 2, this)">Feb</button>
+      <button onclick="setRange('month', 3, this)">Mar</button>
+      <button onclick="setRange('month', 4, this)">Apr</button>
+      <button onclick="setRange('month', 5, this)">May</button>
+      <button onclick="setRange('month', 6, this)">Jun</button>
+      <button onclick="setRange('month', 7, this)">Jul</button>
+      <button onclick="setRange('month', 8, this)">Aug</button>
+      <button onclick="setRange('month', 9, this)">Sep</button>
+      <button onclick="setRange('month', 10, this)">Oct</button>
+      <button onclick="setRange('month', 11, this)">Nov</button>
+      <button onclick="setRange('month', 12, this)">Dec</button>
+    </div>
+  </div>
+  <div class="chart-wrap"><h2 id="chart-title">Typical Day &mdash; All Time</h2><canvas id="chart" height="120"></canvas></div>
+<script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\\u26a0 Network error: ' + msg;
+}
+async function fetchJSON(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
+async function fetchJSONBytes(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    const cl = r.headers.get('content-length');
+    const text = await r.text();
+    const bytes = cl !== null ? parseInt(cl) : new TextEncoder().encode(text).length;
+    return { data: JSON.parse(text), bytes };
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
+const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
+const colorMap = {};
+function labelColor(lbl) { return colorMap[lbl] ?? COLORS[0]; }
+const SENSOR_COLORS = { 'outside-sun': '#e07820', 'outside-shade': '#2e7dd4', 'indoor-avg': '#2a9d6e' };
+function modeColor(m) { return SENSOR_COLORS[m] ?? colorMap[m] ?? COLORS[0]; }
+function hexToRgb(hex) { return [parseInt(hex.slice(1,3),16),parseInt(hex.slice(3,5),16),parseInt(hex.slice(5,7),16)]; }
+function applyBtnColor(btn, color, active) {
+  const [r,g,b] = hexToRgb(color);
+  if (active) {
+    btn.style.background = color; btn.style.borderColor = color; btn.style.color = '#fff';
+  } else {
+    btn.style.background = `rgba(${r},${g},${b},0.06)`;
+    btn.style.borderColor = `rgba(${r},${g},${b},0.2)`;
+    btn.style.color = '#7a90a8';
+  }
+}
+const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const isLocal = /^192\\.168\\./.test(location.hostname) || /\\.local$/.test(location.hostname);
+let resolution = isLocal ? "max" : isMobile ? "low" : "medium";
+document.getElementById("res").value = resolution;
+const BUCKETS = { low: 30, medium: 10, max: 5 };
+function getBucket() { return BUCKETS[resolution]; }
+
+const activeModes = new Set(['outside-shade', 'indoor-avg']);
+function toggleSensor(key, btn) {
+  if (activeModes.has(key)) { activeModes.delete(key); } else { activeModes.add(key); }
+  applyBtnColor(btn, modeColor(key), activeModes.has(key));
+  loadChart();
+}
+
+function isIndoorLabel(l) {
+  const lo = l.toLowerCase();
+  return lo.startsWith('indoor-') || lo.startsWith('inside-');
+}
+
+let currentRange = { type: 'all', value: null };
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function setRange(type, value, clickedBtn) {
+  currentRange = { type, value };
+  document.querySelectorAll('#range-btns button, #month-btns button').forEach(b => b.classList.remove('active'));
+  clickedBtn.classList.add('active');
+  const label = type === 'month' ? MONTH_NAMES[value - 1] : (type === 'days' ? `Last ${value} Days` : 'All Time');
+  document.getElementById('chart-title').textContent = 'Typical Day \\u2014 ' + label;
+  loadChart();
+}
+
+function buildTypicalDatasets(data) {
+  const allLabels = [...new Set(data.map(r => r.label).filter(Boolean))];
+  const indoorLabels = allLabels.filter(isIndoorLabel);
+  const datasets = [];
+  function toDate(ts) { return new Date(ts.replace(' ', 'T')); }
+
+  if (activeModes.has('outside-sun')) {
+    const lbl = allLabels.find(l => l.toLowerCase().replace(/[_\\s]/g,'-') === 'outside-sun');
+    if (lbl) {
+      const pts = data.filter(r => r.label === lbl).map(r => ({ x: toDate(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
+      datasets.push({ label: 'Outside (sun)', data: pts, borderColor: '#e07820',
+        backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0 });
+    }
+  }
+
+  if (activeModes.has('outside-shade')) {
+    const lbl = allLabels.find(l => l.toLowerCase().replace(/[_\\s]/g,'-') === 'outside-shade');
+    if (lbl) {
+      const pts = data.filter(r => r.label === lbl).map(r => ({ x: toDate(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
+      datasets.push({ label: 'Outside (shade)', data: pts, borderColor: '#2e7dd4',
+        backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0 });
+    }
+  }
+
+  if (activeModes.has('indoor-avg') && indoorLabels.length > 0) {
+    const tsMap = {};
+    for (const row of data) {
+      if (!indoorLabels.includes(row.label) || row.temp_f == null) continue;
+      (tsMap[row.ts] ??= []).push(row.temp_f);
+    }
+    const pts = Object.entries(tsMap)
+      .map(([ts, vals]) => ({ x: toDate(ts), y: vals.reduce((a,b)=>a+b,0)/vals.length }))
+      .sort((a,b) => a.x - b.x);
+    datasets.push({ label: 'Indoor average', data: pts, borderColor: '#2a9d6e',
+      backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0 });
+  }
+
+  indoorLabels.sort().forEach(lbl => {
+    if (!activeModes.has(lbl)) return;
+    const color = labelColor(lbl);
+    const pts = data.filter(r => r.label === lbl).map(r => ({ x: toDate(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
+    datasets.push({ label: lbl, data: pts, borderColor: color,
+      backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0 });
+  });
+
+  return datasets;
+}
+
+Chart.Interaction.modes.nearestXPerDataset = function(chart, e, options, useFinalPosition) {
+  const pos = Chart.helpers.getRelativePosition(e, chart);
+  const items = [];
+  chart.data.datasets.forEach((_, datasetIndex) => {
+    if (!chart.isDatasetVisible(datasetIndex)) return;
+    const meta = chart.getDatasetMeta(datasetIndex);
+    let nearest = null, nearestDist = Infinity;
+    meta.data.forEach((element, index) => {
+      const { x } = element.getProps(['x'], useFinalPosition);
+      const dist = Math.abs(x - pos.x);
+      if (dist < nearestDist) { nearestDist = dist; nearest = { element, datasetIndex, index }; }
+    });
+    if (nearest) items.push(nearest);
+  });
+  return items;
+};
+
+const chart = new Chart(document.getElementById("chart"), {
+  type: "line", data: { datasets: [] },
+  options: {
+    animation: false, parsing: false,
+    interaction: { mode: "nearestXPerDataset", intersect: false },
+    plugins: {
+      legend: { labels: { color: "#4a6080" } },
+      tooltip: {
+        enabled: false,
+        external: function({ chart, tooltip }) {
+          let el = document.getElementById('chartjs-tt');
+          if (!el) {
+            el = document.createElement('div');
+            el.id = 'chartjs-tt';
+            el.style.cssText = 'position:absolute;pointer-events:none;background:rgba(0,0,0,.75);color:#fff;border-radius:6px;padding:6px 10px;font-size:12px;font-family:system-ui,sans-serif;white-space:nowrap;z-index:10;';
+            chart.canvas.parentNode.style.position = 'relative';
+            chart.canvas.parentNode.appendChild(el);
+          }
+          if (tooltip.opacity === 0) { el.style.display = 'none'; return; }
+          const title = (tooltip.title || [])[0] || '';
+          let html = title ? '<div style="font-weight:600;margin-bottom:3px;">' + title + '</div>' : '';
+          for (const item of (tooltip.dataPoints || [])) {
+            const raw = item.raw;
+            if (!raw || raw.y == null) continue;
+            const color = item.dataset.borderColor || '#ccc';
+            const lbl = (item.dataset.label || '') + ': ' + raw.y.toFixed(1) + '\\u00b0F';
+            html += '<div style="display:flex;align-items:center;gap:5px;"><span style="display:inline-block;width:10px;height:10px;background:' + color + ';border:1px solid ' + color + ';flex-shrink:0;"></span><span>' + lbl + '</span></div>';
+          }
+          el.innerHTML = html;
+          el.style.display = 'block';
+          const pw = chart.canvas.parentNode.offsetWidth;
+          const tw = el.offsetWidth || 160;
+          el.style.left = (tooltip.caretX + tw + 14 > pw ? tooltip.caretX - tw - 4 : tooltip.caretX + 14) + 'px';
+          el.style.top = Math.max(0, tooltip.caretY - 20) + 'px';
+        }
+      }
+    },
+    scales: {
+      x: { type: "time",
+           time: { unit: "hour", stepSize: 2, tooltipFormat: "h:mm a", displayFormats: { hour: "h a" } },
+           ticks: { color: "#7a90a8", maxTicksLimit: 13 },
+           grid: { color: "#e8eef4" },
+           min: new Date(2000, 0, 1, 0, 0, 0),
+           max: new Date(2000, 0, 1, 23, 59, 59) },
+      y: { ticks: { color: "#7a90a8", callback: v => (+v).toFixed(1) + "\\u00b0F" }, grid: { color: "#e8eef4" } }
+    }
+  }
+});
+
+function fmtBytes(n) {
+  return n >= 1048576 ? (n/1048576).toFixed(1) + ' MB'
+       : n >= 1024    ? (n/1024).toFixed(1) + ' KB'
+       :                n + ' B';
+}
+
+async function loadChart() {
+  let url = `/api/history/typical-day?bucket_minutes=${getBucket()}`;
+  if (currentRange.type === 'days') url += `&range_type=days&days=${currentRange.value}`;
+  else if (currentRange.type === 'month') url += `&range_type=month&month=${currentRange.value}`;
+  else url += '&range_type=all';
+  const { data, bytes } = await fetchJSONBytes(url);
+  chart.data.datasets = buildTypicalDatasets(data);
+  document.getElementById('resp-size').textContent = fmtBytes(bytes);
+  chart.update();
+}
+
+async function loadColors() {
+  const data = await fetchJSON("/api/current");
+  const reservedColors = new Set(Object.values(SENSOR_COLORS));
+  const roomColors = COLORS.filter(c => !reservedColors.has(c));
+  data.map(s => s.label).filter(Boolean).sort()
+    .forEach((lbl, i) => { colorMap[lbl] = roomColors[i % roomColors.length]; });
+  const indoorLabels = data.map(s => s.label).filter(l => l && isIndoorLabel(l)).sort();
+  const sensorBtns = document.getElementById('sensor-btns');
+  const existingRoomBtns = [...sensorBtns.querySelectorAll('button[data-room]')];
+  const existing = existingRoomBtns.map(b => b.dataset.room);
+  if (JSON.stringify(existing) !== JSON.stringify(indoorLabels)) {
+    existingRoomBtns.forEach(b => b.remove());
+    indoorLabels.forEach(lbl => {
+      const btn = document.createElement('button');
+      btn.dataset.room = lbl;
+      btn.textContent = lbl.replace(/^in(door|side)-/i, '').split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      btn.onclick = () => toggleSensor(lbl, btn);
+      if (activeModes.has(lbl)) btn.classList.add('active');
+      sensorBtns.appendChild(btn);
+      applyBtnColor(btn, modeColor(lbl), activeModes.has(lbl));
+    });
+  } else {
+    existingRoomBtns.forEach(b => applyBtnColor(b, modeColor(b.dataset.room), activeModes.has(b.dataset.room)));
+  }
+  [['btn-outside-sun','outside-sun'],['btn-outside-shade','outside-shade'],['btn-indoor-avg','indoor-avg']].forEach(([id,m]) => {
+    const btn = document.getElementById(id);
+    if (btn) applyBtnColor(btn, modeColor(m), activeModes.has(m));
+  });
+}
+
+document.getElementById('btn-all-time').classList.add('active');
+loadColors().then(loadChart);
+setInterval(() => loadColors().then(loadChart), 30000);
+</script>
+</body>
+</html>"""
+
+
+@app.get("/chart/typical-day")
+def chart_typical_day():
+    return Response(_TYPICAL_DAY_PAGE, mimetype="text/html")
 
 
 _BANDWIDTH_PAGE = """\
