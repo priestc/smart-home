@@ -1480,17 +1480,25 @@ def monitor(duration, verbose, db, no_db):
         """Maintain a persistent GATT connection to a BLE_YC01 pool monitor.
 
         Keeping the connection open prevents the device from entering sleep/off mode.
+        BlueZ requires the scanner to be stopped before a connection can be initiated,
+        but it can be restarted once the connection is established.
         Reads sensor data every POLL_COOLDOWN seconds while connected, then reconnects
         immediately on any disconnect.
         """
-        # Give the BLE scanner a moment to fully start before connecting.
+        # Give the BLE scanner a moment to fully start before first connect.
         await asyncio.sleep(5)
         retry_delay = 10
         while True:
             ts = datetime.datetime.now().strftime("%H:%M:%S")
+            scanner = scanner_ref[0] if scanner_ref else None
+            if scanner:
+                await scanner.stop()
             click.echo(f"[{ts}] Pool: connecting to {label} ({addr})...")
             try:
                 async with BleakClient(addr, timeout=20.0) as client:
+                    # Connection established — resume scanning for other BLE devices.
+                    if scanner:
+                        await scanner.start()
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
                     click.echo(f"[{ts}] Pool: connected to {label} ({addr})")
                     retry_delay = 10  # reset backoff on successful connect
@@ -1515,16 +1523,17 @@ def monitor(duration, verbose, db, no_db):
                             click.echo(f"[{ts}] Pool: GATT data too short from {label}")
                         await asyncio.sleep(POLL_COOLDOWN.total_seconds())
             except Exception as e:
-                err_str = str(e)
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
-                # InProgress means BlueZ is busy (scan/connect race); use a short fixed delay.
-                if "InProgress" in err_str or "Operation already in progress" in err_str:
-                    click.echo(f"[{ts}] Pool: {label} BlueZ busy, retrying in 5s...")
-                    await asyncio.sleep(5)
-                else:
-                    click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}, retrying in {retry_delay}s...")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 2, 120)
+                click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}, retrying in {retry_delay}s...")
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 120)
+            finally:
+                # Ensure scanner is always running after leaving the connect/read block.
+                if scanner:
+                    try:
+                        await scanner.start()
+                    except Exception:
+                        pass
 
     # latest reading per address, updated on every advertisement
     latest_reading: dict[str, object] = {}
