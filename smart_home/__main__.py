@@ -1483,6 +1483,8 @@ def monitor(duration, verbose, db, no_db):
         Reads sensor data every POLL_COOLDOWN seconds while connected, then reconnects
         immediately on any disconnect.
         """
+        # Give the BLE scanner a moment to fully start before connecting.
+        await asyncio.sleep(5)
         retry_delay = 10
         while True:
             ts = datetime.datetime.now().strftime("%H:%M:%S")
@@ -1513,10 +1515,16 @@ def monitor(duration, verbose, db, no_db):
                             click.echo(f"[{ts}] Pool: GATT data too short from {label}")
                         await asyncio.sleep(POLL_COOLDOWN.total_seconds())
             except Exception as e:
+                err_str = str(e)
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
-                click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}, retrying in {retry_delay}s...")
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 120)
+                # InProgress means BlueZ is busy (scan/connect race); use a short fixed delay.
+                if "InProgress" in err_str or "Operation already in progress" in err_str:
+                    click.echo(f"[{ts}] Pool: {label} BlueZ busy, retrying in 5s...")
+                    await asyncio.sleep(5)
+                else:
+                    click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}, retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 120)
 
     # latest reading per address, updated on every advertisement
     latest_reading: dict[str, object] = {}
