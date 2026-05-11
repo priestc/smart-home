@@ -8,8 +8,8 @@ import zipfile
 import os
 from pathlib import Path
 import click
-from bleak import BleakScanner
-from smart_home.scanner import scan, is_xiaomi_lywsd03mmc, is_pvvx_lywsd03mmc, read_lywsd03mmc, is_ble_yc01, read_ble_yc01
+from bleak import BleakScanner, BleakClient
+from smart_home.scanner import scan, is_xiaomi_lywsd03mmc, is_pvvx_lywsd03mmc, read_lywsd03mmc, is_ble_yc01
 from smart_home import labels as _labels
 from smart_home import alert_config as _alert_config
 from smart_home import pvvx as _pvvx
@@ -1140,11 +1140,9 @@ def monitor(duration, verbose, db, no_db):
     _last_poll_ok: dict[str, datetime.datetime] = {}  # address -> last successful poll time
     POLL_COOLDOWN = datetime.timedelta(seconds=30)
 
-    # BLE_YC01 pool monitors — same active-GATT-on-advertisement pattern as Xiaomi.
+    # BLE_YC01 pool monitors — persistent GATT connection keeps the device awake.
     pool_config = {m["address"].upper(): m["label"] for m in _pool.load_config()}
     yc01_devices: dict[str, tuple] = {}  # address -> (BLEDevice, last_rssi)
-    _yc01_poll_active: set[str] = set()
-    _yc01_last_poll_ok: dict[str, datetime.datetime] = {}
 
     scanner_ref: list = []
 
@@ -1249,14 +1247,6 @@ def monitor(duration, verbose, db, no_db):
             yc01_devices[device.address] = (device, adv.rssi)
             if is_new:
                 click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered pool monitor: {pool_config[device.address.upper()]} ({device.address})")
-            addr = device.address
-            last_ok = _yc01_last_poll_ok.get(addr, datetime.datetime.min)
-            if addr not in _yc01_poll_active and (now - last_ok) >= POLL_COOLDOWN:
-                _yc01_poll_active.add(addr)
-                try:
-                    asyncio.get_running_loop().create_task(_poll_yc01(addr))
-                except RuntimeError:
-                    _yc01_poll_active.discard(addr)
 
         if verbose and ble_name:
             click.echo(f"[presence] untracked: {ble_name!r} ({device.address})")
@@ -1486,32 +1476,47 @@ def monitor(duration, verbose, db, no_db):
         finally:
             _poll_active.discard(addr)
 
-    async def _poll_yc01(addr: str) -> None:
-        """Poll one BLE_YC01 pool monitor immediately after it has been seen advertising."""
-        try:
-            await asyncio.sleep(0.5)
-            entry = yc01_devices.get(addr)
-            if entry is None:
-                return
-            ble_device, last_rssi = entry
-            label = pool_config.get(addr.upper(), addr)
+    async def _yc01_persistent_loop(addr: str, label: str) -> None:
+        """Maintain a persistent GATT connection to a BLE_YC01 pool monitor.
+
+        Keeping the connection open prevents the device from entering sleep/off mode.
+        Reads sensor data every POLL_COOLDOWN seconds while connected, then reconnects
+        immediately on any disconnect.
+        """
+        retry_delay = 10
+        while True:
             ts = datetime.datetime.now().strftime("%H:%M:%S")
-            click.echo(f"[{ts}] Polling pool monitor: {label} ({addr})...")
-            reading, err = await read_ble_yc01(ble_device, label)
-            ts = datetime.datetime.now().strftime("%H:%M:%S")
-            if reading is not None:
-                _yc01_last_poll_ok[addr] = datetime.datetime.now()
-                _, last_rssi = yc01_devices.get(addr, (None, last_rssi))
-                reading.rssi = last_rssi
-                click.echo(f"[{ts}] Pool: {reading}")
-                if conn:
-                    insert_pool_reading(conn, reading)
-            else:
-                click.echo(f"[{ts}] Pool poll FAILED: {label} ({addr}): {err}")
-                if err and "not found" in err:
-                    yc01_devices.pop(addr, None)
-        finally:
-            _yc01_poll_active.discard(addr)
+            click.echo(f"[{ts}] Pool: connecting to {label} ({addr})...")
+            try:
+                async with BleakClient(addr, timeout=20.0) as client:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    click.echo(f"[{ts}] Pool: connected to {label} ({addr})")
+                    retry_delay = 10  # reset backoff on successful connect
+                    while client.is_connected:
+                        try:
+                            raw = await client.read_gatt_char(_pool.READ_UUID)
+                        except Exception as e:
+                            ts = datetime.datetime.now().strftime("%H:%M:%S")
+                            click.echo(f"[{ts}] Pool: GATT read failed for {label}: {e}")
+                            break
+                        reading = _pool.parse_gatt_data(raw)
+                        ts = datetime.datetime.now().strftime("%H:%M:%S")
+                        if reading is not None:
+                            reading.address = addr
+                            reading.label = label
+                            _, last_rssi = yc01_devices.get(addr, (None, None))
+                            reading.rssi = last_rssi
+                            click.echo(f"[{ts}] Pool: {reading}")
+                            if conn:
+                                insert_pool_reading(conn, reading)
+                        else:
+                            click.echo(f"[{ts}] Pool: GATT data too short from {label}")
+                        await asyncio.sleep(POLL_COOLDOWN.total_seconds())
+            except Exception as e:
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}, retrying in {retry_delay}s...")
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 120)
 
     # latest reading per address, updated on every advertisement
     latest_reading: dict[str, object] = {}
@@ -2028,6 +2033,8 @@ def monitor(duration, verbose, db, no_db):
             extra.append(poll_homeassistant_loop())
         if plugs_cfg:
             extra.append(poll_smart_plugs_loop())
+        for m in _pool.load_config():
+            extra.append(_yc01_persistent_loop(m["address"], m.get("label", m["address"])))
         asyncio.run(scan(
             on_reading,
             duration=duration,
