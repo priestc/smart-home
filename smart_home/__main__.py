@@ -1522,7 +1522,7 @@ def monitor(duration, verbose, db, no_db):
                                 insert_pool_reading(conn, reading)
                         else:
                             click.echo(f"[{ts}] Pool: GATT data too short from {label}")
-                        await asyncio.sleep(POLL_COOLDOWN.total_seconds())
+                        await asyncio.sleep(60)
             except Exception as e:
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}")
