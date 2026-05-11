@@ -1485,23 +1485,24 @@ def monitor(duration, verbose, db, no_db):
         Reads sensor data every POLL_COOLDOWN seconds while connected, then reconnects
         immediately on any disconnect.
         """
-        # Give the BLE scanner a moment to fully start before first connect.
-        await asyncio.sleep(5)
-        retry_delay = 10
         while True:
+            # Wait until the scanner has seen the device so BlueZ has it cached.
+            while addr not in yc01_devices:
+                await asyncio.sleep(2)
+
+            ble_device, _ = yc01_devices[addr]
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             scanner = scanner_ref[0] if scanner_ref else None
             if scanner:
                 await scanner.stop()
             click.echo(f"[{ts}] Pool: connecting to {label} ({addr})...")
             try:
-                async with BleakClient(addr, timeout=20.0) as client:
+                async with BleakClient(ble_device, timeout=20.0) as client:
                     # Connection established — resume scanning for other BLE devices.
                     if scanner:
                         await scanner.start()
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
                     click.echo(f"[{ts}] Pool: connected to {label} ({addr})")
-                    retry_delay = 10  # reset backoff on successful connect
                     while client.is_connected:
                         try:
                             raw = await client.read_gatt_char(_pool.READ_UUID)
@@ -1524,9 +1525,9 @@ def monitor(duration, verbose, db, no_db):
                         await asyncio.sleep(POLL_COOLDOWN.total_seconds())
             except Exception as e:
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
-                click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}, retrying in {retry_delay}s...")
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 120)
+                click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}")
+                # Remove from cache so we wait for a fresh advertisement before retrying.
+                yc01_devices.pop(addr, None)
             finally:
                 # Ensure scanner is always running after leaving the connect/read block.
                 if scanner:
