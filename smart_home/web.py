@@ -6501,6 +6501,176 @@ def pool_page():
     return Response(_POOL_PAGE, mimetype="text/html")
 
 
+@app.get("/api/rssi")
+def api_rssi():
+    """Latest RSSI reading for each sensor label."""
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT label, rssi, ts
+            FROM readings
+            WHERE id IN (
+                SELECT MAX(id) FROM readings WHERE rssi IS NOT NULL GROUP BY label
+            )
+            ORDER BY label
+        """).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+_RSSI_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bluetooth Signal &mdash; Smart Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; color: #1a2535; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1.5rem; }
+    .nav a { font-size: .85rem; color: #2e7dd4; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .card { background: #fff; border-radius: 12px; padding: 1.8rem 2rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); max-width: 480px; }
+    .select-row { display: flex; align-items: center; gap: .8rem; margin-bottom: 2rem; }
+    .select-row label { font-size: .8rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; white-space: nowrap; }
+    select { background: #fff; color: #1a2535; border: 1px solid #d0dce8; border-radius: 8px; padding: .45rem .9rem; font-size: .95rem; font-weight: 500; cursor: pointer; flex: 1; }
+    .rssi-display { text-align: center; padding: 2rem 0 1.5rem; }
+    .rssi-value { font-size: 6rem; font-weight: 800; letter-spacing: -.04em; line-height: 1; transition: color .3s; }
+    .rssi-unit { font-size: 1.5rem; font-weight: 500; color: #7a90a8; margin-top: .3rem; }
+    .rssi-label { font-size: .8rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-top: 1.2rem; }
+    .rssi-ts { font-size: .8rem; color: #aabbcc; margin-top: .4rem; }
+    .signal-bar { display: flex; justify-content: center; gap: .35rem; margin-top: 1.5rem; }
+    .signal-bar .seg { width: 24px; border-radius: 3px 3px 0 0; background: #e0e8f0; }
+    .legend { display: flex; justify-content: center; gap: 1.2rem; margin-top: 1.2rem; font-size: .75rem; color: #7a90a8; }
+    .legend span { display: flex; align-items: center; gap: .3rem; }
+    .legend span::before { content: ''; display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+    .legend .good::before { background: #2a9d6e; }
+    .legend .fair::before { background: #e07820; }
+    .legend .poor::before { background: #c0392b; }
+    #error-bar { display: none; background: #c0392b; color: #fff; padding: .6rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: .88rem; }
+    .no-device { text-align: center; color: #aabbcc; padding: 2rem 0; font-size: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Bluetooth Signal</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div id="error-bar"></div>
+  <div class="card">
+    <div class="select-row">
+      <label for="device-select">Device</label>
+      <select id="device-select">
+        <option value="">-- select a device --</option>
+      </select>
+    </div>
+    <div id="rssi-display" class="rssi-display">
+      <div class="no-device">Select a device above</div>
+    </div>
+    <div class="legend">
+      <span class="good">Good (&gt;&nbsp;&minus;60&nbsp;dBm)</span>
+      <span class="fair">Fair (&minus;60 to &minus;80)</span>
+      <span class="poor">Poor (&lt;&nbsp;&minus;80&nbsp;dBm)</span>
+    </div>
+  </div>
+<script>
+const sel = document.getElementById('device-select');
+const display = document.getElementById('rssi-display');
+const errorBar = document.getElementById('error-bar');
+let latestData = {};
+let intervalId = null;
+
+function showError(msg) {
+  errorBar.textContent = msg;
+  errorBar.style.display = 'block';
+}
+function clearError() {
+  errorBar.style.display = 'none';
+}
+
+function rssiColor(v) {
+  if (v > -60) return '#2a9d6e';
+  if (v > -80) return '#e07820';
+  return '#c0392b';
+}
+
+function signalBars(v) {
+  const heights = [14, 22, 32, 44, 58];
+  let filled;
+  if (v > -55) filled = 5;
+  else if (v > -65) filled = 4;
+  else if (v > -75) filled = 3;
+  else if (v > -85) filled = 2;
+  else filled = 1;
+  const color = rssiColor(v);
+  return heights.map((h, i) => {
+    const active = i < filled;
+    return `<div class="seg" style="height:${h}px;background:${active ? color : '#e0e8f0'};opacity:${active ? 1 : 0.4};"></div>`;
+  }).join('');
+}
+
+function renderDisplay(label) {
+  const d = latestData[label];
+  if (!d || d.rssi == null) {
+    display.innerHTML = '<div class="no-device">No RSSI data for this device</div>';
+    return;
+  }
+  const color = rssiColor(d.rssi);
+  const ts = d.ts ? new Date(d.ts.replace(' ', 'T')).toLocaleTimeString() : '';
+  display.innerHTML = `
+    <div class="rssi-value" style="color:${color}">${d.rssi}</div>
+    <div class="rssi-unit">dBm</div>
+    <div class="signal-bar">${signalBars(d.rssi)}</div>
+    <div class="rssi-label">${label}</div>
+    <div class="rssi-ts">Last updated ${ts}</div>
+  `;
+}
+
+async function loadRssi() {
+  try {
+    const r = await fetch('/api/rssi');
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    const data = await r.json();
+    clearError();
+    latestData = {};
+    data.forEach(d => { latestData[d.label] = d; });
+
+    const labels = data.map(d => d.label).sort();
+    const current = sel.value;
+    const existing = [...sel.options].slice(1).map(o => o.value);
+    if (JSON.stringify(existing) !== JSON.stringify(labels)) {
+      while (sel.options.length > 1) sel.remove(1);
+      labels.forEach(lbl => {
+        const opt = document.createElement('option');
+        opt.value = lbl;
+        opt.textContent = lbl;
+        sel.appendChild(opt);
+      });
+      if (current && labels.includes(current)) sel.value = current;
+    }
+
+    const chosen = sel.value;
+    if (chosen) renderDisplay(chosen);
+  } catch(e) {
+    showError('Failed to load RSSI data: ' + e.message);
+  }
+}
+
+sel.addEventListener('change', () => {
+  const chosen = sel.value;
+  if (chosen) renderDisplay(chosen);
+  else display.innerHTML = '<div class="no-device">Select a device above</div>';
+});
+
+loadRssi();
+setInterval(loadRssi, 3000);
+</script>
+</body>
+</html>"""
+
+
+@app.get("/rssi")
+def rssi_page():
+    return Response(_RSSI_PAGE, mimetype="text/html")
+
+
 def run(db_path: str, host: str, port: int, debug: bool) -> None:
     global _db_path
     _db_path = db_path
