@@ -67,9 +67,11 @@ def send_notification(title: str, body: str) -> None:
     creds = load_credentials()
     tokens = load_tokens()
     if not creds or not tokens:
+        print(f"[push] skipped '{title}': no creds={bool(creds)} tokens={len(tokens)}")
         return
     required = {"key_file", "key_id", "team_id", "bundle_id"}
     if not required.issubset(creds):
+        print(f"[push] skipped '{title}': missing keys {required - creds.keys()}")
         return
 
     try:
@@ -85,6 +87,7 @@ def send_notification(title: str, body: str) -> None:
         return
 
     host = APNS_DEV_HOST if creds.get("sandbox") else APNS_PROD_HOST
+    print(f"[push] sending '{title}' via {'sandbox' if creds.get('sandbox') else 'production'} to {len(tokens)} device(s)")
     dead: list[str] = []
 
     with httpx.Client(http2=True) as client:
@@ -101,9 +104,12 @@ def send_notification(title: str, body: str) -> None:
                     json={"aps": {"alert": {"title": title, "body": body}, "sound": "default"}},
                     timeout=10,
                 )
-                if resp.status_code == 410:    # token expired / unregistered
+                if resp.status_code == 200:
+                    print(f"[push] OK: '{title}'")
+                elif resp.status_code == 410:    # token expired / unregistered
+                    print(f"[push] token expired, removing")
                     dead.append(token)
-                elif resp.status_code != 200:
+                else:
                     print(f"[push] APNs {resp.status_code}: {resp.text}")
             except Exception as e:
                 print(f"[push] send error: {e}")
