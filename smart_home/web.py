@@ -4460,6 +4460,7 @@ def index():
     <a href="/camera"            class="chart-link"><span class="cl-title">Cameras</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/pool"              class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Pool Monitor</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/rssi"              class="chart-link"><span class="cl-title">Bluetooth Signal</span><span class="cl-arrow">&#8594;</span></a>
   </div>
 
   <div id="events-wrap" style="display:none">
@@ -6503,16 +6504,11 @@ def pool_page():
 
 @app.get("/api/rssi")
 def api_rssi():
-    """Latest RSSI reading for each sensor label."""
+    """Latest RSSI for every BLE device (sensors + presence devices)."""
     with _conn() as conn:
-        rows = conn.execute("""
-            SELECT label, rssi, ts
-            FROM readings
-            WHERE id IN (
-                SELECT MAX(id) FROM readings WHERE rssi IS NOT NULL GROUP BY label
-            )
-            ORDER BY label
-        """).fetchall()
+        rows = conn.execute(
+            "SELECT label, address, rssi, ts FROM ble_rssi ORDER BY label"
+        ).fetchall()
     return jsonify([dict(r) for r in rows])
 
 

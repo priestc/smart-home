@@ -157,8 +157,25 @@ def open_db(path: str) -> sqlite3.Connection:
             PRIMARY KEY (ts, camera)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ble_rssi (
+            label   TEXT PRIMARY KEY,
+            address TEXT,
+            rssi    INTEGER,
+            ts      TEXT NOT NULL
+        )
+    """)
     conn.commit()
     return conn
+
+
+def upsert_ble_rssi(conn: sqlite3.Connection, label: str, address: str | None, rssi: int) -> None:
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT OR REPLACE INTO ble_rssi (label, address, rssi, ts) VALUES (?,?,?,?)",
+        (label, address, rssi, ts),
+    )
+    conn.commit()
 
 
 def insert_reading(conn: sqlite3.Connection, reading) -> None:

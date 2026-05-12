@@ -20,7 +20,7 @@ from smart_home import garage as _garage
 from smart_home import smart_plug as _smart_plug
 from smart_home import pool as _pool
 from smart_home.battery import dump_gatt
-from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading, insert_plug_reading, insert_pool_reading
+from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading, insert_plug_reading, insert_pool_reading, upsert_ble_rssi
 
 DEFAULT_DB = os.path.expanduser("~/.local/share/smart-home/readings.db")
 
@@ -1152,6 +1152,8 @@ def monitor(duration, verbose, db, no_db):
     presence_state = _presence.load_state()
     presence_addr_map: dict[str, str] = {}  # MAC address -> ble_name (for nameless adverts)
     PRESENCE_TIMEOUT = datetime.timedelta(seconds=30)
+    presence_rssi_last_write: dict[str, datetime.datetime] = {}
+    PRESENCE_RSSI_THROTTLE = datetime.timedelta(seconds=10)
 
     # Tracks which presence devices have already had their auto-open fired this
     # "home" episode. Reset to empty when the device goes "away" again.
@@ -1214,6 +1216,12 @@ def monitor(duration, verbose, db, no_db):
             _fire_auto_open(ble_name)
             if verbose:
                 click.echo(f"[presence] {ble_name!r} seen (by name, addr={device.address})")
+            if conn and adv.rssi is not None:
+                last_write = presence_rssi_last_write.get(ble_name)
+                if last_write is None or (now - last_write) >= PRESENCE_RSSI_THROTTLE:
+                    presence_rssi_last_write[ble_name] = now
+                    label = presence_devices[ble_name]
+                    upsert_ble_rssi(conn, label, device.address, adv.rssi)
             return
 
         # Match by previously-seen MAC address (handles nameless advertisements)
@@ -1223,6 +1231,12 @@ def monitor(duration, verbose, db, no_db):
             _fire_auto_open(matched_name)
             if verbose:
                 click.echo(f"[presence] {matched_name!r} seen (by addr={device.address})")
+            if conn and adv.rssi is not None:
+                last_write = presence_rssi_last_write.get(matched_name)
+                if last_write is None or (now - last_write) >= PRESENCE_RSSI_THROTTLE:
+                    presence_rssi_last_write[matched_name] = now
+                    label = presence_devices[matched_name]
+                    upsert_ble_rssi(conn, label, device.address, adv.rssi)
             return
 
         if is_xiaomi_lywsd03mmc(device, adv) and device.address.upper() not in pvvx_addresses and device.address in label_map:
@@ -1669,6 +1683,11 @@ def monitor(duration, verbose, db, no_db):
                         "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity, rssi, battery, raw_reading) VALUES (?,?,?,?,?,?,?,?)",
                         (ts, reading.address, reading.label, reading.temp_f, reading.humidity, reading.rssi, reading.battery, reading.raw_reading),
                     )
+                    if reading.label and reading.rssi is not None:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO ble_rssi (label, address, rssi, ts) VALUES (?,?,?,?)",
+                            (reading.label, reading.address, reading.rssi, ts),
+                        )
             # Null readings for labeled sensors that didn't report this cycle
             for addr, label in label_map.items():
                 if label and addr not in latest_reading:
