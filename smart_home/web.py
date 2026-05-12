@@ -6600,7 +6600,7 @@ async function loadHistory() {
       tbody.innerHTML = '<tr><td colspan="8" class="no-data">No history yet.</td></tr>';
       return;
     }
-    tbody.innerHTML = [...rows].reverse().map(r => `<tr>
+    tbody.innerHTML = [...rows].reverse().slice(0, 10).map(r => `<tr>
       <td>${r.ts}</td>
       <td>${r.temp_f != null ? r.temp_f.toFixed(1) + '°F' : '—'}</td>
       <td style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '—'}</td>
