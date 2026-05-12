@@ -5123,7 +5123,7 @@ def api_camera_zones_set(name):
 def api_cameras():
     from smart_home import camera as _camera
     cameras = _camera.load_config()
-    return jsonify([{"name": c["name"], "zones": c.get("zones", []), "flipped": c.get("flipped", False)} for c in cameras])
+    return jsonify([{"name": c["name"], "zones": c.get("zones", []), "flipped": c.get("flipped", False), "url": c.get("url", "")} for c in cameras])
 
 
 @app.get("/api/camera/events/<name>")
@@ -5248,6 +5248,7 @@ _CAMERA_VIEW_PAGE = """\
         <span><span class="live-dot"></span>Live</span>
         <button class="btn" onclick="toggleLive()">Pause</button>
         <button class="btn" id="flip-btn" onclick="flipCam()">Flip 180°</button>
+        <a class="btn" id="settings-link" href="#" target="_blank" rel="noopener">Camera Settings &rarr;</a>
       </div>
     </div>
     <div class="panel">
@@ -5447,6 +5448,7 @@ function switchCam(name) {
   document.querySelector(".feed-actions button").textContent = "Pause";
   const cam = cameras.find(c => c.name === name);
   document.getElementById("flip-btn").textContent = cam && cam.flipped ? "Unflip" : "Flip 180°";
+  document.getElementById("settings-link").href = cam && cam.url ? cam.url + "/" : "#";
   startLive();
   loadEvents();
   loadVitals();
