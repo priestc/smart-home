@@ -6484,7 +6484,7 @@ async function fetchJSON(url) {
 }
 
 function agо(ts) {
-  const secs = Math.floor((Date.now() - new Date(ts + 'Z').getTime()) / 1000);
+  const secs = Math.floor((Date.now() - new Date(ts.replace(' ', 'T')).getTime()) / 1000);
   if (secs < 0) return 'just now';
   if (secs < 60) return secs + 's ago';
   if (secs < 3600) return Math.floor(secs/60) + 'm ago';
@@ -6515,14 +6515,14 @@ function buildChartPoints(rows, metric) {
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     if (i > 0) {
-      const prevTime = new Date(rows[i - 1].ts + 'Z').getTime();
-      const currTime = new Date(r.ts + 'Z').getTime();
+      const prevTime = new Date(rows[i - 1].ts.replace(' ', 'T')).getTime();
+      const currTime = new Date(r.ts.replace(' ', 'T')).getTime();
       if (currTime - prevTime > GAP_MS) {
         points.push({ x: new Date(prevTime + (currTime - prevTime) / 2), y: null });
       }
     }
     if (r[metric] != null) {
-      points.push({ x: new Date(r.ts + 'Z'), y: r[metric] });
+      points.push({ x: new Date(r.ts.replace(' ', 'T')), y: r[metric] });
     }
   }
   return points;
