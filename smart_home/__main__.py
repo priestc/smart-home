@@ -1502,7 +1502,8 @@ def monitor(duration, verbose, db, no_db):
                     if scanner:
                         await scanner.start()
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
-                    click.echo(f"[{ts}] Pool: connected to {label} ({addr})")
+                    _, last_rssi = yc01_devices.get(addr, (None, None))
+                    click.echo(f"[{ts}] Pool: connected to {label} ({addr})  rssi={last_rssi}dBm")
                     while client.is_connected:
                         try:
                             raw = await client.read_gatt_char(_pool.READ_UUID)
