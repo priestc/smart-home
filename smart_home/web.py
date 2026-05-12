@@ -6276,6 +6276,23 @@ def garage_page():
 # Pool monitor
 # ---------------------------------------------------------------------------
 
+@app.get("/api/pool/events")
+def api_pool_events():
+    """Recent offline/online events for pool monitors."""
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT id, ts, event_type, value, details
+            FROM temperature_events
+            WHERE (event_type = 'sensor_offline' OR event_type = 'sensor_online')
+              AND details IN (
+                  SELECT DISTINCT label FROM pool_readings
+              )
+            ORDER BY ts DESC
+            LIMIT 50
+        """).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
 @app.get("/api/pool/current")
 def api_pool_current():
     """Latest reading for each pool monitor."""
@@ -6385,6 +6402,13 @@ _POOL_PAGE = """<!DOCTYPE html>
     .metric-btn[data-metric="tds"].active     { background: #1a6db5; }
     .metric-btn[data-metric="battery"].active { background: #7a90a8; }
     .chart-wrap { background: #fff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 2rem; }
+    .ev-list { list-style: none; display: flex; flex-direction: column; gap: .4rem; }
+    .ev-item { display: flex; align-items: center; gap: .75rem; font-size: .85rem; }
+    .ev-badge { font-size: .7rem; font-weight: 700; padding: .15rem .55rem; border-radius: 20px; white-space: nowrap; }
+    .badge-off { background: #fde8e8; color: #c0392b; }
+    .badge-on  { background: #e6f7f0; color: #2a9d6e; }
+    .ev-ts { color: #aabbc8; font-size: .78rem; white-space: nowrap; }
+    .ev-detail { color: #1a2535; }
   </style>
 </head>
 <body>
@@ -6413,6 +6437,13 @@ _POOL_PAGE = """<!DOCTYPE html>
 
   <div class="chart-wrap" id="chart-wrap">
     <canvas id="pool-chart"></canvas>
+  </div>
+
+  <div style="display:flex;align-items:center;gap:1rem;margin-bottom:.75rem">
+    <div class="section" style="margin-bottom:0">Offline events</div>
+  </div>
+  <div id="events-wrap" style="margin-bottom:2rem">
+    <span class="no-data">Loading&hellip;</span>
   </div>
 
   <div class="section" style="margin-bottom:.75rem">Raw data</div>
@@ -6639,7 +6670,27 @@ function onLabelChange() {
   loadHistory();
 }
 
-loadCurrent().then(() => loadHistory());
+async function loadEvents() {
+  try {
+    const events = await fetchJSON('/api/pool/events');
+    const wrap = document.getElementById('events-wrap');
+    if (!events.length) {
+      wrap.innerHTML = '<span class="no-data">No offline events recorded.</span>';
+      return;
+    }
+    wrap.innerHTML = '<ul class="ev-list">' + events.map(e => {
+      const isOff = e.event_type === 'sensor_offline';
+      const badge = isOff
+        ? '<span class="ev-badge badge-off">Offline</span>'
+        : '<span class="ev-badge badge-on">Online</span>';
+      return `<li class="ev-item">${badge}<span class="ev-ts">${e.ts}</span><span class="ev-detail">${e.details || ''}</span></li>`;
+    }).join('') + '</ul>';
+  } catch(e) {
+    showError('Failed to load events: ' + e.message);
+  }
+}
+
+loadCurrent().then(() => { loadHistory(); loadEvents(); });
 setInterval(loadCurrent, 30000);
 </script>
 </body>

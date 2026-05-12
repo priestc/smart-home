@@ -1457,6 +1457,18 @@ def monitor(duration, verbose, db, no_db):
                 "humi_max": None, "humi_min": None,
             }
 
+    # Seed pool_last_reading from DB so offline detection works right after a restart.
+    # Without this, pool_last_reading is empty and the offline check silently skips.
+    if conn and pool_config:
+        for pool_lbl in pool_config.values():
+            row = conn.execute(
+                "SELECT ts FROM pool_readings WHERE label=? ORDER BY ts DESC LIMIT 1",
+                (pool_lbl,),
+            ).fetchone()
+            if row:
+                pool_last_reading[pool_lbl] = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+                click.echo(f"Pool monitor '{pool_lbl}' last reading: {row[0]}")
+
     # Tracks which hour-of-day the record check last ran; -1 forces a run at startup
     _last_record_check_hour = -1
 
