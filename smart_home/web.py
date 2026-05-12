@@ -6340,6 +6340,8 @@ _POOL_PAGE = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pool Monitor</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
@@ -6366,6 +6368,23 @@ _POOL_PAGE = """<!DOCTYPE html>
     #error-bar { display:none; background:#fde8e8; color:#c0392b; border-radius:8px; padding:.6rem 1rem; margin-bottom:1rem; font-size:.85rem; font-weight:500; }
     .no-data { color: #aabbc8; font-style: italic; padding: 1rem; }
     .label-select { font-size: .9rem; padding: .4rem .75rem; border: 1px solid #d0dce8; border-radius: 8px; background: #fff; color: #1a2535; cursor: pointer; }
+    .metric-btns { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .metric-btn {
+      font-size: .8rem; font-weight: 600; padding: .4rem .9rem; border-radius: 20px;
+      border: 2px solid transparent; cursor: pointer; background: #fff;
+      color: #7a90a8; transition: all .15s;
+      box-shadow: 0 1px 3px rgba(0,0,0,.08);
+    }
+    .metric-btn:hover { background: #f0f4f8; }
+    .metric-btn.active { color: #fff; border-color: transparent; }
+    .metric-btn[data-metric="temp_f"].active  { background: #e07820; }
+    .metric-btn[data-metric="ph"].active      { background: #2e7dd4; }
+    .metric-btn[data-metric="orp"].active     { background: #7b4fb5; }
+    .metric-btn[data-metric="chlorine"].active{ background: #2a9d6e; }
+    .metric-btn[data-metric="ec"].active      { background: #c0662b; }
+    .metric-btn[data-metric="tds"].active     { background: #1a6db5; }
+    .metric-btn[data-metric="battery"].active { background: #7a90a8; }
+    .chart-wrap { background: #fff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 2rem; }
   </style>
 </head>
 <body>
@@ -6379,8 +6398,24 @@ _POOL_PAGE = """<!DOCTYPE html>
 
   <div style="display:flex;align-items:center;gap:1rem;margin-bottom:.75rem">
     <div class="section" style="margin-bottom:0">History</div>
-    <select class="label-select" id="label-sel" onchange="loadHistory()"></select>
+    <select class="label-select" id="label-sel" onchange="onLabelChange()"></select>
   </div>
+
+  <div class="metric-btns" id="metric-btns">
+    <button class="metric-btn active" data-metric="temp_f"  data-label="Temperature" data-unit="°F">Temperature</button>
+    <button class="metric-btn"        data-metric="ph"       data-label="pH"          data-unit="">pH</button>
+    <button class="metric-btn"        data-metric="orp"      data-label="ORP"         data-unit="mV">ORP</button>
+    <button class="metric-btn"        data-metric="chlorine" data-label="Free Cl"     data-unit="mg/L">Free Cl</button>
+    <button class="metric-btn"        data-metric="ec"       data-label="EC"          data-unit="µS/cm">EC</button>
+    <button class="metric-btn"        data-metric="tds"      data-label="TDS"         data-unit="ppm">TDS</button>
+    <button class="metric-btn"        data-metric="battery"  data-label="Battery"     data-unit="%">Battery</button>
+  </div>
+
+  <div class="chart-wrap" id="chart-wrap">
+    <canvas id="pool-chart"></canvas>
+  </div>
+
+  <div class="section" style="margin-bottom:.75rem">Raw data</div>
   <table id="hist-table">
     <thead>
       <tr>
@@ -6392,6 +6427,20 @@ _POOL_PAGE = """<!DOCTYPE html>
   </table>
 
 <script>
+const METRIC_COLORS = {
+  temp_f:   '#e07820',
+  ph:       '#2e7dd4',
+  orp:      '#7b4fb5',
+  chlorine: '#2a9d6e',
+  ec:       '#c0662b',
+  tds:      '#1a6db5',
+  battery:  '#7a90a8',
+};
+
+let historyRows = [];
+let poolChart = null;
+let activeMetric = 'temp_f';
+
 function showError(msg) {
   const el = document.getElementById('error-bar');
   el.textContent = '⚠ ' + msg;
@@ -6428,6 +6477,79 @@ function clColor(cl) {
   if (cl < 0.5 || cl > 5.0) return '#c0392b';
   return '#e07820';
 }
+
+function renderChart() {
+  const btn = document.querySelector('.metric-btn.active');
+  if (!btn || !historyRows.length) return;
+  const metric = btn.dataset.metric;
+  const label  = btn.dataset.label;
+  const unit   = btn.dataset.unit;
+  const color  = METRIC_COLORS[metric] || '#2e7dd4';
+
+  const points = historyRows
+    .filter(r => r[metric] != null)
+    .map(r => ({ x: new Date(r.ts + 'Z'), y: r[metric] }));
+
+  if (poolChart) {
+    poolChart.data.datasets[0].data   = points;
+    poolChart.data.datasets[0].label  = label + (unit ? ' (' + unit + ')' : '');
+    poolChart.data.datasets[0].borderColor      = color;
+    poolChart.data.datasets[0].backgroundColor  = color + '22';
+    poolChart.update();
+  } else {
+    const ctx = document.getElementById('pool-chart').getContext('2d');
+    poolChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        datasets: [{
+          label: label + (unit ? ' (' + unit + ')' : ''),
+          data: points,
+          borderColor: color,
+          backgroundColor: color + '22',
+          borderWidth: 2,
+          pointRadius: 2,
+          pointHoverRadius: 4,
+          fill: true,
+          tension: 0.3,
+        }]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: {
+            type: 'time',
+            time: { tooltipFormat: 'MMM d, h:mm a' },
+            grid: { color: '#f0f4f8' },
+            ticks: { color: '#7a90a8', maxTicksLimit: 8 },
+          },
+          y: {
+            grid: { color: '#f0f4f8' },
+            ticks: { color: '#7a90a8' },
+            title: { display: !!unit, text: unit, color: '#7a90a8', font: { size: 11 } },
+          }
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => ctx.parsed.y + (unit ? ' ' + unit : ''),
+            }
+          }
+        }
+      }
+    });
+  }
+}
+
+document.getElementById('metric-btns').addEventListener('click', e => {
+  const btn = e.target.closest('.metric-btn');
+  if (!btn) return;
+  document.querySelectorAll('.metric-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  activeMetric = btn.dataset.metric;
+  renderChart();
+});
 
 async function loadCurrent() {
   try {
@@ -6469,7 +6591,10 @@ async function loadHistory() {
   const label = document.getElementById('label-sel').value;
   if (!label) return;
   try {
-    const rows = await fetchJSON('/api/pool/history?label=' + encodeURIComponent(label) + '&limit=200');
+    const rows = await fetchJSON('/api/pool/history?label=' + encodeURIComponent(label) + '&limit=500');
+    historyRows = rows;
+    renderChart();
+
     const tbody = document.getElementById('hist-body');
     if (!rows.length) {
       tbody.innerHTML = '<tr><td colspan="8" class="no-data">No history yet.</td></tr>';
@@ -6488,6 +6613,12 @@ async function loadHistory() {
   } catch(e) {
     showError('Failed to load history: ' + e.message);
   }
+}
+
+function onLabelChange() {
+  historyRows = [];
+  if (poolChart) { poolChart.destroy(); poolChart = null; }
+  loadHistory();
 }
 
 loadCurrent().then(() => loadHistory());
