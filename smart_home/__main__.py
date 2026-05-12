@@ -1131,6 +1131,8 @@ def monitor(duration, verbose, db, no_db):
     sensor_offline_alerted: set[str] = set()  # addresses for which offline alert was sent this episode
     battery_low_alerted: set[str] = set()     # labels for which battery-low alert was sent
     MISSING_THRESHOLD = datetime.timedelta(minutes=10)
+    pool_last_reading: dict[str, datetime.datetime] = {}  # pool label -> time of last successful reading
+    pool_offline_alerted: set[str] = set()               # pool labels with active offline alert
 
     # Xiaomi devices — polled actively via GATT on each advertisement (with cooldown).
     # Key insight: BlueZ evicts devices from its cache shortly after their last advertisement.
@@ -1494,29 +1496,27 @@ def monitor(duration, verbose, db, no_db):
         """Maintain a persistent GATT connection to a BLE_YC01 pool monitor.
 
         Keeping the connection open prevents the device from entering sleep/off mode.
-        BlueZ requires the scanner to be stopped before a connection can be initiated,
-        but it can be restarted once the connection is established.
-        Reads sensor data every POLL_COOLDOWN seconds while connected, then reconnects
-        immediately on any disconnect.
+        On disconnect, reconnect immediately by address (no advertisement wait) so the
+        device doesn't have time to shut itself off.
         """
-        while True:
-            # Wait until the scanner has seen the device so BlueZ has it cached.
-            while addr not in yc01_devices:
-                await asyncio.sleep(2)
+        _RETRY_DELAYS = [2, 5, 10, 20, 30]  # backoff seconds on consecutive failures
+        fail_count = 0
 
-            ble_device, _ = yc01_devices[addr]
+        while True:
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             scanner = scanner_ref[0] if scanner_ref else None
+            # Use cached BLEDevice if available, otherwise connect by address string directly.
+            ble_device = yc01_devices.get(addr.upper(), (None, None))[0] or addr
             if scanner:
                 await scanner.stop()
             click.echo(f"[{ts}] Pool: connecting to {label} ({addr})...")
             try:
                 async with BleakClient(ble_device, timeout=20.0) as client:
-                    # Connection established — resume scanning for other BLE devices.
+                    fail_count = 0
                     if scanner:
                         await scanner.start()
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
-                    _, last_rssi = yc01_devices.get(addr, (None, None))
+                    _, last_rssi = yc01_devices.get(addr.upper(), (None, None))
                     click.echo(f"[{ts}] Pool: connected to {label} ({addr})  rssi={last_rssi}dBm")
                     while client.is_connected:
                         try:
@@ -1530,26 +1530,33 @@ def monitor(duration, verbose, db, no_db):
                         if reading is not None:
                             reading.address = addr
                             reading.label = label
-                            _, last_rssi = yc01_devices.get(addr, (None, None))
+                            _, last_rssi = yc01_devices.get(addr.upper(), (None, None))
                             reading.rssi = last_rssi
                             click.echo(f"[{ts}] Pool: {reading}")
                             if conn:
                                 insert_pool_reading(conn, reading)
+                                pool_last_reading[label] = datetime.datetime.now()
                         else:
                             click.echo(f"[{ts}] Pool: GATT data too short from {label}")
-                        await asyncio.sleep(60)
+                        # 30s interval — shorter than 60s to keep the BLE link active
+                        await asyncio.sleep(30)
             except Exception as e:
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}")
-                # Remove from cache so we wait for a fresh advertisement before retrying.
-                yc01_devices.pop(addr, None)
+                yc01_devices.pop(addr.upper(), None)
             finally:
-                # Ensure scanner is always running after leaving the connect/read block.
                 if scanner:
                     try:
                         await scanner.start()
                     except Exception:
                         pass
+
+            # Short backoff before retrying — don't wait for a new advertisement
+            fail_count += 1
+            delay = _RETRY_DELAYS[min(fail_count - 1, len(_RETRY_DELAYS) - 1)]
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            click.echo(f"[{ts}] Pool: retrying {label} in {delay}s (attempt {fail_count})...")
+            await asyncio.sleep(delay)
 
     # latest reading per address, updated on every advertisement
     latest_reading: dict[str, object] = {}
@@ -1757,6 +1764,46 @@ def monitor(duration, verbose, db, no_db):
                             if label not in _alert_config.get_suppressed_offline():
                                 _push.send_notification(title="Sensor Offline", body=f"{label} has stopped responding")
                             click.echo(f"[{log_ts}] Sensor offline: {label}")
+
+            # Check pool monitor connectivity
+            POOL_OFFLINE_THRESHOLD = datetime.timedelta(minutes=10)
+            for pool_label in list(pool_config.values()):
+                last = pool_last_reading.get(pool_label)
+                if last is None:
+                    continue
+                if pool_label in pool_offline_alerted:
+                    if (now_dt - last) < POOL_OFFLINE_THRESHOLD:
+                        pool_offline_alerted.discard(pool_label)
+                        offline_row = conn.execute(
+                            "SELECT ts FROM temperature_events WHERE event_type='sensor_offline' AND details=? ORDER BY ts DESC LIMIT 1",
+                            (pool_label,),
+                        ).fetchone()
+                        if offline_row:
+                            offline_dt = datetime.datetime.strptime(offline_row[0], "%Y-%m-%d %H:%M:%S")
+                            secs = int((now_dt - offline_dt).total_seconds())
+                            hrs, rem = divmod(secs, 3600)
+                            m = rem // 60
+                            duration = f"{hrs}h {m}m" if hrs else f"{m}m"
+                            online_details = f"{pool_label} — offline for {duration}"
+                        else:
+                            online_details = pool_label
+                        conn.execute(
+                            "INSERT OR IGNORE INTO temperature_events (ts, event_type, value, details) VALUES (?,?,?,?)",
+                            (ts, "sensor_online", None, online_details),
+                        )
+                        if pool_label not in _alert_config.get_suppressed_offline():
+                            _push.send_notification(title="Pool Monitor Online", body=f"{pool_label} is back online")
+                        click.echo(f"[{log_ts}] Pool monitor back online: {pool_label}")
+                else:
+                    if (now_dt - last) >= POOL_OFFLINE_THRESHOLD:
+                        pool_offline_alerted.add(pool_label)
+                        conn.execute(
+                            "INSERT OR IGNORE INTO temperature_events (ts, event_type, value, details) VALUES (?,?,?,?)",
+                            (ts, "sensor_offline", None, pool_label),
+                        )
+                        if pool_label not in _alert_config.get_suppressed_offline():
+                            _push.send_notification(title="Pool Monitor Offline", body=f"{pool_label} has stopped responding")
+                        click.echo(f"[{log_ts}] Pool monitor offline: {pool_label}")
 
             conn.commit()
             n = len(latest_reading)

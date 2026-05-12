@@ -6478,6 +6478,25 @@ function clColor(cl) {
   return '#e07820';
 }
 
+function buildChartPoints(rows, metric) {
+  const GAP_MS = 15 * 60 * 1000;
+  const points = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (i > 0) {
+      const prevTime = new Date(rows[i - 1].ts + 'Z').getTime();
+      const currTime = new Date(r.ts + 'Z').getTime();
+      if (currTime - prevTime > GAP_MS) {
+        points.push({ x: new Date(prevTime + (currTime - prevTime) / 2), y: null });
+      }
+    }
+    if (r[metric] != null) {
+      points.push({ x: new Date(r.ts + 'Z'), y: r[metric] });
+    }
+  }
+  return points;
+}
+
 function renderChart() {
   const btn = document.querySelector('.metric-btn.active');
   if (!btn || !historyRows.length) return;
@@ -6486,9 +6505,7 @@ function renderChart() {
   const unit   = btn.dataset.unit;
   const color  = METRIC_COLORS[metric] || '#2e7dd4';
 
-  const points = historyRows
-    .filter(r => r[metric] != null)
-    .map(r => ({ x: new Date(r.ts + 'Z'), y: r[metric] }));
+  const points = buildChartPoints(historyRows, metric);
 
   if (poolChart) {
     poolChart.data.datasets[0].data   = points;
@@ -6511,6 +6528,7 @@ function renderChart() {
           pointHoverRadius: 4,
           fill: true,
           tension: 0.3,
+          spanGaps: false,
         }]
       },
       options: {
