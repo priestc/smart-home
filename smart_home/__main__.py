@@ -1924,7 +1924,7 @@ def monitor(duration, verbose, db, no_db):
     cameras_cfg = _camera.load_config()
     camera_watchers: list[_camera.CameraWatcher] = []
     for cam in cameras_cfg:
-        w = _camera.CameraWatcher(cam)
+        w = _camera.CameraWatcher(cam, db_path=db)
         w.start()
         camera_watchers.append(w)
         click.echo(f"Camera watcher started: {cam['name']} ({len(cam.get('zones', []))} zone(s))")
@@ -1977,7 +1977,7 @@ def monitor(duration, verbose, db, no_db):
         while True:
             await asyncio.sleep(1)
             for w in camera_watchers:
-                while not w.events.empty():
+                while True:
                     try:
                         event = w.events.get_nowait()
                     except Exception:

@@ -4643,17 +4643,31 @@ def api_process_stats():
     end = request.args.get("end")
     with _conn() as conn:
         if start and end:
-            rows = conn.execute(
+            main_rows = conn.execute(
                 "SELECT ts, cpu_percent, mem_mb FROM process_stats WHERE ts >= ? AND ts <= ? ORDER BY ts",
+                (start, end),
+            ).fetchall()
+            cam_rows = conn.execute(
+                "SELECT ts, camera, cpu_percent, mem_mb FROM camera_process_stats WHERE ts >= ? AND ts <= ? ORDER BY ts",
                 (start, end),
             ).fetchall()
         else:
             cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-            rows = conn.execute(
+            main_rows = conn.execute(
                 "SELECT ts, cpu_percent, mem_mb FROM process_stats WHERE ts >= ? ORDER BY ts",
                 (cutoff,),
             ).fetchall()
-    return jsonify([{"ts": r[0], "cpu": r[1], "mem": r[2]} for r in rows])
+            cam_rows = conn.execute(
+                "SELECT ts, camera, cpu_percent, mem_mb FROM camera_process_stats WHERE ts >= ? ORDER BY ts",
+                (cutoff,),
+            ).fetchall()
+    cameras: dict = {}
+    for r in cam_rows:
+        cameras.setdefault(r[1], []).append({"ts": r[0], "cpu": r[2], "mem": r[3]})
+    return jsonify({
+        "main": [{"ts": r[0], "cpu": r[1], "mem": r[2]} for r in main_rows],
+        "cameras": cameras,
+    })
 
 
 _PROCESS_STATS_PAGE = """\
@@ -4717,18 +4731,20 @@ async function fetchJSON(url, opts) {
     throw e;
   }
 }
+const CAM_COLORS = ["#2db37a", "#9b59b6", "#e74c3c", "#1abc9c", "#f39c12"];
 let rangeDays = 1;
 
-function makeChart(id, label, color, yLabel) {
+function makeChart(id, mainLabel, mainColor, yLabel) {
   return new Chart(document.getElementById(id), {
     type: "line",
-    data: { datasets: [{ label, data: [], borderColor: color, backgroundColor: color + "22",
-                         borderWidth: 1.5, pointRadius: 0, tension: 0, fill: true }] },
+    data: { datasets: [{ label: mainLabel, data: [], borderColor: mainColor,
+                         backgroundColor: mainColor + "22", borderWidth: 1.5,
+                         pointRadius: 0, tension: 0, fill: true }] },
     options: {
       animation: false, parsing: false,
       interaction: { mode: "index", intersect: false },
-      plugins: { legend: { display: false },
-        tooltip: { callbacks: { label: ctx => ` ${ctx.raw.y != null ? ctx.raw.y.toFixed(1) : "—"} ${yLabel}` } } },
+      plugins: { legend: { display: true, labels: { color: "#4a6080", font: { size: 11 } } },
+        tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.raw.y != null ? ctx.raw.y.toFixed(1) : "—"} ${yLabel}` } } },
       scales: {
         x: { type: "time", time: { tooltipFormat: "MMM d, h:mm a" },
              ticks: { color: "#7a90a8", maxTicksLimit: 20 }, grid: { color: "#e8eef4" } },
@@ -4738,8 +4754,23 @@ function makeChart(id, label, color, yLabel) {
   });
 }
 
-const cpuChart = makeChart("cpu-chart", "CPU %",    "#e07820", "%");
-const memChart = makeChart("mem-chart", "Memory MB", "#2e7dd4", "MB");
+const cpuChart = makeChart("cpu-chart", "Main process", "#e07820", "%");
+const memChart = makeChart("mem-chart", "Main process", "#2e7dd4", "MB");
+
+function syncCamDatasets(chart, cameras, colorBase) {
+  const camNames = Object.keys(cameras);
+  // Remove stale camera datasets (keep index 0 = main)
+  chart.data.datasets.splice(1);
+  camNames.forEach((name, i) => {
+    const color = CAM_COLORS[i % CAM_COLORS.length];
+    chart.data.datasets.push({
+      label: `cam: ${name}`, data: [],
+      borderColor: color, backgroundColor: color + "22",
+      borderWidth: 1.5, pointRadius: 0, tension: 0, fill: false,
+    });
+  });
+  return camNames;
+}
 
 function setRange(days) {
   rangeDays = days;
@@ -4754,8 +4785,15 @@ async function load() {
   const xMin = new Date(now - rangeDays * 86400000);
   [cpuChart, memChart].forEach(c => { c.options.scales.x.min = xMin; c.options.scales.x.max = now;
     c.options.scales.x.time.unit = rangeDays <= 1 ? "hour" : "day"; });
-  cpuChart.data.datasets[0].data = data.map(r => ({ x: new Date(r.ts), y: r.cpu }));
-  memChart.data.datasets[0].data = data.map(r => ({ x: new Date(r.ts), y: r.mem }));
+  cpuChart.data.datasets[0].data = data.main.map(r => ({ x: new Date(r.ts), y: r.cpu }));
+  memChart.data.datasets[0].data = data.main.map(r => ({ x: new Date(r.ts), y: r.mem }));
+  const camNames = syncCamDatasets(cpuChart, data.cameras || {});
+  syncCamDatasets(memChart, data.cameras || {});
+  camNames.forEach((name, i) => {
+    const rows = data.cameras[name] || [];
+    cpuChart.data.datasets[i + 1].data = rows.map(r => ({ x: new Date(r.ts), y: r.cpu }));
+    memChart.data.datasets[i + 1].data = rows.map(r => ({ x: new Date(r.ts), y: r.mem }));
+  });
   cpuChart.update();
   memChart.update();
 }

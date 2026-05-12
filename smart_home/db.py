@@ -148,6 +148,15 @@ def open_db(path: str) -> sqlite3.Connection:
             PRIMARY KEY (ts, name)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS camera_process_stats (
+            ts          TEXT    NOT NULL,
+            camera      TEXT    NOT NULL,
+            cpu_percent REAL,
+            mem_mb      REAL,
+            PRIMARY KEY (ts, camera)
+        )
+    """)
     conn.commit()
     return conn
 
