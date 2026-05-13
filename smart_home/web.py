@@ -18,13 +18,19 @@ def _conn() -> sqlite3.Connection:
 
 @app.get("/api/current")
 def current():
-    """Latest reading for each sensor label."""
+    """Latest reading for each sensor label, including pool monitors."""
     with _conn() as conn:
         rows = conn.execute("""
             SELECT label, temp_f, humidity, rssi, ts
             FROM readings
             WHERE id IN (
                 SELECT MAX(id) FROM readings WHERE temp_f IS NOT NULL GROUP BY label
+            )
+            UNION ALL
+            SELECT label, NULL AS temp_f, NULL AS humidity, rssi, ts
+            FROM pool_readings
+            WHERE id IN (
+                SELECT MAX(id) FROM pool_readings GROUP BY label
             )
             ORDER BY label
         """).fetchall()
@@ -343,15 +349,30 @@ def history():
                 ROUND(AVG(battery), 0)  AS battery
             FROM readings{where_sql}
             GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, label
+            UNION ALL
+            SELECT
+                strftime('%Y-%m-%d %H:%M:%S', CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs}, 'unixepoch') AS ts,
+                label,
+                NULL AS temp_f,
+                NULL AS humidity,
+                ROUND(AVG(rssi), 0)    AS rssi,
+                ROUND(AVG(battery), 0) AS battery
+            FROM pool_readings{where_sql}
+            GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, label
             ORDER BY ts ASC LIMIT ?
         """
     else:
-        sql = f"SELECT ts, label, temp_f, humidity, rssi, battery FROM readings{where_sql} ORDER BY ts ASC"
+        sql = f"""
+            SELECT ts, label, temp_f, humidity, rssi, battery FROM readings{where_sql}
+            UNION ALL
+            SELECT ts, label, NULL AS temp_f, NULL AS humidity, rssi, battery FROM pool_readings{where_sql}
+            ORDER BY ts ASC
+        """
 
-    if bucket > 1:
-        params.append(limit)
+    # params appears twice in the SQL (once per UNION branch); limit goes at the end for bucketed
+    query_params = params * 2 + ([limit] if bucket > 1 else [])
     with _conn() as conn:
-        rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(sql, query_params).fetchall()
     return jsonify([dict(r) for r in rows])
 
 
