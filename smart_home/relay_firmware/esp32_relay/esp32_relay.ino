@@ -19,6 +19,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <BLEDevice.h>
 #include <BLEScan.h>
@@ -190,10 +191,13 @@ static void connectWiFi() {
         delay(500);
         Serial.print(".");
     }
-    if (WiFi.status() == WL_CONNECTED)
+    if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("\nWiFi OK: %s\n", WiFi.localIP().toString().c_str());
-    else
+        MDNS.begin(WiFi.getHostname());
+        Serial.printf("Server URL: %s\n", g_url);
+    } else {
         Serial.println("\nWiFi connect failed — will retry");
+    }
 }
 
 // ── BLE advertisement batch POST ──────────────────────────────────────────────
@@ -250,7 +254,10 @@ static void postBatch() {
         }
         Serial.printf("POST 200 (%d inserted)\n", rdoc["inserted"].as<int>());
     } else {
-        Serial.printf("POST failed: %d\n", code);
+        const char* reason = (code == -1) ? "connection refused/no route" :
+                             (code == -4) ? "not connected" :
+                             (code == -11) ? "read timeout" : "error";
+        Serial.printf("POST failed: %d (%s) url=%s\n", code, reason, g_url);
     }
     http.end();
 }
