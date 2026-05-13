@@ -21,13 +21,15 @@ def current():
     """Latest reading for each sensor label, including pool monitors."""
     with _conn() as conn:
         rows = conn.execute("""
-            SELECT label, temp_f, humidity, rssi, ts
+            SELECT label, temp_f, humidity, rssi, ts, 'reading' AS source
             FROM readings
             WHERE id IN (
                 SELECT MAX(id) FROM readings WHERE temp_f IS NOT NULL GROUP BY label
             )
             UNION ALL
-            SELECT label, NULL AS temp_f, NULL AS humidity, rssi, ts
+            SELECT label,
+                   ROUND(temp_c * 9.0/5.0 + 32, 2) AS temp_f,
+                   NULL AS humidity, rssi, ts, 'pool' AS source
             FROM pool_readings
             WHERE id IN (
                 SELECT MAX(id) FROM pool_readings GROUP BY label
@@ -353,7 +355,7 @@ def history():
             SELECT
                 strftime('%Y-%m-%d %H:%M:%S', CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs}, 'unixepoch') AS ts,
                 label,
-                NULL AS temp_f,
+                ROUND(AVG(CASE WHEN temp_c IS NOT NULL THEN temp_c * 9.0/5.0 + 32 END), 2) AS temp_f,
                 NULL AS humidity,
                 ROUND(AVG(rssi), 0)    AS rssi,
                 ROUND(AVG(battery), 0) AS battery
@@ -365,7 +367,7 @@ def history():
         sql = f"""
             SELECT ts, label, temp_f, humidity, rssi, battery FROM readings{where_sql}
             UNION ALL
-            SELECT ts, label, NULL AS temp_f, NULL AS humidity, rssi, battery FROM pool_readings{where_sql}
+            SELECT ts, label, ROUND(CASE WHEN temp_c IS NOT NULL THEN temp_c * 9.0/5.0 + 32 END, 2) AS temp_f, NULL AS humidity, rssi, battery FROM pool_readings{where_sql}
             ORDER BY ts ASC
         """
 
@@ -1967,6 +1969,7 @@ function getBucket() {
 }
 // Sensor view mode: which of the 4 buttons are active (multi-select)
 const activeModes = new Set(['outside-shade', 'indoor-avg']);
+const poolLabels = new Set();
 function setSensorMode(mode, btn) {
   if (activeModes.has(mode)) {
     activeModes.delete(mode);
@@ -2130,6 +2133,29 @@ function buildSensorDatasets(data, events, isMonth) {
     }
   });
 
+  // Pool sensors — one line per toggled pool sensor
+  [...poolLabels].sort().forEach(lbl => {
+    if (!activeModes.has(lbl)) return;
+    const color = labelColor(lbl);
+    if (isMonth) {
+      const years = [...new Set(data.map(r => r.year).filter(Boolean))].sort();
+      years.forEach((year, yi) => {
+        const rows = data.filter(r => r.label === lbl && r.year === year && r.temp_f != null);
+        const pts = rows.map(r => ({ x: new Date(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
+        datasets.push({ label: `${lbl} ${year}`, data: pts,
+          borderColor: color, backgroundColor: 'transparent',
+          borderWidth: 1.5, pointRadius: 0, tension: 0,
+          borderDash: yi > 0 ? [4,3] : [] });
+      });
+    } else {
+      const pts = data.filter(r => r.label === lbl && r.temp_f != null)
+        .map(r => ({ x: new Date(r.ts), y: r.temp_f })).sort((a,b)=>a.x-b.x);
+      datasets.push({ label: lbl, data: pts,
+        borderColor: color, backgroundColor: 'transparent',
+        borderWidth: 1.5, pointRadius: 0, tension: 0 });
+    }
+  });
+
   // Inside/outside difference — split into warmer (positive) and cooler (negative)
   if (activeModes.has('diff')) {
     const shadeLbl = allLabels.find(l => l.toLowerCase().replace(/[_\s]/g,'-') === 'outside-shade');
@@ -2227,7 +2253,11 @@ async function loadColors() {
   data.map(s => s.label).filter(Boolean).sort()
     .forEach((lbl, i) => { colorMap[lbl] = roomColors[i % roomColors.length]; });
   const indoorLabels = data.map(s => s.label).filter(l => l && isIndoorLabel(l)).sort();
+  const newPoolLabels = data.filter(s => s.source === 'pool' && s.label).map(s => s.label).sort();
+  newPoolLabels.forEach(l => poolLabels.add(l));
   const sensorBtns = document.getElementById('sensor-btns');
+
+  // Indoor room buttons
   const existingRoomBtns = [...sensorBtns.querySelectorAll('button[data-room]')];
   const existing = existingRoomBtns.map(b => b.dataset.room);
   if (JSON.stringify(existing) !== JSON.stringify(indoorLabels)) {
@@ -2245,6 +2275,25 @@ async function loadColors() {
   } else {
     existingRoomBtns.forEach(b => applyBtnColor(b, modeColor(b.dataset.room), activeModes.has(b.dataset.room)));
   }
+
+  // Pool sensor buttons
+  const existingPoolBtns = [...sensorBtns.querySelectorAll('button[data-pool]')];
+  const existingPool = existingPoolBtns.map(b => b.dataset.pool);
+  if (JSON.stringify(existingPool) !== JSON.stringify(newPoolLabels)) {
+    existingPoolBtns.forEach(b => b.remove());
+    newPoolLabels.forEach(lbl => {
+      const btn = document.createElement('button');
+      btn.dataset.pool = lbl;
+      btn.textContent = lbl;
+      btn.onclick = () => setSensorMode(lbl, btn);
+      if (activeModes.has(lbl)) btn.classList.add('active');
+      sensorBtns.appendChild(btn);
+      applyBtnColor(btn, modeColor(lbl), activeModes.has(lbl));
+    });
+  } else {
+    existingPoolBtns.forEach(b => applyBtnColor(b, modeColor(b.dataset.pool), activeModes.has(b.dataset.pool)));
+  }
+
   // Apply colors to static sensor buttons
   [['btn-outside-sun','outside-sun'],['btn-outside-shade','outside-shade'],['btn-indoor-avg','indoor-avg']].forEach(([id,m]) => {
     const btn = document.getElementById(id);
