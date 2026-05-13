@@ -1508,17 +1508,30 @@ def monitor(duration, verbose, db, no_db):
         """Maintain a persistent GATT connection to a BLE_YC01 pool monitor.
 
         Keeping the connection open prevents the device from entering sleep/off mode.
-        On disconnect, reconnect immediately by address (no advertisement wait) so the
-        device doesn't have time to shut itself off.
+
+        Strategy: wait for a fresh BLE advertisement before each connection attempt so
+        BlueZ has the device cached and the device is actively advertising (connectable).
+        The scanner runs continuously during the wait, giving maximum visibility into the
+        brief window when the device re-advertises after a disconnect.  Only fall back to
+        connecting by address string if no advertisement arrives within 30 s (e.g. right
+        after a cold service start when the device is already on but scanner is still
+        warming up).
         """
-        _RETRY_DELAYS = [2, 5, 10, 20, 30]  # backoff seconds on consecutive failures
+        addr_upper = addr.upper()
         fail_count = 0
 
         while True:
+            # Keep scanner running while waiting — this is what lets us catch the
+            # brief advertising window after the device powers back on.
+            wait_start = datetime.datetime.now()
+            while addr_upper not in yc01_devices:
+                if (datetime.datetime.now() - wait_start).total_seconds() >= 30:
+                    break  # fall back to address-string connect after 30 s
+                await asyncio.sleep(1)
+
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             scanner = scanner_ref[0] if scanner_ref else None
-            # Use cached BLEDevice if available, otherwise connect by address string directly.
-            ble_device = yc01_devices.get(addr.upper(), (None, None))[0] or addr
+            ble_device = yc01_devices.get(addr_upper, (None, None))[0] or addr
             if scanner:
                 await scanner.stop()
             click.echo(f"[{ts}] Pool: connecting to {label} ({addr})...")
@@ -1528,7 +1541,7 @@ def monitor(duration, verbose, db, no_db):
                     if scanner:
                         await scanner.start()
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
-                    _, last_rssi = yc01_devices.get(addr.upper(), (None, None))
+                    _, last_rssi = yc01_devices.get(addr_upper, (None, None))
                     click.echo(f"[{ts}] Pool: connected to {label} ({addr})  rssi={last_rssi}dBm")
                     while client.is_connected:
                         try:
@@ -1542,7 +1555,7 @@ def monitor(duration, verbose, db, no_db):
                         if reading is not None:
                             reading.address = addr
                             reading.label = label
-                            _, last_rssi = yc01_devices.get(addr.upper(), (None, None))
+                            _, last_rssi = yc01_devices.get(addr_upper, (None, None))
                             reading.rssi = last_rssi
                             click.echo(f"[{ts}] Pool: {reading}")
                             if conn:
@@ -1550,12 +1563,12 @@ def monitor(duration, verbose, db, no_db):
                                 pool_last_reading[label] = datetime.datetime.now()
                         else:
                             click.echo(f"[{ts}] Pool: GATT data too short from {label}")
-                        # 30s interval — shorter than 60s to keep the BLE link active
                         await asyncio.sleep(30)
             except Exception as e:
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}")
-                yc01_devices.pop(addr.upper(), None)
+                # Remove stale cache entry — forces a fresh advertisement wait next loop.
+                yc01_devices.pop(addr_upper, None)
             finally:
                 if scanner:
                     try:
@@ -1563,12 +1576,9 @@ def monitor(duration, verbose, db, no_db):
                     except Exception:
                         pass
 
-            # Short backoff before retrying — don't wait for a new advertisement
             fail_count += 1
-            delay = _RETRY_DELAYS[min(fail_count - 1, len(_RETRY_DELAYS) - 1)]
             ts = datetime.datetime.now().strftime("%H:%M:%S")
-            click.echo(f"[{ts}] Pool: retrying {label} in {delay}s (attempt {fail_count})...")
-            await asyncio.sleep(delay)
+            click.echo(f"[{ts}] Pool: {label} disconnected (attempt {fail_count}), waiting for re-advertisement...")
 
     # latest reading per address, updated on every advertisement
     latest_reading: dict[str, object] = {}
