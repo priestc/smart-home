@@ -8,7 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKETCH_DIR="$SCRIPT_DIR/esp32_relay"
-FQBN="esp32:esp32:esp32"
+FQBN="esp32:esp32:esp32:PartitionScheme=huge_app"
 
 # ── arduino-cli ─────────────────────────────────────────────────────────────
 
