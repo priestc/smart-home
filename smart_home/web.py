@@ -6402,6 +6402,7 @@ _POOL_PAGE = """<!DOCTYPE html>
     .metric-btn[data-metric="tds"].active     { background: #1a6db5; }
     .metric-btn[data-metric="battery"].active { background: #7a90a8; }
     .chart-wrap { background: #fff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 2rem; }
+    .metric-desc { font-size: .82rem; color: #5a6e84; background: #f0f4f8; border-left: 3px solid #d0dce8; border-radius: 0 6px 6px 0; padding: .5rem .85rem; margin-bottom: .75rem; display: none; }
     .ev-list { list-style: none; display: flex; flex-direction: column; gap: .4rem; }
     .ev-item { display: flex; align-items: center; gap: .75rem; font-size: .85rem; }
     .ev-badge { font-size: .7rem; font-weight: 700; padding: .15rem .55rem; border-radius: 20px; white-space: nowrap; }
@@ -6426,14 +6427,16 @@ _POOL_PAGE = """<!DOCTYPE html>
   </div>
 
   <div class="metric-btns" id="metric-btns">
-    <button class="metric-btn active" data-metric="temp_f"  data-label="Temperature" data-unit="°F">Temperature</button>
-    <button class="metric-btn"        data-metric="ph"       data-label="pH"          data-unit="">pH</button>
-    <button class="metric-btn"        data-metric="orp"      data-label="ORP"         data-unit="mV">ORP</button>
-    <button class="metric-btn"        data-metric="chlorine" data-label="Free Cl"     data-unit="mg/L">Free Cl</button>
-    <button class="metric-btn"        data-metric="ec"       data-label="EC"          data-unit="µS/cm">EC</button>
-    <button class="metric-btn"        data-metric="tds"      data-label="TDS"         data-unit="ppm">TDS</button>
-    <button class="metric-btn"        data-metric="battery"  data-label="Battery"     data-unit="%">Battery</button>
+    <button class="metric-btn active" data-metric="temp_f"  data-label="Temperature" data-unit="°F"    data-desc="Water temperature.">Temperature</button>
+    <button class="metric-btn"        data-metric="ph"       data-label="pH"          data-unit=""      data-desc="Acidity/alkalinity of the water. Ideal range: 7.2–7.6. Outside 7.0–7.8 indicates a problem.">pH</button>
+    <button class="metric-btn"        data-metric="orp"      data-label="ORP"         data-unit="mV"    data-desc="Oxidation-Reduction Potential — how effective the sanitizer is at killing bacteria. Higher = more sanitizing power. Ideal: 650–750 mV.">ORP</button>
+    <button class="metric-btn"        data-metric="chlorine" data-label="Free Cl"     data-unit="mg/L"  data-desc="Free Chlorine — the active chlorine available to sanitize the water. Ideal: 1–3 mg/L. Below 0.5 or above 5 is a problem.">Free Cl</button>
+    <button class="metric-btn"        data-metric="ec"       data-label="EC"          data-unit="µS/cm" data-desc="Electrical Conductivity — measures how well water conducts electricity, which is a proxy for total dissolved minerals and salts. Higher EC means more dissolved substances.">EC</button>
+    <button class="metric-btn"        data-metric="tds"      data-label="TDS"         data-unit="ppm"   data-desc="Total Dissolved Solids — the sum of all dissolved substances (salts, minerals, chemicals) in parts per million. Closely related to EC. Very high TDS can mean it&apos;s time to partially drain and refill.">TDS</button>
+    <button class="metric-btn"        data-metric="battery"  data-label="Battery"     data-unit="%"     data-desc="Battery level of the pool monitor sensor.">Battery</button>
   </div>
+
+  <div id="metric-desc" class="metric-desc"></div>
 
   <div class="chart-wrap" id="chart-wrap">
     <canvas id="pool-chart"></canvas>
@@ -6591,14 +6594,25 @@ function renderChart() {
   }
 }
 
+function updateDesc(btn) {
+  const el = document.getElementById('metric-desc');
+  const desc = btn ? btn.dataset.desc : '';
+  if (desc) { el.textContent = desc; el.style.display = 'block'; }
+  else { el.style.display = 'none'; }
+}
+
 document.getElementById('metric-btns').addEventListener('click', e => {
   const btn = e.target.closest('.metric-btn');
   if (!btn) return;
   document.querySelectorAll('.metric-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   activeMetric = btn.dataset.metric;
+  updateDesc(btn);
   renderChart();
 });
+
+// Show description for the initially active button
+updateDesc(document.querySelector('.metric-btn.active'));
 
 async function loadCurrent() {
   try {
