@@ -105,7 +105,7 @@ def flash_and_provision(
         try:
             subprocess.run(
                 [esptool_cmd, "--chip", "esp32", "--port", port, "--baud", "921600",
-                 "write_flash"] + flash_args,
+                 "write-flash"] + flash_args,
                 check=True,
             )
             break
