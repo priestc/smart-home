@@ -149,12 +149,6 @@ static void provisionMode() {
         if (!Serial.available()) { delay(50); continue; }
         String line = Serial.readStringUntil('\n');
         line.trim();
-        if (line == "RESET_CONFIG") {
-            clearConfig();
-            Serial.println("CONFIG_CLEARED");
-            Serial.flush();
-            continue;
-        }
         JsonDocument doc;
         if (deserializeJson(doc, line) != DeserializationError::Ok) {
             Serial.println("ERR:BAD_JSON");
@@ -349,6 +343,7 @@ void setup() {
                 clearConfig();
                 Serial.println("CONFIG_CLEARED");
                 Serial.flush();
+                break;  // handled — exit probe window immediately
             }
         }
         delay(50);
