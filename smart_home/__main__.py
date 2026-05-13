@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import click
 from bleak import BleakScanner, BleakClient
-from smart_home.scanner import scan, is_xiaomi_lywsd03mmc, is_pvvx_lywsd03mmc, read_lywsd03mmc, is_ble_yc01
+from smart_home.scanner import scan, is_pvvx_lywsd03mmc, is_ble_yc01
 from smart_home import labels as _labels
 from smart_home import alert_config as _alert_config
 from smart_home import pvvx as _pvvx
@@ -19,6 +19,7 @@ from smart_home import camera as _camera
 from smart_home import garage as _garage
 from smart_home import smart_plug as _smart_plug
 from smart_home import pool as _pool
+from smart_home import relay as _relay_mod
 from smart_home.battery import dump_gatt
 from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading, insert_plug_reading, insert_pool_reading, upsert_ble_rssi
 
@@ -550,6 +551,104 @@ def _add_ble_sensor(timeout):
     if changed:
         _labels.save(label_map)
         click.echo("\nLabels saved.")
+
+
+RELAY_TYPES = {
+    "1": "ESP32",
+}
+
+
+@main.command("add-relay")
+def add_relay():
+    """Provision a new BLE relay device. Plug it into USB first."""
+    from smart_home import relay as _relay
+
+    click.echo("What type of relay device?\n")
+    for key, name in RELAY_TYPES.items():
+        click.echo(f"  {key}. {name}")
+    click.prompt("\nEnter choice", type=click.Choice(list(RELAY_TYPES)))
+
+    ports = _relay.detect_serial_ports()
+    if not ports:
+        click.echo(
+            "\nNo USB serial ports detected. Make sure the ESP32 is plugged in."
+        )
+        return
+
+    if len(ports) == 1:
+        port = ports[0]
+        click.echo(f"\nDetected serial port: {port}")
+    else:
+        click.echo(f"\nFound {len(ports)} serial port(s):\n")
+        for i, p in enumerate(ports, 1):
+            click.echo(f"  {i}. {p}")
+        idx = click.prompt(
+            "\nWhich port is the ESP32?",
+            type=click.IntRange(1, len(ports)),
+        ) - 1
+        port = ports[idx]
+
+    relay_id = (
+        click.prompt("\nName for this relay (e.g. living-room)").strip()
+        .lower()
+        .replace(" ", "-")
+    )
+
+    defaults = _relay.load_defaults()
+
+    if defaults.get("wifi_ssid"):
+        click.echo(f"\nUsing saved WiFi network: {defaults['wifi_ssid']}")
+        wifi_ssid = defaults["wifi_ssid"]
+        wifi_pass = defaults["wifi_pass"]
+    else:
+        wifi_ssid = click.prompt("\nWiFi SSID").strip()
+        wifi_pass = click.prompt("WiFi password", hide_input=True).strip()
+        if click.confirm("Save WiFi credentials for future relays?", default=True):
+            defaults["wifi_ssid"] = wifi_ssid
+            defaults["wifi_pass"] = wifi_pass
+            _relay.save_defaults(defaults)
+
+    if defaults.get("server_url"):
+        server_url = defaults["server_url"]
+        click.echo(f"Using saved server URL: {server_url}")
+    else:
+        server_url = click.prompt(
+            "\nSmart Home server URL (e.g. http://192.168.1.100:5000)"
+        ).strip()
+        if click.confirm("Save server URL for future relays?", default=True):
+            defaults["server_url"] = server_url
+            _relay.save_defaults(defaults)
+
+    token = _relay.generate_token()
+
+    if not (_relay.FIRMWARE_DIR / "esp32_relay.ino.bin").exists():
+        click.echo(f"\nError: {_relay.firmware_missing_message()}")
+        return
+
+    click.echo(f"\nFlashing firmware to {port} ...")
+    try:
+        _relay.flash_and_provision(
+            port=port,
+            relay_id=relay_id,
+            token=token,
+            wifi_ssid=wifi_ssid,
+            wifi_pass=wifi_pass,
+            server_url=server_url,
+            print_fn=click.echo,
+        )
+    except FileNotFoundError as e:
+        click.echo(f"\nError: {e}")
+        return
+    except (RuntimeError, TimeoutError) as e:
+        click.echo(f"\nProvisioning failed: {e}")
+        return
+
+    relays = _relay.load_relays()
+    relays.append({"id": relay_id, "token": token, "type": "esp32"})
+    _relay.save_relays(relays)
+
+    click.echo(f"\nRelay '{relay_id}' registered successfully!")
+    click.echo(f"It will POST to {server_url}/api/ble-relay every ~18 seconds.")
 
 
 @main.command("import")
@@ -1134,19 +1233,17 @@ def monitor(duration, verbose, db, no_db):
     pool_last_reading: dict[str, datetime.datetime] = {}  # pool label -> time of last successful reading
     pool_offline_alerted: set[str] = set()               # pool labels with active offline alert
 
-    # Xiaomi devices — polled actively via GATT on each advertisement (with cooldown).
-    # Key insight: BlueZ evicts devices from its cache shortly after their last advertisement.
-    # We must connect as soon as the device is seen, not on a fixed timer.
-    xiaomi_devices: dict[str, tuple] = {}  # address -> (BLEDevice, name, last_rssi)
-    _poll_active: set[str] = set()         # addresses currently being polled (one at a time per device)
-    _last_poll_ok: dict[str, datetime.datetime] = {}  # address -> last successful poll time
-    POLL_COOLDOWN = datetime.timedelta(seconds=30)
-
     # BLE_YC01 pool monitors — persistent GATT connection keeps the device awake.
     pool_config = {m["address"].upper(): m["label"] for m in _pool.load_config()}
     yc01_devices: dict[str, tuple] = {}  # address -> (BLEDevice, last_rssi)
 
     scanner_ref: list = []
+
+    # Relay GATT fallback state, keyed by BLE address.
+    # preferred_relay: None = try local first; str = relay_id to start from.
+    # pending_task_id: outstanding DB task ID, or None.
+    # tried_in_chain: relay_ids tried in the current failure chain (cleared on success).
+    _gatt_state: dict[str, dict] = {}
 
     # presence tracking
     presence_devices = _presence.load_devices()
@@ -1240,23 +1337,6 @@ def monitor(duration, verbose, db, no_db):
                     label = presence_devices[matched_name]
                     upsert_ble_rssi(conn, label, device.address, adv.rssi)
             return
-
-        if is_xiaomi_lywsd03mmc(device, adv) and device.address.upper() not in pvvx_addresses and device.address in label_map:
-            is_new = device.address not in xiaomi_devices
-            xiaomi_devices[device.address] = (device, ble_name or "LYWSD03MMC", adv.rssi)
-            if is_new:
-                label = label_map.get(device.address) or ble_name or device.address
-                click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered Xiaomi sensor: {label} ({device.address})")
-            # Trigger a poll on every advertisement if not already polling this device
-            # and the cooldown has passed. Device is guaranteed fresh in BlueZ cache right now.
-            addr = device.address
-            last_ok = _last_poll_ok.get(addr, datetime.datetime.min)
-            if addr not in _poll_active and (now - last_ok) >= POLL_COOLDOWN:
-                _poll_active.add(addr)
-                try:
-                    asyncio.get_running_loop().create_task(_poll_xiaomi(addr))
-                except RuntimeError:
-                    _poll_active.discard(addr)
 
         if is_ble_yc01(device, adv):
             curr_upper = device.address.upper()
@@ -1473,38 +1553,6 @@ def monitor(duration, verbose, db, no_db):
     # Tracks which hour-of-day the record check last ran; -1 forces a run at startup
     _last_record_check_hour = -1
 
-    async def _poll_xiaomi(addr: str) -> None:
-        """Poll one Xiaomi sensor immediately after it has been seen advertising.
-        Uses _poll_active to ensure only one poll per device runs at a time.
-        Concurrent connections across different devices are allowed — BlueZ handles
-        serialization and returns 'Operation already in progress' if busy.
-        """
-        try:
-            # Brief delay to let BlueZ fully register the device before connecting
-            await asyncio.sleep(0.5)
-            entry = xiaomi_devices.get(addr)
-            if entry is None:
-                return
-            ble_device, name, last_rssi = entry
-            label = label_map.get(addr) or name
-            ts = datetime.datetime.now().strftime("%H:%M:%S")
-            click.echo(f"[{ts}] Polling {label} ({addr})...")
-            reading, err = await read_lywsd03mmc(ble_device, name)
-            ts = datetime.datetime.now().strftime("%H:%M:%S")
-            if reading is not None:
-                _last_poll_ok[addr] = datetime.datetime.now()
-                _, _, last_rssi = xiaomi_devices.get(addr, (None, None, last_rssi))
-                reading.rssi = last_rssi
-                click.echo(f"[{ts}] Poll OK: {label} temp={reading.temp_f:.1f}°F humidity={reading.humidity:.1f}%")
-                on_reading(reading)
-            else:
-                click.echo(f"[{ts}] Poll FAILED: {label} ({addr}): {err}")
-                if err and "not found" in err:
-                    # BlueZ evicted the device; remove so next advertisement triggers a fresh poll
-                    xiaomi_devices.pop(addr, None)
-        finally:
-            _poll_active.discard(addr)
-
     async def _yc01_persistent_loop(addr: str, label: str) -> None:
         """Maintain a persistent GATT connection to a BLE_YC01 pool monitor.
 
@@ -1590,6 +1638,14 @@ def monitor(duration, verbose, db, no_db):
                 click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}")
                 # Remove stale cache entry — forces a fresh advertisement wait next loop.
                 yc01_devices.pop(addr_upper, None)
+                # After 2+ consecutive failures, try handing off to a relay.
+                if fail_count >= 2 and conn:
+                    state = _gatt_state.get(addr_upper, {})
+                    if not state.get("pending_task_id"):
+                        _schedule_relay_gatt(addr_upper, "yc01", label)
+            else:
+                # Successful read cycle — clear any relay preference
+                _gatt_state.pop(addr_upper, None)
             finally:
                 if scanner:
                     try:
@@ -2147,6 +2203,109 @@ def monitor(duration, verbose, db, no_db):
                     click.echo(f"[{ts}] Plug poll failed for '{p['name']}': {e}")
             await asyncio.sleep(POLL_INTERVAL)
 
+    # ── Relay GATT fallback helpers ──────────────────────────────────────────
+
+    def _schedule_relay_gatt(addr: str, device_type: str, label: str) -> None:
+        """Queue a GATT task for the next available relay in the fallback chain."""
+        if not conn:
+            return
+        relays = _relay_mod.load_relays()
+        if not relays:
+            return
+        state = _gatt_state.setdefault(addr, {
+            "preferred_relay": None,
+            "pending_task_id": None,
+            "tried_in_chain": set(),
+        })
+        if state.get("pending_task_id"):
+            return  # already waiting for a result
+        relay_ids = [r["id"] for r in relays]
+        preferred = state.get("preferred_relay")
+        if preferred and preferred in relay_ids:
+            start = relay_ids.index(preferred)
+            ordered = relay_ids[start:] + relay_ids[:start]
+        else:
+            ordered = relay_ids
+        tried = state.get("tried_in_chain") or set()
+        next_id = next((rid for rid in ordered if rid not in tried), None)
+        if next_id is None:
+            ts_s = datetime.datetime.now().strftime("%H:%M:%S")
+            click.echo(f"[{ts_s}] All relays exhausted for {label} — offline")
+            state["tried_in_chain"] = set()
+            state["preferred_relay"] = None
+            return
+        task_id = _relay_mod.create_gatt_task(conn, addr, device_type, label, next_id)
+        state["pending_task_id"] = task_id
+        ts_s = datetime.datetime.now().strftime("%H:%M:%S")
+        click.echo(f"[{ts_s}] GATT queued → relay '{next_id}' for {label} ({addr})")
+
+    def _apply_relay_gatt_success(addr: str, task: dict, raw: bytes, relay_id: str) -> None:
+        """Process a successful relay GATT result and update in-memory state."""
+        state = _gatt_state.get(addr, {})
+        label = task.get("label") or label_map.get(addr) or addr
+        ts_s = datetime.datetime.now().strftime("%H:%M:%S")
+        device_type = task["device_type"]
+
+        if device_type == "yc01":
+            reading = _pool.parse_gatt_data(raw)
+            if reading is None:
+                click.echo(f"[{ts_s}] Relay GATT: YC01 data too short from '{relay_id}'")
+                state["tried_in_chain"] = state.get("tried_in_chain", set()) | {relay_id}
+                _schedule_relay_gatt(addr, device_type, label)
+                return
+            reading.address = addr
+            reading.label = label
+            click.echo(f"[{ts_s}] Relay GATT OK: pool {label} via '{relay_id}'  {reading}")
+            state["preferred_relay"] = relay_id
+            state["tried_in_chain"] = set()
+            state["pending_task_id"] = None
+            if conn:
+                insert_pool_reading(conn, reading)
+                pool_last_reading[label] = datetime.datetime.now()
+
+    async def _relay_gatt_poller() -> None:
+        """Every 5 s: expire stale tasks, process settled results, advance failure chain."""
+        while True:
+            await asyncio.sleep(5)
+            if not conn:
+                continue
+            try:
+                _relay_mod.expire_stale_tasks(conn)
+                settled = _relay_mod.get_settled_tasks(conn)
+            except Exception as e:
+                ts_s = datetime.datetime.now().strftime("%H:%M:%S")
+                click.echo(f"[{ts_s}] relay-poller DB error: {e}")
+                continue
+            for task in settled:
+                task_id = task["id"]
+                addr = task["address"]
+                relay_id = task["relay_id"]
+                try:
+                    _relay_mod.delete_task(conn, task_id)
+                except Exception:
+                    pass
+                state = _gatt_state.get(addr)
+                if state is None or state.get("pending_task_id") != task_id:
+                    continue  # stale / already superseded
+                state["pending_task_id"] = None
+                ts_s = datetime.datetime.now().strftime("%H:%M:%S")
+                if task["status"] == "done":
+                    try:
+                        raw = bytes.fromhex(task.get("result_hex") or "")
+                    except ValueError:
+                        raw = b""
+                    _apply_relay_gatt_success(addr, task, raw, relay_id)
+                else:
+                    lbl = task.get("label") or label_map.get(addr) or addr
+                    click.echo(
+                        f"[{ts_s}] Relay GATT failed: '{relay_id}' for {lbl}: "
+                        f"{task.get('error') or 'unknown'}"
+                    )
+                    state.setdefault("tried_in_chain", set()).add(relay_id)
+                    _schedule_relay_gatt(addr, task["device_type"], lbl)
+
+    # ────────────────────────────────────────────────────────────────────────
+
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
         extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop()]
@@ -2163,6 +2322,7 @@ def monitor(duration, verbose, db, no_db):
             extra.append(poll_smart_plugs_loop())
         for m in _pool.load_config():
             extra.append(_yc01_persistent_loop(m["address"], m.get("label", m["address"])))
+        extra.append(_relay_gatt_poller())
         asyncio.run(scan(
             on_reading,
             duration=duration,

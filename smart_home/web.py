@@ -39,6 +39,137 @@ def current():
     return jsonify([dict(r) for r in rows])
 
 
+@app.post("/api/ble-relay")
+def ble_relay():
+    """Receive batched BLE advertisements from ESP32 relay devices."""
+    from smart_home import relay as _relay
+    from smart_home.scanner import is_govee_h5074, is_pvvx_lywsd03mmc
+    from smart_home.decoder import (
+        decode_advertisement, decode_pvvx_advertisement, Reading,
+    )
+    from smart_home import labels as _labels
+    from smart_home.db import insert_reading
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return jsonify({"error": "missing or invalid Authorization header"}), 401
+    token = auth[len("Bearer "):]
+
+    relay_cfg = _relay.find_relay_by_token(token)
+    if relay_cfg is None:
+        return jsonify({"error": "unknown token"}), 401
+
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "invalid JSON body"}), 400
+
+    advertisements = data.get("advertisements") or []
+    label_map = _labels.load()
+
+    # Minimal stand-ins for bleak's BLEDevice / AdvertisementData so we can
+    # reuse the existing is_* detection functions without modification.
+    class _Dev:
+        __slots__ = ("name", "address")
+    class _Adv:
+        __slots__ = ("local_name", "manufacturer_data", "service_data", "rssi")
+
+    def _normalize_uuid(s: str) -> str:
+        s = s.lower().strip()
+        if len(s) == 4:   # "181a"
+            return f"0000{s}-0000-1000-8000-00805f9b34fb"
+        if len(s) == 8:   # "0000181a"
+            return f"{s}-0000-1000-8000-00805f9b34fb"
+        return s
+
+    inserted = 0
+    with _conn() as conn:
+        for adv_json in advertisements:
+            address = (adv_json.get("address") or "").upper()
+            name = adv_json.get("name") or ""
+
+            raw_mfr = adv_json.get("manufacturer_data") or {}
+            manufacturer_data = {}
+            for k, v in raw_mfr.items():
+                try:
+                    manufacturer_data[int(k)] = bytes.fromhex(v)
+                except (ValueError, TypeError):
+                    pass
+
+            raw_svc = adv_json.get("service_data") or {}
+            service_data = {}
+            for k, v in raw_svc.items():
+                try:
+                    service_data[_normalize_uuid(k)] = bytes.fromhex(v)
+                except (ValueError, TypeError):
+                    pass
+
+            rssi = adv_json.get("rssi")
+
+            dev = _Dev()
+            dev.name = name
+            dev.address = address
+            adv = _Adv()
+            adv.local_name = name
+            adv.manufacturer_data = manufacturer_data
+            adv.service_data = service_data
+            adv.rssi = rssi
+
+            reading = None
+            if is_govee_h5074(dev, adv):
+                reading = decode_advertisement(address, name, manufacturer_data, rssi)
+            elif is_pvvx_lywsd03mmc(dev, adv):
+                reading = decode_pvvx_advertisement(address, name, service_data, rssi)
+
+            if reading is not None:
+                reading.label = label_map.get(address)
+                if reading.label:
+                    insert_reading(conn, reading)
+                    inserted += 1
+
+        # Atomically claim any pending GATT tasks queued for this relay
+        pending_tasks = _relay.claim_pending_tasks(conn, relay_cfg["id"])
+
+    return jsonify({
+        "ok": True,
+        "inserted": inserted,
+        "gatt_tasks": [
+            {"id": t["id"], "address": t["address"], "device_type": t["device_type"]}
+            for t in pending_tasks
+        ],
+    })
+
+
+@app.post("/api/ble-relay/gatt-result")
+def ble_relay_gatt_result():
+    """Receive a GATT read result from an ESP32 relay."""
+    from smart_home import relay as _relay
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return jsonify({"error": "missing or invalid Authorization header"}), 401
+    token = auth[len("Bearer "):]
+
+    relay_cfg = _relay.find_relay_by_token(token)
+    if relay_cfg is None:
+        return jsonify({"error": "unknown token"}), 401
+
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "invalid JSON body"}), 400
+
+    task_id = (data.get("task_id") or "").strip()
+    if not task_id:
+        return jsonify({"error": "task_id required"}), 400
+
+    with _conn() as conn:
+        if data.get("success"):
+            _relay.set_task_done(conn, task_id, data.get("result_hex") or "")
+        else:
+            _relay.set_task_failed(conn, task_id, data.get("error") or "relay failed")
+
+    return jsonify({"ok": True})
+
+
 @app.post("/api/register-push-token")
 def register_push_token():
     """Register an iOS device token for push notifications."""

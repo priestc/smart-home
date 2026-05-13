@@ -165,6 +165,20 @@ def open_db(path: str) -> sqlite3.Connection:
             ts      TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gatt_tasks (
+            id          TEXT PRIMARY KEY,
+            ts          TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now')),
+            address     TEXT NOT NULL,
+            device_type TEXT NOT NULL,
+            label       TEXT,
+            relay_id    TEXT NOT NULL,
+            status      TEXT DEFAULT 'pending',
+            result_hex  TEXT,
+            error       TEXT,
+            updated_ts  TEXT
+        )
+    """)
     conn.commit()
     return conn
 
