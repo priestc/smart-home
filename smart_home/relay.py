@@ -104,7 +104,7 @@ def flash_and_provision(
     for esptool_cmd in ("esptool", "esptool.py"):
         try:
             subprocess.run(
-                [esptool_cmd, "--chip", "esp32", "--port", port, "--baud", "921600",
+                [esptool_cmd, "--chip", "esp32", "--port", port, "--baud", "460800",
                  "write-flash"] + flash_args,
                 check=True,
             )
