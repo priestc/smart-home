@@ -1553,13 +1553,14 @@ def monitor(duration, verbose, db, no_db):
 
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             scanner = scanner_ref[0] if scanner_ref else None
-            # Do NOT stop the scanner before connecting — stopping it causes BlueZ to
-            # remove the device's D-Bus object, which makes BleakClient.connect() fail
-            # with "Device not found".  BlueZ handles concurrent scan + connect fine.
+            if scanner:
+                await scanner.stop()
             click.echo(f"[{ts}] Pool: connecting to {label} ({addr})...")
             try:
                 async with BleakClient(ble_device, timeout=20.0) as client:
                     fail_count = 0
+                    if scanner:
+                        await scanner.start()
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
                     _, last_rssi = yc01_devices.get(addr_upper, (None, None))
                     click.echo(f"[{ts}] Pool: connected to {label} ({addr})  rssi={last_rssi}dBm")
