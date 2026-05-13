@@ -615,6 +615,9 @@ def add_relay():
         server_url = click.prompt(
             "\nSmart Home server URL (e.g. http://192.168.1.100:5000)"
         ).strip()
+        if not server_url.startswith(("http://", "https://")):
+            server_url = "http://" + server_url
+            click.echo(f"  (added http:// prefix → {server_url})")
         if click.confirm("Save server URL for future relays?", default=True):
             defaults["server_url"] = server_url
             _relay.save_defaults(defaults)
