@@ -1258,11 +1258,12 @@ def monitor(duration, verbose, db, no_db):
                 except RuntimeError:
                     _poll_active.discard(addr)
 
-        if is_ble_yc01(device, adv) and device.address.upper() in pool_config:
-            is_new = device.address not in yc01_devices
-            yc01_devices[device.address] = (device, adv.rssi)
-            if is_new:
-                click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered pool monitor: {pool_config[device.address.upper()]} ({device.address})")
+        if is_ble_yc01(device, adv):
+            curr_upper = device.address.upper()
+            is_new = curr_upper not in yc01_devices
+            yc01_devices[curr_upper] = (device, adv.rssi)
+            if is_new and curr_upper in pool_config:
+                click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered pool monitor: {pool_config[curr_upper]} ({device.address})")
 
         if verbose and ble_name:
             click.echo(f"[presence] untracked: {ble_name!r} ({device.address})")
@@ -1522,20 +1523,33 @@ def monitor(duration, verbose, db, no_db):
         first_attempt = True
 
         while True:
+            def _pick_device():
+                """Return BLEDevice for this pool monitor, handling RPA address rotation."""
+                if addr_upper in yc01_devices:
+                    return yc01_devices[addr_upper][0]
+                if yc01_devices:
+                    # Device advertised with a rotated RPA — use whatever YC01 we see
+                    # and re-key it under the configured address for RSSI lookups.
+                    rotated_addr, (dev, rssi) = next(iter(yc01_devices.items()))
+                    yc01_devices[addr_upper] = (dev, rssi)
+                    click.echo(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Pool: {label} found with rotated address {dev.address}")
+                    return dev
+                return addr  # last resort: address string (likely to fail)
+
             if first_attempt:
                 # Immediate connect on startup — catch the device while it may still
                 # be powered on from before the service restarted.
                 first_attempt = False
-                ble_device = yc01_devices.get(addr_upper, (None, None))[0] or addr
+                ble_device = _pick_device()
             else:
                 # Keep scanner running while waiting — this is what lets us catch the
                 # brief advertising window after the device powers back on.
                 wait_start = datetime.datetime.now()
-                while addr_upper not in yc01_devices:
+                while addr_upper not in yc01_devices and not yc01_devices:
                     if (datetime.datetime.now() - wait_start).total_seconds() >= 30:
                         break  # fall back to address-string connect after 30 s
                     await asyncio.sleep(1)
-                ble_device = yc01_devices.get(addr_upper, (None, None))[0] or addr
+                ble_device = _pick_device()
 
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             scanner = scanner_ref[0] if scanner_ref else None
