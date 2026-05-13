@@ -1509,29 +1509,36 @@ def monitor(duration, verbose, db, no_db):
 
         Keeping the connection open prevents the device from entering sleep/off mode.
 
-        Strategy: wait for a fresh BLE advertisement before each connection attempt so
-        BlueZ has the device cached and the device is actively advertising (connectable).
-        The scanner runs continuously during the wait, giving maximum visibility into the
-        brief window when the device re-advertises after a disconnect.  Only fall back to
-        connecting by address string if no advertisement arrives within 30 s (e.g. right
-        after a cold service start when the device is already on but scanner is still
-        warming up).
+        Strategy:
+        - First attempt: connect immediately by address string.  The device may still be
+          powered on from a previous session (e.g. service restart), and an immediate
+          connect grabs it before it times out.
+        - Subsequent attempts: wait for a fresh BLE advertisement before connecting so
+          BlueZ has the device cached and the device is actively advertising.  Fall back
+          to address-string connect if no advertisement arrives within 30 s.
         """
         addr_upper = addr.upper()
         fail_count = 0
+        first_attempt = True
 
         while True:
-            # Keep scanner running while waiting — this is what lets us catch the
-            # brief advertising window after the device powers back on.
-            wait_start = datetime.datetime.now()
-            while addr_upper not in yc01_devices:
-                if (datetime.datetime.now() - wait_start).total_seconds() >= 30:
-                    break  # fall back to address-string connect after 30 s
-                await asyncio.sleep(1)
+            if first_attempt:
+                # Immediate connect on startup — catch the device while it may still
+                # be powered on from before the service restarted.
+                first_attempt = False
+                ble_device = yc01_devices.get(addr_upper, (None, None))[0] or addr
+            else:
+                # Keep scanner running while waiting — this is what lets us catch the
+                # brief advertising window after the device powers back on.
+                wait_start = datetime.datetime.now()
+                while addr_upper not in yc01_devices:
+                    if (datetime.datetime.now() - wait_start).total_seconds() >= 30:
+                        break  # fall back to address-string connect after 30 s
+                    await asyncio.sleep(1)
+                ble_device = yc01_devices.get(addr_upper, (None, None))[0] or addr
 
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             scanner = scanner_ref[0] if scanner_ref else None
-            ble_device = yc01_devices.get(addr_upper, (None, None))[0] or addr
             if scanner:
                 await scanner.stop()
             click.echo(f"[{ts}] Pool: connecting to {label} ({addr})...")

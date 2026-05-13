@@ -10,7 +10,17 @@ ssh tank2
 
 The `smart-home monitor` and `smart-home serve` commands run there. When debugging issues that require checking live data (e.g. the SQLite DB, logs, or running processes), use `ssh tank2` to connect.
 
-Also, the project is re-deployed after almost every commit using the commands: `pipx install git+https://github.com/priestc/smart-home.git@master --force; sudo -n systemctl restart smart-home-api.service; sudo -n systemctl restart smart-home.service`
+Also, the project is re-deployed after almost every commit. The standard deploy command is:
+
+```
+pipx install git+https://github.com/priestc/smart-home.git@master --force; sudo -n systemctl restart smart-home-api.service
+```
+
+**Do NOT restart `smart-home.service` (the monitor) on every deploy.** Restarting it drops the BLE connection to the pool monitor (YC01), which causes the device to power off and requires a manual button press to bring it back online. Only restart `smart-home.service` when changes to the BLE monitor code (`__main__.py`, `pool.py`, etc.) actually require it:
+
+```
+ssh tank2 'sudo -n systemctl restart smart-home.service'
+```
 
 ## Error handling principle
 
