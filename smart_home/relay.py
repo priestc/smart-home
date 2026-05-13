@@ -128,8 +128,10 @@ def flash_and_provision(
     }) + "\n"
 
     with serial.Serial(port, 115200, timeout=1) as ser:
-        # Send RESET_CONFIG immediately to clear any stale config from a
-        # previous flash (no-op on a fresh chip where NVS is empty).
+        # Discard boot ROM output buffered while we were sleeping.
+        # The ESP32 ROM logs at 74880 baud, which looks like garbage at 115200.
+        ser.reset_input_buffer()
+
         ser.write(b"RESET_CONFIG\n")
 
         deadline = time.time() + 25
@@ -139,7 +141,9 @@ def flash_and_provision(
             if not raw:
                 continue
             line = raw.decode("utf-8", errors="replace").strip()
-            if line:
+            # Skip lines that are mostly non-printable (garbled baud-rate output)
+            printable = sum(c.isprintable() for c in line)
+            if line and printable >= len(line) * 0.8:
                 print_fn(f"  device: {line}")
             if "WAITING_FOR_CONFIG" in line:
                 got_prompt = True
