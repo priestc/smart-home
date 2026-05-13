@@ -180,6 +180,10 @@ static void provisionMode() {
 // ── WiFi ──────────────────────────────────────────────────────────────────────
 
 static void connectWiFi() {
+    // Build hostname: "smart-home-relay-patio" (hyphens only — underscores are invalid in DNS)
+    String hostname = String("smart-home-relay-") + g_id;
+    hostname.replace("_", "-");
+    WiFi.setHostname(hostname.c_str());
     WiFi.begin(g_ssid, g_pass);
     Serial.printf("Connecting to WiFi '%s'", g_ssid);
     for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) {
