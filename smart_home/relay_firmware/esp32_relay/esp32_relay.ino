@@ -77,7 +77,7 @@ static String hexEncode(const uint8_t* data, size_t len) {
 
 class AdvCallback : public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice dev) override {
-        std::string addr = dev.getAddress().toString();
+        std::string addr = dev.getAddress().toString().c_str();
         DevInfo info;
         info.name    = dev.haveName() ? dev.getName().c_str() : "";
         info.rssi    = dev.getRSSI();
@@ -85,11 +85,11 @@ class AdvCallback : public BLEAdvertisedDeviceCallbacks {
         info.has_svc = false;
 
         if (dev.haveManufacturerData()) {
-            std::string mfr = dev.getManufacturerData();
-            if (mfr.size() >= 2) {
+            String mfr = dev.getManufacturerData();
+            if (mfr.length() >= 2) {
                 info.has_mfr    = true;
                 info.mfr_company = (uint8_t)mfr[0] | ((uint8_t)mfr[1] << 8);
-                info.mfr_hex    = hexEncode((const uint8_t*)mfr.data() + 2, mfr.size() - 2);
+                info.mfr_hex    = hexEncode((const uint8_t*)mfr.c_str() + 2, mfr.length() - 2);
             }
         }
         if (dev.haveServiceData()) {
@@ -97,8 +97,8 @@ class AdvCallback : public BLEAdvertisedDeviceCallbacks {
             String uuid  = dev.getServiceDataUUID().toString().c_str();
             uuid.toLowerCase();
             info.svc_uuid = uuid;
-            std::string svc = dev.getServiceData();
-            info.svc_hex = hexEncode((const uint8_t*)svc.data(), svc.size());
+            String svc = dev.getServiceData();
+            info.svc_hex = hexEncode((const uint8_t*)svc.c_str(), svc.length());
         }
         if (info.name.length() || info.has_mfr || info.has_svc)
             g_seen[addr] = info;
@@ -302,10 +302,10 @@ static void processGattTasks() {
             }
 
             if (chr && chr->canRead()) {
-                std::string val = chr->readValue();
-                result_hex = hexEncode((const uint8_t*)val.data(), val.size());
+                String val = chr->readValue();
+                result_hex = hexEncode((const uint8_t*)val.c_str(), val.length());
                 success    = true;
-                Serial.printf("  GATT read OK: %u bytes\n", (unsigned)val.size());
+                Serial.printf("  GATT read OK: %u bytes\n", (unsigned)val.length());
             } else {
                 error_msg = svc ? "characteristic not found" : "service not found";
                 Serial.println("  " + error_msg);
