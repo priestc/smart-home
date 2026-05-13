@@ -189,6 +189,19 @@ static void connectWiFi() {
         Serial.printf("\nWiFi OK: %s\n", WiFi.localIP().toString().c_str());
         MDNS.begin(WiFi.getHostname());
         Serial.printf("Server URL: %s\n", g_url);
+        // Resolve server hostname once and print result for diagnostics
+        String host = String(g_url);
+        int schemeEnd = host.indexOf("://");
+        if (schemeEnd >= 0) host = host.substring(schemeEnd + 3);
+        int slashPos = host.indexOf('/');
+        if (slashPos >= 0) host = host.substring(0, slashPos);
+        int colonPos = host.indexOf(':');
+        if (colonPos >= 0) host = host.substring(0, colonPos);
+        IPAddress resolved;
+        if (WiFi.hostByName(host.c_str(), resolved))
+            Serial.printf("DNS OK: %s -> %s\n", host.c_str(), resolved.toString().c_str());
+        else
+            Serial.printf("DNS FAILED: could not resolve '%s'\n", host.c_str());
     } else {
         Serial.println("\nWiFi connect failed — will retry");
     }
