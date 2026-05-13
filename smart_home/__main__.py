@@ -1253,7 +1253,7 @@ def monitor(duration, verbose, db, no_db):
     presence_last_seen: dict[str, datetime.datetime] = {}
     presence_state = _presence.load_state()
     presence_addr_map: dict[str, str] = {}  # MAC address -> ble_name (for nameless adverts)
-    PRESENCE_TIMEOUT = datetime.timedelta(seconds=30)
+    PRESENCE_TIMEOUT = datetime.timedelta(seconds=60)
     presence_rssi_last_write: dict[str, datetime.datetime] = {}
     PRESENCE_RSSI_THROTTLE = datetime.timedelta(seconds=10)
 
@@ -1396,10 +1396,25 @@ def monitor(duration, verbose, db, no_db):
             changed = False
             for ble_name, label in presence_devices.items():
                 last = presence_last_seen.get(ble_name)
-                new_status = "home" if last and (now - last) < PRESENCE_TIMEOUT else "away"
+
+                # Combine main-scanner timestamp with relay-sourced ble_rssi timestamp
+                relay_last = None
+                if conn:
+                    try:
+                        row = conn.execute(
+                            "SELECT ts FROM ble_rssi WHERE label=?", (label,)
+                        ).fetchone()
+                        if row:
+                            relay_last = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        pass
+                candidates = [t for t in [last, relay_last] if t is not None]
+                combined_last = max(candidates) if candidates else None
+
+                new_status = "home" if combined_last and (now - combined_last) < PRESENCE_TIMEOUT else "away"
                 old_status = presence_state.get(ble_name, {}).get("status")
                 old_last_seen = presence_state.get(ble_name, {}).get("last_seen")
-                new_last_seen = last.isoformat() if last else None
+                new_last_seen = combined_last.isoformat() if combined_last else None
                 if new_status != old_status:
                     ts = now.strftime("%H:%M:%S")
                     click.echo(f"[{ts}] Presence: {label} is {new_status}")

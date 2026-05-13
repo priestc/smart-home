@@ -81,6 +81,12 @@ def ble_relay():
             return f"{s}-0000-1000-8000-00805f9b34fb"
         return s
 
+    from smart_home import presence as _presence
+    from smart_home.db import upsert_ble_rssi
+
+    # {ble_name: label} — keys are BLE advertised names, values are human labels
+    presence_name_map = _presence.load_devices()
+
     inserted = 0
     with _conn() as conn:
         for adv_json in advertisements:
@@ -125,6 +131,11 @@ def ble_relay():
                 if reading.label:
                     insert_reading(conn, reading)
                     inserted += 1
+
+            # Presence: update ble_rssi so check_presence() sees relay-sourced sightings
+            presence_label = presence_name_map.get(name) if name else None
+            if presence_label and rssi is not None:
+                upsert_ble_rssi(conn, presence_label, address, rssi)
 
         # Atomically claim any pending GATT tasks queued for this relay
         pending_tasks = _relay.claim_pending_tasks(conn, relay_cfg["id"])
