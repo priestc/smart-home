@@ -89,6 +89,13 @@ def ble_relay():
 
     inserted = 0
     with _conn() as conn:
+        # Record this relay's check-in so check_presence() knows it's active
+        conn.execute(
+            "INSERT OR REPLACE INTO relay_checkin (relay_id, ts) "
+            "VALUES (?, strftime('%Y-%m-%d %H:%M:%S','now'))",
+            (relay_cfg["id"],)
+        )
+
         for adv_json in advertisements:
             address = (adv_json.get("address") or "").upper()
             name = adv_json.get("name") or ""
@@ -132,10 +139,16 @@ def ble_relay():
                     insert_reading(conn, reading)
                     inserted += 1
 
-            # Presence: update ble_rssi so check_presence() sees relay-sourced sightings
+            # Presence: record per-relay sighting for union-OR detection in check_presence()
             presence_label = presence_name_map.get(name) if name else None
-            if presence_label and rssi is not None:
-                upsert_ble_rssi(conn, presence_label, address, rssi)
+            if presence_label:
+                if rssi is not None:
+                    upsert_ble_rssi(conn, presence_label, address, rssi)
+                conn.execute(
+                    "INSERT OR REPLACE INTO relay_presence_sighting (relay_id, label, ts) "
+                    "VALUES (?, ?, strftime('%Y-%m-%d %H:%M:%S','now'))",
+                    (relay_cfg["id"], presence_label)
+                )
 
         # Atomically claim any pending GATT tasks queued for this relay
         pending_tasks = _relay.claim_pending_tasks(conn, relay_cfg["id"])

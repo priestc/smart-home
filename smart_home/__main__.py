@@ -1253,7 +1253,7 @@ def monitor(duration, verbose, db, no_db):
     presence_last_seen: dict[str, datetime.datetime] = {}
     presence_state = _presence.load_state()
     presence_addr_map: dict[str, str] = {}  # MAC address -> ble_name (for nameless adverts)
-    PRESENCE_TIMEOUT = datetime.timedelta(seconds=60)
+    PRESENCE_TIMEOUT = datetime.timedelta(seconds=30)  # main scanner is continuous
     presence_rssi_last_write: dict[str, datetime.datetime] = {}
     PRESENCE_RSSI_THROTTLE = datetime.timedelta(seconds=10)
 
@@ -1396,24 +1396,39 @@ def monitor(duration, verbose, db, no_db):
             changed = False
             for ble_name, label in presence_devices.items():
                 last = presence_last_seen.get(ble_name)
+                main_seeing = last and (now - last) < PRESENCE_TIMEOUT
 
-                # Combine main-scanner timestamp with relay-sourced ble_rssi timestamp
+                # Any active relay saw the device in its most recent scan batch?
+                relay_seeing = False
                 relay_last = None
                 if conn:
                     try:
+                        # Active = checked in within 60s; "seeing" = sighting within 25s of check-in
                         row = conn.execute(
-                            "SELECT ts FROM ble_rssi WHERE label=?", (label,)
+                            "SELECT 1 FROM relay_presence_sighting s "
+                            "JOIN relay_checkin c ON s.relay_id = c.relay_id "
+                            "WHERE s.label = ? "
+                            "AND datetime(s.ts) > datetime(c.ts, '-25 seconds') "
+                            "AND datetime(c.ts) > datetime('now', '-60 seconds') "
+                            "LIMIT 1",
+                            (label,)
                         ).fetchone()
-                        if row:
-                            relay_last = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+                        relay_seeing = row is not None
+                        # Also get most recent sighting ts for display
+                        row2 = conn.execute(
+                            "SELECT MAX(ts) FROM relay_presence_sighting WHERE label=?",
+                            (label,)
+                        ).fetchone()
+                        if row2 and row2[0]:
+                            relay_last = datetime.datetime.strptime(row2[0], "%Y-%m-%d %H:%M:%S")
                     except Exception:
                         pass
-                candidates = [t for t in [last, relay_last] if t is not None]
-                combined_last = max(candidates) if candidates else None
 
-                new_status = "home" if combined_last and (now - combined_last) < PRESENCE_TIMEOUT else "away"
+                new_status = "home" if (main_seeing or relay_seeing) else "away"
                 old_status = presence_state.get(ble_name, {}).get("status")
                 old_last_seen = presence_state.get(ble_name, {}).get("last_seen")
+                candidates = [t for t in [last, relay_last] if t is not None]
+                combined_last = max(candidates) if candidates else None
                 new_last_seen = combined_last.isoformat() if combined_last else None
                 if new_status != old_status:
                     ts = now.strftime("%H:%M:%S")

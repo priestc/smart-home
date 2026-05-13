@@ -179,6 +179,20 @@ def open_db(path: str) -> sqlite3.Connection:
             updated_ts  TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS relay_checkin (
+            relay_id TEXT PRIMARY KEY,
+            ts       TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS relay_presence_sighting (
+            relay_id TEXT NOT NULL,
+            label    TEXT NOT NULL,
+            ts       TEXT NOT NULL,
+            PRIMARY KEY (relay_id, label)
+        )
+    """)
     conn.commit()
     return conn
 
