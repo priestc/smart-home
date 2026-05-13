@@ -350,8 +350,9 @@ void setup() {
     }
 
     connectWiFi();
-    BLEDevice::init(g_id);
-    Serial.printf("BLE relay ready  id=%s  fw=%s\n", g_id, FIRMWARE_VERSION);
+    String ble_name = String("smart-home_relay_") + g_id;
+    BLEDevice::init(ble_name.c_str());
+    Serial.printf("BLE relay ready  id=%s  ble=%s  fw=%s\n", g_id, ble_name.c_str(), FIRMWARE_VERSION);
 }
 
 void loop() {
