@@ -10,7 +10,7 @@ fi
 
 if ! command -v arduino-cli &>/dev/null; then
     echo "Warning: arduino-cli not found — skipping firmware rebuild."
-    echo "  Install it with: bash smart_home/relay_firmware/setup.sh"
+    echo "  Install it with: bash \"\$(smart-home firmware-dir)/setup.sh\""
     echo "  The pre-built .bin files may be out of date with the .ino source."
     exit 0
 fi

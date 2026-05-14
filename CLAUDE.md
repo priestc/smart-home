@@ -32,6 +32,12 @@ ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
 
 This requires `arduino-cli` to be on `$PATH`. On machines without it the hook warns and skips; on tank2 it always runs.
 
+To install `arduino-cli` and all ESP32 build dependencies:
+
+```
+bash "$(smart-home firmware-dir)/setup.sh"
+```
+
 ## Error handling principle
 
 Never silently swallow errors. Whenever something goes wrong — a failed network request, an unexpected API response, a caught exception — always surface it visibly in the UI so the user knows what's happening. This applies to:

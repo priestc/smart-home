@@ -71,8 +71,8 @@ def firmware_missing_message() -> str:
     return (
         f"Firmware binary not found at {_APP_BIN}\n"
         f"Build it first:\n"
-        f"  cd {FIRMWARE_DIR}\n"
-        f"  ./build.sh"
+        f"  bash \"$(smart-home firmware-dir)/setup.sh\"   # if arduino-cli is missing\n"
+        f"  bash \"$(smart-home firmware-dir)/build.sh\""
     )
 
 

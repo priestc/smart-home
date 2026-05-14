@@ -600,6 +600,13 @@ def relay_log(db):
         pass
 
 
+@main.command("firmware-dir")
+def firmware_dir():
+    """Print the path to the relay firmware directory (useful for scripting)."""
+    from smart_home.relay import FIRMWARE_DIR
+    click.echo(str(FIRMWARE_DIR))
+
+
 @main.command("add-relay")
 def add_relay():
     """Provision a new BLE relay device. Plug it into USB first."""
