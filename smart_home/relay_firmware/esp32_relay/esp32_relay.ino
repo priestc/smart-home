@@ -310,6 +310,8 @@ static void connectWiFi() {
 
     Serial.println();
     logf("WiFi OK: %s", WiFi.localIP().toString().c_str());
+    // Modem sleep lets the coexistence manager interleave WiFi and BLE timeslots.
+    WiFi.setSleep(true);
     MDNS.begin(WiFi.getHostname());
 
     // NTP time sync (UTC, no DST offset)
@@ -577,8 +579,8 @@ void loop() {
     BLEScan* scan = BLEDevice::getScan();
     scan->setAdvertisedDeviceCallbacks(&g_cb, false);
     scan->setActiveScan(false);
-    scan->setInterval(100);
-    scan->setWindow(99);
+    scan->setInterval(160);  // 100 ms — gives WiFi regular radio gaps
+    scan->setWindow(80);     // 50 ms active per interval (50% duty cycle)
     scan->start(SCAN_SECONDS, false);
     scan->clearResults();
 
