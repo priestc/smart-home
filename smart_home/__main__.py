@@ -584,7 +584,12 @@ def relay_log(db):
                          click.style(f"{row['relay_id']:<14}", fg="yellow"),
                          f"{row['n_adverts']:>3} devices"]
                 if row["batch_ts"]:
-                    parts.append(f"batch={row['batch_ts'][11:19]}")
+                    try:
+                        b_utc = datetime.datetime.strptime(row["batch_ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+                        batch_t = b_utc.astimezone().strftime("%H:%M:%S")
+                    except (ValueError, TypeError):
+                        batch_t = row["batch_ts"][11:19]
+                    parts.append(f"batch={batch_t}")
                 if row["labeled_json"]:
                     labeled = _json.loads(row["labeled_json"])
                     for label, rssi in sorted(labeled.items()):
