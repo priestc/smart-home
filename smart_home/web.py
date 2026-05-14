@@ -109,7 +109,8 @@ def ble_relay():
     presence_labels = set(presence_name_map.values())
 
     inserted = 0
-    labeled_seen: dict = {}  # {label: rssi} for all labeled devices seen this batch
+    labeled_seen: dict = {}   # {label: rssi} for all labeled devices seen this batch
+    apple_macs: list = []     # MACs of Apple (0x004C) devices — diagnostic only
     with _conn() as conn:
         # MAC-address cache: {mac: label} for presence devices whose current address
         # the main scanner has observed (stored in ble_rssi). Lets the relay recognise
@@ -150,6 +151,9 @@ def ble_relay():
                     pass
 
             rssi = adv_json.get("rssi")
+
+            if 76 in {int(k) for k in (adv_json.get("manufacturer_data") or {})}:
+                apple_macs.append(address)
 
             dev = _Dev()
             dev.name = name
@@ -221,7 +225,7 @@ def ble_relay():
                 raw_batch_ts,
                 len(advertisements),
                 inserted,
-                _json.dumps(relay_presence_last_seen) if relay_presence_last_seen else None,
+                _json.dumps({"apple_macs": apple_macs, "mac_cache": list(presence_mac_map)}),
                 _json.dumps(labeled_seen) if labeled_seen else None,
             ),
         )
