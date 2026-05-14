@@ -567,6 +567,7 @@ def relay_log(db):
     import sqlite3
     conn = open_db(db)
     conn.row_factory = sqlite3.Row
+    presence_name_map = _presence.load_devices()  # {ble_name: label}
     last_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM relay_log").fetchone()[0]
     click.echo("Watching relay traffic… (Ctrl+C to stop)\n")
     try:
@@ -589,8 +590,15 @@ def relay_log(db):
                     parts.append(f"batch={row['batch_ts'][11:19]}")
                 if row["presence_json"]:
                     pls = _json.loads(row["presence_json"])
-                    for name, seen_ts in pls.items():
-                        parts.append(click.style(f"presence:{name}@{seen_ts[11:19]}", fg="magenta"))
+                    for ble_name in pls:
+                        label = presence_name_map.get(ble_name)
+                        if not label:
+                            continue
+                        rssi_row = conn.execute(
+                            "SELECT rssi FROM ble_rssi WHERE label = ?", (label,)
+                        ).fetchone()
+                        rssi_str = f" {rssi_row['rssi']}dBm" if rssi_row else ""
+                        parts.append(click.style(f"{label}{rssi_str}", fg="magenta"))
                 click.echo("  ".join(parts))
             time.sleep(1)
     except KeyboardInterrupt:
