@@ -457,11 +457,14 @@ def bandwidth_history_year():
 def presence_history_api():
     """Per-device presence stats (7d / 30d) and recent away periods."""
     import datetime
-    from smart_home.presence import load_history, load_devices, load_state
+    from smart_home.presence import load_history, load_devices, load_state, load_network_devices
     entries = load_history()
     devices = load_devices()
+    network_devices = load_network_devices()
     state   = load_state()
-    if not devices:
+    # Build unified list: (ble_name_or_label, label) — network devices use label as key
+    all_devices = list(devices.items()) + [(label, label) for label in network_devices.values()]
+    if not all_devices:
         return jsonify([])
     now = datetime.datetime.now()
     by_device: dict = {}
@@ -485,7 +488,7 @@ def presence_history_api():
         return out
 
     result = []
-    for ble_name, label in sorted(devices.items(), key=lambda x: x[1]):
+    for ble_name, label in sorted(all_devices, key=lambda x: x[1]):
         s = state.get(ble_name, {})
         dev_entries = sorted(by_device.get(ble_name, []), key=lambda e: e["ts"])
         windows = {}
@@ -538,14 +541,23 @@ def presence_delete_away():
 @app.get("/api/presence")
 def presence():
     """Current presence status for all registered devices."""
-    from smart_home.presence import load_state, load_devices
+    from smart_home.presence import load_state, load_devices, load_network_devices
     devices = load_devices()
+    network_devices = load_network_devices()
     state = load_state()
     result = []
     for ble_name, label in devices.items():
         s = state.get(ble_name, {})
         result.append({
             "ble_name": ble_name,
+            "name": label,
+            "status": s.get("status", "unknown"),
+            "last_seen": s.get("last_seen"),
+        })
+    for mac, label in network_devices.items():
+        s = state.get(label, {})
+        result.append({
+            "ble_name": label,
             "name": label,
             "status": s.get("status", "unknown"),
             "last_seen": s.get("last_seen"),
