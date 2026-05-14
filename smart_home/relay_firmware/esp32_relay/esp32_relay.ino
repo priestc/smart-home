@@ -247,7 +247,7 @@ static void pairModeStart(const String& label) {
         );
         chr->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED);
         String devname = String("SmHome-") + g_id;
-        chr->setValue(devname.c_str(), devname.length());
+        chr->setValue((const uint8_t*)devname.c_str(), devname.length());
         svc->start();
     }
 
