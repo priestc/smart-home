@@ -578,7 +578,8 @@ def relay_log(db):
             ).fetchall()
             for row in rows:
                 last_id = row["id"]
-                ts = row["ts"][11:19]
+                ts_utc = datetime.datetime.strptime(row["ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+                ts = ts_utc.astimezone().strftime("%H:%M:%S")
                 parts = [click.style(f"[{ts}]", fg="cyan"),
                          click.style(f"{row['relay_id']:<14}", fg="yellow"),
                          f"{row['n_adverts']:>3} devices"]

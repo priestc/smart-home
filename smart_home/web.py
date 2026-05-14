@@ -197,7 +197,7 @@ def ble_relay():
             "INSERT INTO relay_log (ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
-                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                 relay_cfg["id"],
                 raw_batch_ts,
                 len(advertisements),
