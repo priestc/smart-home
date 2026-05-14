@@ -191,6 +191,24 @@ def ble_relay():
                 (local_ts, relay_cfg["id"], label, local_ts),
             )
 
+        # Log this relay check-in for `smart-home relay-log`
+        import json as _json
+        conn.execute(
+            "INSERT INTO relay_log (ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                relay_cfg["id"],
+                raw_batch_ts,
+                len(advertisements),
+                inserted,
+                _json.dumps(relay_presence_last_seen) if relay_presence_last_seen else None,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes')"
+        )
+
         # Atomically claim any pending GATT tasks queued for this relay
         pending_tasks = _relay.claim_pending_tasks(conn, relay_cfg["id"])
 

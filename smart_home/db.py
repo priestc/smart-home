@@ -180,6 +180,17 @@ def open_db(path: str) -> sqlite3.Connection:
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS relay_log (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts           TEXT NOT NULL,
+            relay_id     TEXT NOT NULL,
+            batch_ts     TEXT,
+            n_adverts    INTEGER,
+            n_inserted   INTEGER,
+            presence_json TEXT
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS relay_checkin (
             relay_id TEXT PRIMARY KEY,
             ts       TEXT NOT NULL

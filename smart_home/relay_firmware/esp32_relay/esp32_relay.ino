@@ -14,16 +14,12 @@
  *     one-per-cycle when the server is reachable again.
  *   - g_presence_last_seen tracks when each named device was last seen locally.
  *
- * Web log:
- *   - HTTP server on port 80 serves a live activity log (last LOG_LINES lines).
- *   - Access at http://<relay-ip>/ from any browser on the local network.
- *   - Log is in RAM only; does not persist across reboots.
- *
  * On first boot (or after RESET_CONFIG command on serial): waits for JSON
  * config over serial, stores in NVS, reboots.
  *
  * Provisioned via: smart-home add-relay
  * Build via:       cd relay_firmware && ./build.sh
+ * Monitor via:     smart-home relay-log  (on the server)
  *
  * Requires: ArduinoJson >= 7.0, ESP32 Arduino core >= 2.0
  */
@@ -32,7 +28,6 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
-#include <WebServer.h>
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
@@ -40,12 +35,11 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <time.h>
-#include <stdarg.h>
 #include <map>
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.3.0"
+#define FIRMWARE_VERSION      "1.4.0"
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -53,9 +47,7 @@
 #define BOOT_PROBE_MS          3000UL
 #define HTTP_TIMEOUT_MS        10000
 #define GATT_TIMEOUT_MS        12000
-#define MAX_BUFFER             30     // max buffered batches before dropping oldest
-#define LOG_LINES              100    // ring buffer depth
-#define LOG_LINE_MAX           140    // max chars per log line
+#define MAX_BUFFER             30
 
 // GATT characteristic UUIDs (must match smart_home/pool.py)
 static const uint16_t YC01_SVC_UUID16  = 0xFF00;
@@ -66,77 +58,6 @@ static char g_pass[64];
 static char g_url[128];
 static char g_token[64];
 static char g_id[32];
-
-// ── In-RAM activity log ───────────────────────────────────────────────────────
-
-static char g_log_buf[LOG_LINES][LOG_LINE_MAX];
-static int  g_log_head  = 0;
-static int  g_log_count = 0;
-
-static void logf(const char* fmt, ...) {
-    char msg[LOG_LINE_MAX];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(msg, sizeof(msg), fmt, args);
-    va_end(args);
-
-    struct tm ti;
-    char ts[10] = "--:--:--";
-    if (getLocalTime(&ti))
-        strftime(ts, sizeof(ts), "%H:%M:%S", &ti);
-
-    snprintf(g_log_buf[g_log_head], LOG_LINE_MAX, "[%s] %s", ts, msg);
-    Serial.println(g_log_buf[g_log_head]);
-    g_log_head = (g_log_head + 1) % LOG_LINES;
-    if (g_log_count < LOG_LINES) g_log_count++;
-}
-
-// ── Web server ────────────────────────────────────────────────────────────────
-
-static WebServer g_web(80);
-
-static void handleRoot() {
-    String html;
-    html.reserve(1024);
-    html = "<!DOCTYPE html><html><head>"
-           "<meta charset='UTF-8'>"
-           "<title>smart-home relay: ";
-    html += g_id;
-    html += "</title>"
-            "<style>"
-            "body{font-family:monospace;background:#111;color:#cfc;padding:1em;margin:0}"
-            "h2{color:#8f8;margin:0 0 .3em}"
-            "p{color:#777;margin:0 0 1em;font-size:.85em}"
-            "pre{margin:0;white-space:pre-wrap;word-break:break-all;line-height:1.4}"
-            "</style></head><body>"
-            "<h2>smart-home relay: ";
-    html += g_id;
-    html += "</h2>"
-            "<p>fw " FIRMWARE_VERSION " &nbsp;&middot;&nbsp; updates every 2&thinsp;s</p>"
-            "<pre id='log'>Loading…</pre>"
-            "<script>"
-            "async function r(){"
-            "try{"
-            "const t=await fetch('/log');"
-            "if(t.ok)document.getElementById('log').textContent=await t.text();"
-            "}catch(e){}"
-            "}"
-            "setInterval(r,2000);r();"
-            "</script>"
-            "</body></html>";
-    g_web.send(200, "text/html; charset=utf-8", html);
-}
-
-static void handleLog() {
-    String out;
-    out.reserve(g_log_count * 90);
-    for (int i = 0; i < g_log_count; i++) {
-        int idx = (g_log_head - g_log_count + i + LOG_LINES) % LOG_LINES;
-        out += g_log_buf[idx];
-        out += '\n';
-    }
-    g_web.send(200, "text/plain; charset=utf-8", out);
-}
 
 // ── Advertisement buffer ──────────────────────────────────────────────────────
 
@@ -188,15 +109,6 @@ static String getTimestamp() {
     char buf[20];
     strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &ti);
     return String(buf);
-}
-
-// Busy-wait for `ms` milliseconds while keeping the web server alive.
-static void delayServing(unsigned long ms) {
-    unsigned long until = millis() + ms;
-    while (millis() < until) {
-        g_web.handleClient();
-        delay(5);
-    }
 }
 
 // ── BLE advertisement callback ────────────────────────────────────────────────
@@ -303,16 +215,15 @@ static void connectWiFi() {
         Serial.print(".");
     }
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println();
-        logf("WiFi connect failed — will retry");
+        Serial.println("\nWiFi connect failed — will retry");
         return;
     }
 
-    Serial.println();
-    logf("WiFi OK: %s", WiFi.localIP().toString().c_str());
+    Serial.printf("\nWiFi OK: %s\n", WiFi.localIP().toString().c_str());
     // Modem sleep lets the coexistence manager interleave WiFi and BLE timeslots.
     WiFi.setSleep(true);
     MDNS.begin(WiFi.getHostname());
+    Serial.printf("Server URL: %s\n", g_url);
 
     // NTP time sync (UTC, no DST offset)
     configTime(0, 0, "pool.ntp.org", "time.nist.gov");
@@ -323,13 +234,12 @@ static void connectWiFi() {
         delay(500);
         Serial.print(".");
     }
-    Serial.println();
     if (getLocalTime(&ti)) {
         char buf[20];
         strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &ti);
-        logf("NTP OK: %s UTC", buf);
+        Serial.printf("\nNTP OK: %s UTC\n", buf);
     } else {
-        logf("NTP FAILED — batch timestamps will be omitted");
+        Serial.println("\nNTP FAILED — batch timestamps will be omitted");
     }
 
     // DNS diagnostic
@@ -342,16 +252,13 @@ static void connectWiFi() {
     if (colonPos >= 0) host = host.substring(0, colonPos);
     IPAddress resolved;
     if (WiFi.hostByName(host.c_str(), resolved))
-        logf("DNS OK: %s -> %s", host.c_str(), resolved.toString().c_str());
+        Serial.printf("DNS OK: %s -> %s\n", host.c_str(), resolved.toString().c_str());
     else
-        logf("DNS FAILED: could not resolve '%s'", host.c_str());
-
-    logf("Server URL: %s", g_url);
+        Serial.printf("DNS FAILED: could not resolve '%s'\n", host.c_str());
 }
 
 // ── HTTP POST to /api/ble-relay ───────────────────────────────────────────────
 
-// parse_gatt: if true, parse GATT tasks from the response into g_gatt_tasks.
 static bool httpPost(const String& payload, bool parse_gatt) {
     HTTPClient http;
     http.begin(String(g_url) + "/api/ble-relay");
@@ -372,10 +279,10 @@ static bool httpPost(const String& payload, bool parse_gatt) {
                     gt.address     = t["address"].as<String>();
                     gt.device_type = t["device_type"].as<String>();
                     g_gatt_tasks.push_back(gt);
-                    logf("GATT task queued: %s  type=%s",
-                         gt.address.c_str(), gt.device_type.c_str());
+                    Serial.printf("GATT task queued: %s  type=%s\n",
+                                  gt.address.c_str(), gt.device_type.c_str());
                 }
-                logf("POST 200 (%d inserted)", rdoc["inserted"].as<int>());
+                Serial.printf("POST 200 (%d inserted)\n", rdoc["inserted"].as<int>());
             }
         }
         http.end();
@@ -385,7 +292,7 @@ static bool httpPost(const String& payload, bool parse_gatt) {
     const char* reason = (code == -1) ? "connection refused/no route" :
                          (code == -4) ? "not connected" :
                          (code == -11) ? "read timeout" : "error";
-    logf("POST failed: %d (%s)", code, reason);
+    Serial.printf("POST failed: %d (%s) url=%s\n", code, reason, g_url);
     http.end();
     return false;
 }
@@ -429,18 +336,19 @@ static String buildPayload(bool include_presence) {
 static void bufferPush(const String& payload) {
     if (g_batch_queue.size() >= MAX_BUFFER) {
         g_batch_queue.erase(g_batch_queue.begin());
-        logf("Buffer full — dropped oldest batch");
+        Serial.println("Buffer full — dropped oldest batch");
     }
     g_batch_queue.push_back(payload);
 }
 
 static void postBatch() {
-    logf("Scan: %u devices  buffer: %u", (unsigned)g_seen.size(), (unsigned)g_batch_queue.size());
+    Serial.printf("Scan: %u devices  buffer: %u\n",
+                  (unsigned)g_seen.size(), (unsigned)g_batch_queue.size());
 
     if (!g_batch_queue.empty()) {
         if (httpPost(g_batch_queue.front(), false)) {
             g_batch_queue.erase(g_batch_queue.begin());
-            logf("Buffered batch sent, %u remaining", (unsigned)g_batch_queue.size());
+            Serial.printf("Buffered batch sent, %u remaining\n", (unsigned)g_batch_queue.size());
         } else {
             if (!g_seen.empty()) bufferPush(buildPayload(false));
             return;
@@ -474,14 +382,15 @@ static void postGattResult(const String& task_id, bool success,
     http.addHeader("Authorization", String("Bearer ") + g_token);
     http.setTimeout(HTTP_TIMEOUT_MS);
     int code = http.POST(payload);
-    logf("GATT result POST -> %d  task=%s  ok=%d",
-         code, task_id.c_str(), (int)success);
+    Serial.printf("GATT result POST -> %d  task=%s  ok=%d\n",
+                  code, task_id.c_str(), (int)success);
     http.end();
 }
 
 static void processGattTasks() {
     for (auto& task : g_gatt_tasks) {
-        logf("GATT: connecting %s  type=%s", task.address.c_str(), task.device_type.c_str());
+        Serial.printf("Processing GATT task: %s  type=%s\n",
+                      task.address.c_str(), task.device_type.c_str());
 
         bool success = false;
         String result_hex;
@@ -505,15 +414,15 @@ static void processGattTasks() {
                 String val = chr->readValue();
                 result_hex = hexEncode((const uint8_t*)val.c_str(), val.length());
                 success    = true;
-                logf("GATT read OK: %u bytes", (unsigned)val.length());
+                Serial.printf("  GATT read OK: %u bytes\n", (unsigned)val.length());
             } else {
                 error_msg = svc ? "characteristic not found" : "service not found";
-                logf("GATT error: %s", error_msg.c_str());
+                Serial.println("  " + error_msg);
             }
             client->disconnect();
         } else {
             error_msg = "connection failed";
-            logf("GATT connect failed: %s", task.address.c_str());
+            Serial.println("  GATT connect failed");
         }
 
         delete client;
@@ -550,25 +459,19 @@ void setup() {
     }
 
     connectWiFi();
-
-    // Start web log server
-    g_web.on("/",    handleRoot);
-    g_web.on("/log", handleLog);
-    g_web.begin();
-    logf("Web log: http://%s/", WiFi.localIP().toString().c_str());
-
     String ble_name = String("smart-home_relay_") + g_id;
     BLEDevice::init(ble_name.c_str());
-    logf("BLE relay ready  id=%s  fw=" FIRMWARE_VERSION, g_id);
+    Serial.printf("BLE relay ready  id=%s  ble=%s  fw=%s\n",
+                  g_id, ble_name.c_str(), FIRMWARE_VERSION);
 }
 
 void loop() {
     unsigned long cycle_start = millis();
 
     if (WiFi.status() != WL_CONNECTED) {
-        logf("WiFi lost — reconnecting...");
+        Serial.println("WiFi lost — reconnecting...");
         WiFi.reconnect();
-        delayServing(5000);
+        delay(5000);
         return;
     }
 
@@ -589,10 +492,10 @@ void loop() {
     if (!g_gatt_tasks.empty())
         processGattTasks();
 
-    // Wait out the rest of the cycle while serving web requests
     unsigned long elapsed = millis() - cycle_start;
-    unsigned long wait = (POST_INTERVAL_MS > elapsed + 3000UL)
-                         ? POST_INTERVAL_MS - elapsed
-                         : 3000UL;
-    delayServing(wait);
+    const unsigned long MIN_DELAY = 3000UL;
+    if (POST_INTERVAL_MS > elapsed + MIN_DELAY)
+        delay(POST_INTERVAL_MS - elapsed);
+    else
+        delay(MIN_DELAY);
 }

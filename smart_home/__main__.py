@@ -558,6 +558,43 @@ RELAY_TYPES = {
 }
 
 
+@main.command("relay-log")
+@click.option("--db", default=DEFAULT_DB, show_default=True)
+def relay_log(db):
+    """Stream incoming relay payloads in real time (Ctrl+C to stop)."""
+    import time
+    import json as _json
+    conn = open_db(db)
+    conn.row_factory = sqlite3.Row
+    last_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM relay_log").fetchone()[0]
+    click.echo("Watching relay traffic… (Ctrl+C to stop)\n")
+    try:
+        while True:
+            rows = conn.execute(
+                "SELECT id, ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json "
+                "FROM relay_log WHERE id > ? ORDER BY id",
+                (last_id,),
+            ).fetchall()
+            for row in rows:
+                last_id = row["id"]
+                ts = row["ts"][11:19]
+                parts = [click.style(f"[{ts}]", fg="cyan"),
+                         click.style(f"{row['relay_id']:<14}", fg="yellow"),
+                         f"{row['n_adverts']:>3} devices"]
+                if row["n_inserted"]:
+                    parts.append(click.style(f"{row['n_inserted']} inserted", fg="green"))
+                if row["batch_ts"]:
+                    parts.append(f"batch={row['batch_ts'][11:19]}")
+                if row["presence_json"]:
+                    pls = _json.loads(row["presence_json"])
+                    for name, seen_ts in pls.items():
+                        parts.append(click.style(f"presence:{name}@{seen_ts[11:19]}", fg="magenta"))
+                click.echo("  ".join(parts))
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
+
 @main.command("add-relay")
 def add_relay():
     """Provision a new BLE relay device. Plug it into USB first."""
