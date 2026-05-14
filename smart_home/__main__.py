@@ -706,11 +706,14 @@ def add_relay():
 
 
 @main.command("update-relay")
-def update_relay():
+@click.argument("relay_name", required=False, default=None)
+def update_relay(relay_name):
     """Flash new firmware onto an existing relay, preserving its configuration.
 
     Unlike add-relay, this does not reset or re-provision the device.
     The relay's WiFi credentials, token, and name stored in NVS are kept intact.
+
+    Optionally pass RELAY_NAME to skip the interactive selection step.
     """
     from smart_home import relay as _relay
 
@@ -726,11 +729,19 @@ def update_relay():
         click.echo("No relays registered. Use add-relay to provision one first.")
         return
 
-    click.echo("Which relay do you want to update?\n")
-    for i, r in enumerate(unique, 1):
-        click.echo(f"  {i}. {r['id']}")
-    choice = click.prompt("\nEnter choice", type=click.IntRange(1, len(unique)))
-    relay_id = unique[choice - 1]["id"]
+    if relay_name is not None:
+        if relay_name not in {r["id"] for r in unique}:
+            click.echo(f"Error: relay '{relay_name}' not found.", err=True)
+            known = sorted(r["id"] for r in unique)
+            click.echo(f"Known relays: {', '.join(known)}", err=True)
+            return
+        relay_id = relay_name
+    else:
+        click.echo("Which relay do you want to update?\n")
+        for i, r in enumerate(unique, 1):
+            click.echo(f"  {i}. {r['id']}")
+        choice = click.prompt("\nEnter choice", type=click.IntRange(1, len(unique)))
+        relay_id = unique[choice - 1]["id"]
 
     ports = _relay.detect_serial_ports()
     if not ports:
