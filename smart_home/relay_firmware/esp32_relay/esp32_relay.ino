@@ -40,7 +40,6 @@
 #include <BLEClient.h>
 #include <BLEServer.h>
 #include <BLESecurity.h>
-#include <BLEAdvertising.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <time.h>
@@ -49,7 +48,7 @@
 #include <vector>
 
 #define FIRMWARE_VERSION      "1.5.0"
-#define FIRMWARE_REV          2
+#define FIRMWARE_REV          3
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -239,18 +238,13 @@ static void pairModeStart(const String& label) {
         g_ble_server->setCallbacks(&g_pair_srv_cb);
     }
 
-    String adv_name = String("SmHome-") + g_id;
-    BLEAdvertising* adv = BLEDevice::getAdvertising();
-    BLEAdvertisementData adv_data;
-    adv_data.setFlags(ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT);
-    adv->setAdvertisementData(adv_data);
-    BLEAdvertisementData scan_rsp;
-    scan_rsp.setName(adv_name.c_str());
-    adv->setScanResponseData(scan_rsp);
-    adv->start();
+    // Advertise using the device name set at init ("SmHome-{relay_id}").
+    // Calling startAdvertising() with no custom data avoids the async race in
+    // setAdvertisementData() / setScanResponseData() + start().
+    BLEDevice::startAdvertising();
 
-    Serial.printf("Advertising as '%s'\n", adv_name.c_str());
-    Serial.printf("On iPhone: Settings > Bluetooth > tap '%s' to pair\n", adv_name.c_str());
+    Serial.printf("Advertising as 'SmHome-%s'\n", g_id);
+    Serial.printf("On iPhone: Settings > Bluetooth > tap 'SmHome-%s' to pair\n", g_id);
     Serial.println("Waiting up to 60 seconds...");
 
     unsigned long deadline = millis() + 60000;
@@ -258,7 +252,7 @@ static void pairModeStart(const String& label) {
         delay(100);
     }
 
-    adv->stop();
+    BLEDevice::getAdvertising()->stop();
     delay(200);
 
     if (g_bonded) {
@@ -568,10 +562,10 @@ void setup() {
     }
 
     connectWiFi();
-    String ble_name = String("smart-home_relay_") + g_id;
+    String ble_name = String("SmHome-") + g_id;
     BLEDevice::init(ble_name.c_str());
-    Serial.printf("BLE relay ready  id=%s  ble=%s  fw=%s\n",
-                  g_id, ble_name.c_str(), FIRMWARE_VERSION);
+    Serial.printf("BLE relay ready  id=%s  ble=%s  fw=%s  rev=%d\n",
+                  g_id, ble_name.c_str(), FIRMWARE_VERSION, FIRMWARE_REV);
 }
 
 void loop() {
