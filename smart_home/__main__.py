@@ -599,7 +599,7 @@ def relay_log(db):
                 click.echo("  ".join(parts))
             time.sleep(1)
     except KeyboardInterrupt:
-        pass
+        click.echo("\033[0m", nl=False)  # reset any partial ANSI colour sequence
 
 
 @main.command("firmware-dir")
