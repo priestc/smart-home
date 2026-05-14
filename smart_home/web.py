@@ -75,7 +75,11 @@ def ble_relay():
             dt_utc = datetime.datetime.strptime(raw_batch_ts, "%Y-%m-%d %H:%M:%S").replace(
                 tzinfo=datetime.timezone.utc
             )
-            batch_ts_local = dt_utc.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            # Round to minute boundary to match snapshot_loop cadence; this lets
+            # INSERT OR IGNORE deduplicate against main-scanner readings and only
+            # fill gaps where the main scanner was offline.
+            dt_local = dt_utc.astimezone().replace(second=0, microsecond=0)
+            batch_ts_local = dt_local.strftime("%Y-%m-%d %H:%M:%S")
         except (ValueError, TypeError):
             pass
 
