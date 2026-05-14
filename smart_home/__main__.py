@@ -722,15 +722,16 @@ def pair_relay(relay_name, label):
     from smart_home import relay as _relay
 
     relays = _relay.load_relays()
-    relay = next((r for r in relays if r["id"] == relay_name), None)
-    if relay is None:
+    matches = [r for r in relays if r["id"] == relay_name]
+    if not matches:
         click.echo(f"Error: relay '{relay_name}' not found.", err=True)
-        known = [r["id"] for r in relays]
+        known = sorted({r["id"] for r in relays})
         if known:
             click.echo(f"Known relays: {', '.join(known)}", err=True)
         return
 
-    relay["pair_mode"] = label
+    for r in matches:
+        r["pair_mode"] = label
     _relay.save_relays(relays)
 
     click.echo(f"Pair mode scheduled for relay '{relay_name}'.")
