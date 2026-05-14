@@ -567,13 +567,12 @@ def relay_log(db):
     import sqlite3
     conn = open_db(db)
     conn.row_factory = sqlite3.Row
-    presence_name_map = _presence.load_devices()  # {ble_name: label}
     last_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM relay_log").fetchone()[0]
     click.echo("Watching relay traffic… (Ctrl+C to stop)\n")
     try:
         while True:
             rows = conn.execute(
-                "SELECT id, ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json "
+                "SELECT id, ts, relay_id, batch_ts, n_adverts, n_inserted, labeled_json "
                 "FROM relay_log WHERE id > ? ORDER BY id",
                 (last_id,),
             ).fetchall()
@@ -584,21 +583,12 @@ def relay_log(db):
                 parts = [click.style(f"[{ts}]", fg="cyan"),
                          click.style(f"{row['relay_id']:<14}", fg="yellow"),
                          f"{row['n_adverts']:>3} devices"]
-                if row["n_inserted"]:
-                    parts.append(click.style(f"{row['n_inserted']} inserted", fg="green"))
                 if row["batch_ts"]:
                     parts.append(f"batch={row['batch_ts'][11:19]}")
-                if row["presence_json"]:
-                    pls = _json.loads(row["presence_json"])
-                    for ble_name in pls:
-                        label = presence_name_map.get(ble_name)
-                        if not label:
-                            continue
-                        rssi_row = conn.execute(
-                            "SELECT rssi FROM ble_rssi WHERE label = ?", (label,)
-                        ).fetchone()
-                        rssi_str = f" {rssi_row['rssi']}dBm" if rssi_row else ""
-                        parts.append(click.style(f"{label}{rssi_str}", fg="magenta"))
+                if row["labeled_json"]:
+                    labeled = _json.loads(row["labeled_json"])
+                    for label, rssi in sorted(labeled.items()):
+                        parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
                 click.echo("  ".join(parts))
             time.sleep(1)
     except KeyboardInterrupt:

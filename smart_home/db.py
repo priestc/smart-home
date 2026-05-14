@@ -187,9 +187,15 @@ def open_db(path: str) -> sqlite3.Connection:
             batch_ts     TEXT,
             n_adverts    INTEGER,
             n_inserted   INTEGER,
-            presence_json TEXT
+            presence_json TEXT,
+            labeled_json  TEXT
         )
     """)
+    try:
+        conn.execute("ALTER TABLE relay_log ADD COLUMN labeled_json TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS relay_checkin (
             relay_id TEXT PRIMARY KEY,

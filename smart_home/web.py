@@ -108,6 +108,7 @@ def ble_relay():
     presence_name_map = _presence.load_devices()
 
     inserted = 0
+    labeled_seen: dict = {}  # {label: rssi} for all labeled devices seen this batch
     with _conn() as conn:
         # Record this relay's check-in so check_presence() knows it's active
         conn.execute(
@@ -158,12 +159,15 @@ def ble_relay():
                 if reading.label:
                     insert_reading(conn, reading, batch_ts_local)
                     inserted += 1
+                    if rssi is not None:
+                        labeled_seen[reading.label] = rssi
 
             # Presence: record per-relay sighting for union-OR detection in check_presence()
             presence_label = presence_name_map.get(name) if name else None
             if presence_label:
                 if rssi is not None:
                     upsert_ble_rssi(conn, presence_label, address, rssi)
+                    labeled_seen[presence_label] = rssi
                 conn.execute(
                     "INSERT OR REPLACE INTO relay_presence_sighting (relay_id, label, ts) "
                     "VALUES (?, ?, strftime('%Y-%m-%d %H:%M:%S','now'))",
@@ -194,8 +198,8 @@ def ble_relay():
         # Log this relay check-in for `smart-home relay-log`
         import json as _json
         conn.execute(
-            "INSERT INTO relay_log (ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO relay_log (ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json, labeled_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                 relay_cfg["id"],
@@ -203,6 +207,7 @@ def ble_relay():
                 len(advertisements),
                 inserted,
                 _json.dumps(relay_presence_last_seen) if relay_presence_last_seen else None,
+                _json.dumps(labeled_seen) if labeled_seen else None,
             ),
         )
         conn.execute(
