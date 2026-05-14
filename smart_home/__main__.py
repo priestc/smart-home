@@ -564,6 +564,7 @@ def relay_log(db):
     """Stream incoming relay payloads in real time (Ctrl+C to stop)."""
     import time
     import json as _json
+    import sqlite3
     conn = open_db(db)
     conn.row_factory = sqlite3.Row
     last_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM relay_log").fetchone()[0]
