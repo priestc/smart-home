@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Rebuild ESP32 relay firmware when the .ino source is staged for commit.
+# Install: ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
+
+SKETCH="smart_home/relay_firmware/esp32_relay/esp32_relay.ino"
+
+if ! git diff --cached --name-only | grep -q "$SKETCH"; then
+    exit 0
+fi
+
+if ! command -v arduino-cli &>/dev/null; then
+    echo "Warning: arduino-cli not found — skipping firmware rebuild."
+    echo "The pre-built .bin files may be out of date with the .ino source."
+    exit 0
+fi
+
+echo "Firmware source changed — rebuilding before commit..."
+if ! bash smart_home/relay_firmware/build.sh; then
+    echo "Error: firmware build failed. Fix the build error and try again."
+    exit 1
+fi
+
+git add smart_home/relay_firmware/esp32_relay.ino.bin \
+        smart_home/relay_firmware/esp32_relay.ino.bootloader.bin \
+        smart_home/relay_firmware/esp32_relay.ino.partitions.bin
+echo "Firmware rebuilt and staged."

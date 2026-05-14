@@ -22,6 +22,16 @@ pipx install git+https://github.com/priestc/smart-home.git@master --force; sudo 
 ssh tank2 'sudo -n systemctl restart smart-home.service'
 ```
 
+## Git hooks
+
+A pre-commit hook in `hooks/pre-commit` automatically rebuilds the ESP32 firmware binaries whenever `esp32_relay.ino` is staged. After a fresh clone, install it with:
+
+```
+ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
+```
+
+This requires `arduino-cli` to be on `$PATH`. On machines without it the hook warns and skips; on tank2 it always runs.
+
 ## Error handling principle
 
 Never silently swallow errors. Whenever something goes wrong — a failed network request, an unexpected API response, a caught exception — always surface it visibly in the UI so the user knows what's happening. This applies to:
