@@ -106,10 +106,22 @@ def ble_relay():
 
     # {ble_name: label} — keys are BLE advertised names, values are human labels
     presence_name_map = _presence.load_devices()
+    presence_labels = set(presence_name_map.values())
 
     inserted = 0
     labeled_seen: dict = {}  # {label: rssi} for all labeled devices seen this batch
     with _conn() as conn:
+        # MAC-address cache: {mac: label} for presence devices whose current address
+        # the main scanner has observed (stored in ble_rssi). Lets the relay recognise
+        # a device (e.g. iPhone) even when it doesn't broadcast its name.
+        presence_mac_map = {
+            row[0].upper(): row[1]
+            for row in conn.execute(
+                "SELECT address, label FROM ble_rssi WHERE label IN (%s) AND address IS NOT NULL"
+                % ",".join("?" * len(presence_labels)),
+                tuple(presence_labels),
+            )
+        } if presence_labels else {}
         # Record this relay's check-in so check_presence() knows it's active
         conn.execute(
             "INSERT OR REPLACE INTO relay_checkin (relay_id, ts) "
@@ -162,8 +174,11 @@ def ble_relay():
                     if rssi is not None:
                         labeled_seen[reading.label] = rssi
 
-            # Presence: record per-relay sighting for union-OR detection in check_presence()
-            presence_label = presence_name_map.get(name) if name else None
+            # Presence: match by BLE name first, then fall back to cached MAC address.
+            # The MAC cache (ble_rssi) is kept current by the main scanner; this lets
+            # the relay recognise devices (e.g. iPhone) that don't broadcast their name.
+            presence_label = (presence_name_map.get(name) if name else None) \
+                          or presence_mac_map.get(address)
             if presence_label:
                 if rssi is not None:
                     upsert_ble_rssi(conn, presence_label, address, rssi)
