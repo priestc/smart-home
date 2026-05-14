@@ -100,21 +100,33 @@ def flash_and_provision(
         flash_args += ["0x8000", str(_PART_BIN)]
     flash_args += ["0x10000", str(_APP_BIN)]
 
-    # Try esptool (newer) then esptool.py (older installs)
-    for esptool_cmd in ("esptool", "esptool.py"):
+    # Resolve esptool binary name (newer installs use "esptool", older use "esptool.py")
+    esptool_cmd = None
+    for candidate in ("esptool", "esptool.py"):
         try:
-            subprocess.run(
-                [esptool_cmd, "--chip", "esp32", "--port", port, "--baud", "460800",
-                 "write-flash"] + flash_args,
-                check=True,
-            )
+            subprocess.run([candidate, "version"], check=True, capture_output=True)
+            esptool_cmd = candidate
             break
         except FileNotFoundError:
             continue
-    else:
-        raise RuntimeError(
-            "esptool not found. Install with: pip install esptool"
-        )
+    if esptool_cmd is None:
+        raise RuntimeError("esptool not found. Install with: pip install esptool")
+
+    # The chip occasionally fails to respond immediately after a reset (timing issue
+    # during boot). Retry the flash up to 3 times with a short delay between attempts.
+    flash_cmd = [esptool_cmd, "--chip", "esp32", "--port", port, "--baud", "460800",
+                 "write-flash"] + flash_args
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            subprocess.run(flash_cmd, check=True)
+            break
+        except subprocess.CalledProcessError:
+            if attempt < max_attempts:
+                print_fn(f"Flash attempt {attempt} failed, retrying in 3 seconds...")
+                time.sleep(3)
+            else:
+                raise
 
     print_fn("Waiting for device to boot...")
     time.sleep(2)
