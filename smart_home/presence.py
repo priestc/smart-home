@@ -5,8 +5,26 @@ from pathlib import Path
 _CONFIG_DIR = Path.home() / ".config" / "smart-home"
 _DATA_DIR = Path.home() / ".local" / "share" / "smart-home"
 _DEVICES_FILE = _CONFIG_DIR / "presence_devices.json"
+_NETWORK_DEVICES_FILE = _CONFIG_DIR / "network_presence.json"
 _STATE_FILE = _CONFIG_DIR / "presence_state.json"
 _HISTORY_FILE = _DATA_DIR / "presence_history.jsonl"
+
+
+def load_network_devices() -> dict[str, str]:
+    """Return {mac_address: label} of registered network presence devices."""
+    if _NETWORK_DEVICES_FILE.exists():
+        try:
+            with open(_NETWORK_DEVICES_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return {}
+
+
+def save_network_devices(devices: dict[str, str]) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_NETWORK_DEVICES_FILE, "w") as f:
+        json.dump(devices, f, indent=2)
 
 
 def load_devices() -> dict[str, str]:

@@ -900,6 +900,24 @@ def _add_presence_device(timeout):
     click.echo(f"\nRegistered '{lbl}' (BLE name: {ble_name!r}) as a presence device.")
 
 
+@main.command("add-network-device")
+def add_network_device():
+    """Register a device for WiFi/network-based presence detection.
+
+    Uses the ARP/neighbor table (ip neigh show) to detect whether the device
+    is on the local network. The MAC address shown in iPhone Settings → Wi-Fi
+    → (i) → Private Wi-Fi Address is stable per network and should be used here.
+    """
+    mac = click.prompt("MAC address (e.g. aa:bb:cc:dd:ee:ff)").strip().lower()
+    label = click.prompt("Display name for this device").strip()
+
+    devices = _presence.load_network_devices()
+    devices[mac] = label
+    _presence.save_network_devices(devices)
+    click.echo(f"\nRegistered '{label}' (MAC: {mac}) for network presence detection.")
+    click.echo("The monitor will check for this device every 10 seconds via the ARP table.")
+
+
 @main.command("configure-push")
 def configure_push():
     """Set up Apple Push Notification (APNs) credentials.
@@ -1414,6 +1432,7 @@ def monitor(duration, verbose, db, no_db):
 
     # presence tracking
     presence_devices = _presence.load_devices()
+    network_devices = _presence.load_network_devices()  # {mac: label}
     presence_last_seen: dict[str, datetime.datetime] = {}
     presence_state = _presence.load_state()
     presence_addr_map: dict[str, str] = {}  # MAC address -> ble_name (for nameless adverts)
@@ -1631,11 +1650,85 @@ def monitor(duration, verbose, db, no_db):
             if changed:
                 _presence.save_state(presence_state)
 
+    async def check_network_presence():
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(10)
+            now = datetime.datetime.now()
+            try:
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: __import__("subprocess").run(
+                        ["ip", "neigh", "show"], capture_output=True, text=True
+                    )
+                )
+                neigh_output = result.stdout
+            except Exception as e:
+                click.echo(f"[{now.strftime('%H:%M:%S')}] Network presence: ip neigh error: {e}")
+                continue
+
+            # Build set of MACs currently reachable (not FAILED)
+            reachable: set[str] = set()
+            for line in neigh_output.splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[-1] != "FAILED":
+                    lladdr_idx = None
+                    for i, p in enumerate(parts):
+                        if p == "lladdr" and i + 1 < len(parts):
+                            lladdr_idx = i + 1
+                            break
+                    if lladdr_idx is not None:
+                        reachable.add(parts[lladdr_idx].lower())
+
+            changed = False
+            for mac, label in network_devices.items():
+                mac_lower = mac.lower()
+                new_status = "home" if mac_lower in reachable else "away"
+                old_status = presence_state.get(label, {}).get("status")
+                if new_status != old_status:
+                    ts = now.strftime("%H:%M:%S")
+                    click.echo(f"[{ts}] Presence (network): {label} is {new_status}")
+                    if new_status == "home":
+                        _fire_auto_open(label)
+                    else:
+                        _auto_open_done.discard(label)
+                        _auto_closed_doors.clear()
+                        for g in _garage.load_config():
+                            configured = g.get("presence_device")
+                            if g.get("auto") and (not configured or configured == label):
+                                try:
+                                    door_status = _garage.get_status(g["ip"])
+                                    if door_status.get("door_closed") is False:
+                                        _garage.trigger(g["ip"], g.get("pulse_seconds", 0.5))
+                                        _auto_closed_doors.add(g["name"])
+                                        click.echo(f"[{ts}] Auto-closing garage '{g['name']}' ({label} left)")
+                                        asyncio.get_running_loop().create_task(
+                                            _verify_and_retry_close(g["name"], g["ip"], g.get("pulse_seconds", 0.5), label)
+                                        )
+                                except Exception as e:
+                                    click.echo(f"[{ts}] Auto-close failed for '{g['name']}': {e}")
+                    _presence.append_history({
+                        "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        "ble_name": label,
+                        "label": label,
+                        "status": new_status,
+                    })
+                    presence_state[label] = {
+                        "name": label,
+                        "status": new_status,
+                        "last_seen": now.isoformat(),
+                    }
+                    changed = True
+            if changed:
+                _presence.save_state(presence_state)
+
     conn = None if no_db else open_db(db)
     if conn:
         click.echo(f"Logging to {db}")
     if presence_devices:
         click.echo(f"Tracking presence for {len(presence_devices)} device(s).")
+    if network_devices:
+        click.echo(f"Tracking network presence for {len(network_devices)} device(s).")
 
     # Load hourly records from DB:
     # {label_key: {hour_of_day: {temp_max, temp_min, humi_max, humi_min}}}
@@ -2512,6 +2605,8 @@ def monitor(duration, verbose, db, no_db):
             extra.append(camera_vitals_loop())
         if presence_devices:
             extra.append(check_presence())
+        if network_devices:
+            extra.append(check_network_presence())
         if ecobee_cfg:
             extra.append(poll_ecobee_loop())
         if ha_cfg:
