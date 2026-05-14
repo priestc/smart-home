@@ -48,7 +48,7 @@
 #include <vector>
 
 #define FIRMWARE_VERSION      "1.5.0"
-#define FIRMWARE_REV          4
+#define FIRMWARE_REV          5
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -186,8 +186,14 @@ static void clearConfig() {
 // ── BLE bonding / pair mode ───────────────────────────────────────────────────
 
 class PairServerCallbacks : public BLEServerCallbacks {
-    void onConnect(BLEServer*) override {
-        Serial.println("Pair: device connected — waiting for bonding...");
+    void onConnect(BLEServer*, esp_ble_gatts_cb_param_t* param) override {
+        Serial.println("Pair: device connected — requesting encryption...");
+        // Peripheral-initiated security request triggers Just-Works SMP pairing
+        // in the connecting central (nRF Connect, iOS, etc.) without needing a
+        // protected characteristic to prompt it.
+        esp_bd_addr_t bda;
+        memcpy(bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+        esp_ble_set_encryption(bda, ESP_BLE_SEC_ENCRYPT_NO_MITM);
     }
     void onDisconnect(BLEServer*) override {
         Serial.println("Pair: device disconnected.");
@@ -236,19 +242,6 @@ static void pairModeStart(const String& label) {
     if (!g_ble_server) {
         g_ble_server = BLEDevice::createServer();
         g_ble_server->setCallbacks(&g_pair_srv_cb);
-
-        // Generic Access service (0x1800) with Device Name (0x2A00) requiring
-        // encryption. When a central reads it and gets "Insufficient Auth", it
-        // automatically initiates SMP Just-Works pairing → bonding completes.
-        BLEService* svc = g_ble_server->createService(BLEUUID((uint16_t)0x1800));
-        BLECharacteristic* chr = svc->createCharacteristic(
-            BLEUUID((uint16_t)0x2A00),
-            BLECharacteristic::PROPERTY_READ
-        );
-        chr->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED);
-        String devname = String("SmHome-") + g_id;
-        chr->setValue((const uint8_t*)devname.c_str(), devname.length());
-        svc->start();
     }
 
     // Advertise using the device name set at init ("SmHome-{relay_id}").
