@@ -768,12 +768,16 @@ def pair_relay(relay_name, label):
     """Bond a BLE device (e.g. iPhone) with a relay for presence detection.
 
     On the next scan cycle (~18 s) the relay will start advertising as
-    'SmHome-<relay_name>'.  Open iPhone Settings > Bluetooth and tap that
-    device to pair.  After bonding, the iPhone will respond to the relay's
-    active scans with its name, enabling presence detection.
+    'SmHome-<relay_name>'.  Open nRF Connect on the iPhone, connect to that
+    device, and bonding completes automatically (Just Works / no PIN).
+
+    iOS Bluetooth Settings does not show custom BLE peripherals — use nRF
+    Connect (Nordic Semiconductor, free on the App Store) instead.
 
     RELAY_NAME is the relay id (e.g. garage).
-    LABEL is the presence device label to assign (e.g. "Chris's iPhone").
+    LABEL is the presence device label (should match the iPhone's display
+    name, e.g. "Chris's iPhone").  The device is auto-registered as a
+    presence entry so it shows up in relay-log once detected.
     """
     from smart_home import relay as _relay
 
@@ -790,11 +794,17 @@ def pair_relay(relay_name, label):
         r["pair_mode"] = label
     _relay.save_relays(relays)
 
+    # Auto-register as a presence device. iPhone BLE name == iPhone display name.
+    devices = _presence.load_devices()
+    devices = {k: v for k, v in devices.items() if v != label}  # remove stale entry
+    devices[label] = label
+    _presence.save_devices(devices)
+
     click.echo(f"Pair mode scheduled for relay '{relay_name}'.")
     click.echo(f"Within ~18 s it will advertise as 'SmHome-{relay_name}'.")
-    click.echo(f"On iPhone: Settings > Bluetooth > tap 'SmHome-{relay_name}'")
-    click.echo(f"The paired device will be registered as: {label}")
-    click.echo("The relay has a 60-second window to complete pairing.")
+    click.echo(f"Open nRF Connect on iPhone, connect to 'SmHome-{relay_name}' — bonding happens automatically.")
+    click.echo(f"'{label}' registered as a presence device.")
+    click.echo("The relay has a 60-second window to complete bonding.")
 
 
 @main.command("import")

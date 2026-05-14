@@ -48,7 +48,7 @@
 #include <vector>
 
 #define FIRMWARE_VERSION      "1.5.0"
-#define FIRMWARE_REV          3
+#define FIRMWARE_REV          4
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -236,6 +236,19 @@ static void pairModeStart(const String& label) {
     if (!g_ble_server) {
         g_ble_server = BLEDevice::createServer();
         g_ble_server->setCallbacks(&g_pair_srv_cb);
+
+        // Generic Access service (0x1800) with Device Name (0x2A00) requiring
+        // encryption. When a central reads it and gets "Insufficient Auth", it
+        // automatically initiates SMP Just-Works pairing → bonding completes.
+        BLEService* svc = g_ble_server->createService(BLEUUID((uint16_t)0x1800));
+        BLECharacteristic* chr = svc->createCharacteristic(
+            BLEUUID((uint16_t)0x2A00),
+            BLECharacteristic::PROPERTY_READ
+        );
+        chr->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED);
+        String devname = String("SmHome-") + g_id;
+        chr->setValue(devname.c_str(), devname.length());
+        svc->start();
     }
 
     // Advertise using the device name set at init ("SmHome-{relay_id}").
