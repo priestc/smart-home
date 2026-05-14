@@ -1,18 +1,24 @@
 /*
  * smart-home BLE relay firmware for ESP32
  *
- * Passive BLE scanner + GATT relay on request.
+ * Active BLE scanner + GATT relay on request.
  *
  * Every ~18 s:
- *   1. Passive BLE scan for 15 s — collects all advertisements.
- *   2. POST batch to /api/ble-relay — server returns any pending GATT tasks.
+ *   1. Active BLE scan for 15 s — collects advertisements + scan responses.
+ *   2. POST batch to /api/ble-relay — server returns any pending GATT/pair tasks.
  *   3. For each GATT task: connect to device, read characteristic, POST result.
+ *   4. If pair_mode received: advertise as "SmHome-{id}", wait for iPhone to bond.
  *
  * Offline resilience:
  *   - NTP-synced clock (UTC) stamps every scan batch.
  *   - Failed batches buffered in RAM (up to MAX_BUFFER entries); replayed
  *     one-per-cycle when the server is reachable again.
  *   - g_presence_last_seen tracks when each named device was last seen locally.
+ *
+ * Presence detection:
+ *   - Active scanning causes iPhones to respond with their name in SCAN_RSP,
+ *     but only after they have bonded with this relay.
+ *   - Use `smart-home pair-relay <name> <label>` to trigger bonding.
  *
  * On first boot (or after RESET_CONFIG command on serial): waits for JSON
  * config over serial, stores in NVS, reboots.
@@ -32,6 +38,9 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 #include <BLEClient.h>
+#include <BLEServer.h>
+#include <BLESecurity.h>
+#include <BLEAdvertising.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <time.h>
@@ -39,7 +48,7 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.4.0"
+#define FIRMWARE_VERSION      "1.5.0"
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -89,6 +98,12 @@ struct GattTask {
 };
 
 static std::vector<GattTask> g_gatt_tasks;
+
+// ── Pair mode state ───────────────────────────────────────────────────────────
+
+static bool   g_pair_mode   = false;  // set by server response; cleared when mode starts
+static String g_pair_label;           // label to assign to the newly bonded device
+static volatile bool g_bonded = false; // set by security callback on success
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -166,6 +181,91 @@ static void clearConfig() {
     p.begin("relay", false);
     p.clear();
     p.end();
+}
+
+// ── BLE bonding / pair mode ───────────────────────────────────────────────────
+
+class PairServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer*) override {
+        Serial.println("Pair: device connected — waiting for bonding...");
+    }
+    void onDisconnect(BLEServer*) override {
+        Serial.println("Pair: device disconnected.");
+    }
+};
+
+class PairSecCallbacks : public BLESecurityCallbacks {
+    bool     onSecurityRequest()            override { return true; }
+    uint32_t onPassKeyRequest()             override { return 0; }
+    void     onPassKeyNotify(uint32_t pin)  override { Serial.printf("Pair PIN: %06u\n", pin); }
+    bool     onConfirmPIN(uint32_t)         override { return true; }
+    bool     onAuthorizationRequest(uint16_t, uint16_t, bool) override { return true; }
+    void     onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) override {
+        if (cmpl.success) {
+            g_bonded = true;
+            Serial.println("Pair: bonding successful!");
+        } else {
+            Serial.printf("Pair: bonding failed (reason %d)\n", (int)cmpl.fail_reason);
+        }
+    }
+};
+
+static PairServerCallbacks g_pair_srv_cb;
+static PairSecCallbacks    g_pair_sec_cb;
+static BLEServer*          g_ble_server = nullptr;
+
+// Advertise as "SmHome-{relay_id}" and wait for the user's iPhone to bond.
+// After bonding, iOS will respond to our active-scan SCAN_REQ with its name,
+// enabling name-based presence detection.
+static void pairModeStart(const String& label) {
+    g_pair_mode = false;  // consumed
+    g_bonded    = false;
+
+    Serial.printf("=== Pair mode: label='%s' ===\n", label.c_str());
+    Serial.println("Stopping scanner...");
+    BLEDevice::getScan()->stop();
+    delay(300);
+
+    // Configure security: bonding, Just Works (no MITM), Secure Connections
+    BLESecurity::setAuthenticationMode(true, false, true);
+    BLESecurity::setCapability(ESP_IO_CAP_NONE);
+    BLESecurity::setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+    BLESecurity::setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+    BLEDevice::setSecurityCallbacks(&g_pair_sec_cb);
+
+    if (!g_ble_server) {
+        g_ble_server = BLEDevice::createServer();
+        g_ble_server->setCallbacks(&g_pair_srv_cb);
+    }
+
+    String adv_name = String("SmHome-") + g_id;
+    BLEAdvertising* adv = BLEDevice::getAdvertising();
+    BLEAdvertisementData adv_data;
+    adv_data.setFlags(ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT);
+    adv->setAdvertisementData(adv_data);
+    BLEAdvertisementData scan_rsp;
+    scan_rsp.setName(adv_name.c_str());
+    adv->setScanResponseData(scan_rsp);
+    adv->start();
+
+    Serial.printf("Advertising as '%s'\n", adv_name.c_str());
+    Serial.printf("On iPhone: Settings > Bluetooth > tap '%s' to pair\n", adv_name.c_str());
+    Serial.println("Waiting up to 60 seconds...");
+
+    unsigned long deadline = millis() + 60000;
+    while (millis() < deadline && !g_bonded) {
+        delay(100);
+    }
+
+    adv->stop();
+    delay(200);
+
+    if (g_bonded) {
+        Serial.printf("Pair complete! '%s' will now appear in presence detection.\n",
+                      label.c_str());
+    } else {
+        Serial.println("Pair mode timed out (60 s) — no bonding occurred.");
+    }
 }
 
 // ── Provisioning mode ─────────────────────────────────────────────────────────
@@ -281,6 +381,13 @@ static bool httpPost(const String& payload, bool parse_gatt) {
                     g_gatt_tasks.push_back(gt);
                     Serial.printf("GATT task queued: %s  type=%s\n",
                                   gt.address.c_str(), gt.device_type.c_str());
+                }
+                // Check for pair mode instruction from server
+                if (rdoc["pair_mode"].is<JsonObject>()) {
+                    g_pair_label = rdoc["pair_mode"]["label"].as<String>();
+                    g_pair_mode  = true;
+                    Serial.printf("Pair mode requested for label: '%s'\n",
+                                  g_pair_label.c_str());
                 }
                 Serial.printf("POST 200 (%d inserted)\n", rdoc["inserted"].as<int>());
             }
@@ -491,6 +598,9 @@ void loop() {
 
     if (!g_gatt_tasks.empty())
         processGattTasks();
+
+    if (g_pair_mode)
+        pairModeStart(g_pair_label);
 
     unsigned long elapsed = millis() - cycle_start;
     const unsigned long MIN_DELAY = 3000UL;

@@ -232,14 +232,27 @@ def ble_relay():
         # Atomically claim any pending GATT tasks queued for this relay
         pending_tasks = _relay.claim_pending_tasks(conn, relay_cfg["id"])
 
-    return jsonify({
+    response: dict = {
         "ok": True,
         "inserted": inserted,
         "gatt_tasks": [
             {"id": t["id"], "address": t["address"], "device_type": t["device_type"]}
             for t in pending_tasks
         ],
-    })
+    }
+
+    # If pair mode was requested for this relay, include it once then clear it.
+    pair_label = relay_cfg.get("pair_mode")
+    if pair_label:
+        response["pair_mode"] = {"label": pair_label}
+        relays = _relay.load_relays()
+        for r in relays:
+            if r.get("token") == token:
+                r.pop("pair_mode", None)
+                break
+        _relay.save_relays(relays)
+
+    return jsonify(response)
 
 
 @app.post("/api/ble-relay/gatt-result")

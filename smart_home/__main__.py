@@ -703,6 +703,41 @@ def add_relay():
     click.echo(f"It will POST to {server_url}/api/ble-relay every ~18 seconds.")
 
 
+@main.command("pair-relay")
+@click.argument("relay_name")
+@click.argument("label")
+def pair_relay(relay_name, label):
+    """Bond a BLE device (e.g. iPhone) with a relay for presence detection.
+
+    On the next scan cycle (~18 s) the relay will start advertising as
+    'SmHome-<relay_name>'.  Open iPhone Settings > Bluetooth and tap that
+    device to pair.  After bonding, the iPhone will respond to the relay's
+    active scans with its name, enabling presence detection.
+
+    RELAY_NAME is the relay id (e.g. garage).
+    LABEL is the presence device label to assign (e.g. "Chris's iPhone").
+    """
+    from smart_home import relay as _relay
+
+    relays = _relay.load_relays()
+    relay = next((r for r in relays if r["id"] == relay_name), None)
+    if relay is None:
+        click.echo(f"Error: relay '{relay_name}' not found.", err=True)
+        known = [r["id"] for r in relays]
+        if known:
+            click.echo(f"Known relays: {', '.join(known)}", err=True)
+        return
+
+    relay["pair_mode"] = label
+    _relay.save_relays(relays)
+
+    click.echo(f"Pair mode scheduled for relay '{relay_name}'.")
+    click.echo(f"Within ~18 s it will advertise as 'SmHome-{relay_name}'.")
+    click.echo(f"On iPhone: Settings > Bluetooth > tap 'SmHome-{relay_name}'")
+    click.echo(f"The paired device will be registered as: {label}")
+    click.echo("The relay has a 60-second window to complete pairing.")
+
+
 @main.command("import")
 @click.argument("zipfile_path", metavar="ZIPFILE")
 @click.option("--label", required=True, help="Label to assign to all imported readings.")
