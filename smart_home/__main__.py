@@ -1414,9 +1414,10 @@ def monitor(duration, verbose, db, no_db):
                             (label,)
                         ).fetchone()
                         relay_seeing = row is not None
-                        # Also get most recent sighting ts for display
+                        # Best known last-seen across all relays (includes offline sightings)
                         row2 = conn.execute(
-                            "SELECT MAX(ts) FROM relay_presence_sighting WHERE label=?",
+                            "SELECT MAX(COALESCE(last_seen_ts, ts)) "
+                            "FROM relay_presence_sighting WHERE label=?",
                             (label,)
                         ).fetchone()
                         if row2 and row2[0]:

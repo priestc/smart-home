@@ -66,6 +66,22 @@ def ble_relay():
     advertisements = data.get("advertisements") or []
     label_map = _labels.load()
 
+    # batch_ts is a UTC timestamp from the relay's NTP-synced clock.
+    # Convert to server local time so it's consistent with datetime.now() readings.
+    raw_batch_ts = data.get("batch_ts")
+    batch_ts_local: str | None = None
+    if raw_batch_ts:
+        try:
+            dt_utc = datetime.datetime.strptime(raw_batch_ts, "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc
+            )
+            batch_ts_local = dt_utc.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            pass
+
+    # presence_last_seen: {ble_name: utc_ts} — relay's local record of last sightings
+    relay_presence_last_seen = data.get("presence_last_seen") or {}
+
     # Minimal stand-ins for bleak's BLEDevice / AdvertisementData so we can
     # reuse the existing is_* detection functions without modification.
     class _Dev:
@@ -136,7 +152,7 @@ def ble_relay():
             if reading is not None:
                 reading.label = label_map.get(address)
                 if reading.label:
-                    insert_reading(conn, reading)
+                    insert_reading(conn, reading, batch_ts_local)
                     inserted += 1
 
             # Presence: record per-relay sighting for union-OR detection in check_presence()
@@ -149,6 +165,27 @@ def ble_relay():
                     "VALUES (?, ?, strftime('%Y-%m-%d %H:%M:%S','now'))",
                     (relay_cfg["id"], presence_label)
                 )
+
+        # Update last_seen_ts for presence devices the relay tracked while offline.
+        # Only advances the stored value — never overwrites a newer timestamp.
+        for ble_name, utc_ts in relay_presence_last_seen.items():
+            label = presence_name_map.get(ble_name)
+            if not label:
+                continue
+            try:
+                dt_utc = datetime.datetime.strptime(utc_ts, "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=datetime.timezone.utc
+                )
+                local_ts = dt_utc.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            except (ValueError, TypeError):
+                continue
+            conn.execute(
+                "UPDATE relay_presence_sighting "
+                "SET last_seen_ts = ? "
+                "WHERE relay_id = ? AND label = ? "
+                "AND (last_seen_ts IS NULL OR last_seen_ts < ?)",
+                (local_ts, relay_cfg["id"], label, local_ts),
+            )
 
         # Atomically claim any pending GATT tasks queued for this relay
         pending_tasks = _relay.claim_pending_tasks(conn, relay_cfg["id"])

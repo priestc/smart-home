@@ -8,6 +8,15 @@
  *   2. POST batch to /api/ble-relay — server returns any pending GATT tasks.
  *   3. For each GATT task: connect to device, read characteristic, POST result.
  *
+ * Offline resilience:
+ *   - NTP-synced clock (UTC) stamps every scan batch.
+ *   - Failed batches are buffered in RAM (up to MAX_BUFFER entries); replayed
+ *     one-per-cycle when the server is reachable again so temperature readings
+ *     have no gaps.
+ *   - g_presence_last_seen tracks when each named device was last seen locally;
+ *     included in every live POST so the server has accurate last-seen times
+ *     even after an offline period.
+ *
  * On first boot (or after RESET_CONFIG command on serial): waits for JSON
  * config over serial, stores in NVS, reboots.
  *
@@ -27,18 +36,20 @@
 #include <BLEClient.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include <time.h>
 #include <map>
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION "1.1.0"
-#define BAUD_RATE         115200
-#define SCAN_SECONDS      15
-#define POST_INTERVAL_MS  18000UL
-#define PROVISION_TIMEOUT_MS 60000UL
-#define BOOT_PROBE_MS     3000UL
-#define HTTP_TIMEOUT_MS   10000
-#define GATT_TIMEOUT_MS   12000
+#define FIRMWARE_VERSION      "1.2.0"
+#define BAUD_RATE              115200
+#define SCAN_SECONDS           15
+#define POST_INTERVAL_MS       18000UL
+#define PROVISION_TIMEOUT_MS   60000UL
+#define BOOT_PROBE_MS          3000UL
+#define HTTP_TIMEOUT_MS        10000
+#define GATT_TIMEOUT_MS        12000
+#define MAX_BUFFER             30     // max buffered batches before dropping oldest
 
 // GATT characteristic UUIDs (must match smart_home/pool.py)
 static const uint16_t YC01_SVC_UUID16  = 0xFF00;
@@ -50,7 +61,7 @@ static char g_url[128];
 static char g_token[64];
 static char g_id[32];
 
-// ── Advertisement buffer ─────────────────────────────────────────────────────
+// ── Advertisement buffer ──────────────────────────────────────────────────────
 
 struct DevInfo {
     String name;
@@ -65,6 +76,24 @@ struct DevInfo {
 
 static std::map<std::string, DevInfo> g_seen;
 
+// ── Offline resilience state ──────────────────────────────────────────────────
+
+static String g_scan_ts;                                    // NTP timestamp at scan start
+static std::map<std::string, String> g_presence_last_seen;  // BLE name -> last_seen_ts (UTC)
+static std::vector<String> g_batch_queue;                   // serialised failed batch payloads
+
+// ── GATT task queue ───────────────────────────────────────────────────────────
+
+struct GattTask {
+    String task_id;
+    String address;
+    String device_type;
+};
+
+static std::vector<GattTask> g_gatt_tasks;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 static String hexEncode(const uint8_t* data, size_t len) {
     String out;
     out.reserve(len * 2);
@@ -75,6 +104,17 @@ static String hexEncode(const uint8_t* data, size_t len) {
     }
     return out;
 }
+
+// Returns current UTC time as "YYYY-MM-DD HH:MM:SS", or "" if NTP not synced.
+static String getTimestamp() {
+    struct tm ti;
+    if (!getLocalTime(&ti)) return "";
+    char buf[20];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &ti);
+    return String(buf);
+}
+
+// ── BLE advertisement callback ────────────────────────────────────────────────
 
 class AdvCallback : public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice dev) override {
@@ -88,9 +128,9 @@ class AdvCallback : public BLEAdvertisedDeviceCallbacks {
         if (dev.haveManufacturerData()) {
             String mfr = dev.getManufacturerData();
             if (mfr.length() >= 2) {
-                info.has_mfr    = true;
+                info.has_mfr     = true;
                 info.mfr_company = (uint8_t)mfr[0] | ((uint8_t)mfr[1] << 8);
-                info.mfr_hex    = hexEncode((const uint8_t*)mfr.c_str() + 2, mfr.length() - 2);
+                info.mfr_hex     = hexEncode((const uint8_t*)mfr.c_str() + 2, mfr.length() - 2);
             }
         }
         if (dev.haveServiceData()) {
@@ -98,25 +138,21 @@ class AdvCallback : public BLEAdvertisedDeviceCallbacks {
             String uuid  = dev.getServiceDataUUID().toString().c_str();
             uuid.toLowerCase();
             info.svc_uuid = uuid;
-            String svc = dev.getServiceData();
+            String svc   = dev.getServiceData();
             info.svc_hex = hexEncode((const uint8_t*)svc.c_str(), svc.length());
         }
         if (info.name.length() || info.has_mfr || info.has_svc)
             g_seen[addr] = info;
+
+        // Keep rolling track of when each named device was last seen locally.
+        // g_scan_ts is set once per cycle so all devices in the same scan share
+        // the same timestamp.
+        if (info.name.length() && g_scan_ts.length())
+            g_presence_last_seen[info.name.c_str()] = g_scan_ts;
     }
 };
 
 static AdvCallback g_cb;
-
-// ── GATT task queue ───────────────────────────────────────────────────────────
-
-struct GattTask {
-    String task_id;
-    String address;
-    String device_type;
-};
-
-static std::vector<GattTask> g_gatt_tasks;
 
 // ── Config helpers ────────────────────────────────────────────────────────────
 
@@ -172,10 +208,9 @@ static void provisionMode() {
     Serial.flush();
 }
 
-// ── WiFi ──────────────────────────────────────────────────────────────────────
+// ── WiFi + NTP ────────────────────────────────────────────────────────────────
 
 static void connectWiFi() {
-    // Build hostname: "smart-home-relay-patio" (hyphens only — underscores are invalid in DNS)
     String hostname = String("smart-home-relay-") + g_id;
     hostname.replace("_", "-");
     WiFi.setHostname(hostname.c_str());
@@ -185,43 +220,104 @@ static void connectWiFi() {
         delay(500);
         Serial.print(".");
     }
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("\nWiFi OK: %s\n", WiFi.localIP().toString().c_str());
-        MDNS.begin(WiFi.getHostname());
-        Serial.printf("Server URL: %s\n", g_url);
-        // Resolve server hostname once and print result for diagnostics
-        String host = String(g_url);
-        int schemeEnd = host.indexOf("://");
-        if (schemeEnd >= 0) host = host.substring(schemeEnd + 3);
-        int slashPos = host.indexOf('/');
-        if (slashPos >= 0) host = host.substring(0, slashPos);
-        int colonPos = host.indexOf(':');
-        if (colonPos >= 0) host = host.substring(0, colonPos);
-        IPAddress resolved;
-        if (WiFi.hostByName(host.c_str(), resolved))
-            Serial.printf("DNS OK: %s -> %s\n", host.c_str(), resolved.toString().c_str());
-        else
-            Serial.printf("DNS FAILED: could not resolve '%s'\n", host.c_str());
-    } else {
+    if (WiFi.status() != WL_CONNECTED) {
         Serial.println("\nWiFi connect failed — will retry");
+        return;
     }
+
+    Serial.printf("\nWiFi OK: %s\n", WiFi.localIP().toString().c_str());
+    MDNS.begin(WiFi.getHostname());
+    Serial.printf("Server URL: %s\n", g_url);
+
+    // NTP time sync (UTC, no DST offset)
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+    Serial.print("NTP sync");
+    struct tm ti;
+    int ntpTries = 0;
+    while (!getLocalTime(&ti) && ntpTries++ < 20) {
+        delay(500);
+        Serial.print(".");
+    }
+    if (getLocalTime(&ti)) {
+        char buf[20];
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &ti);
+        Serial.printf("\nNTP OK: %s UTC\n", buf);
+    } else {
+        Serial.println("\nNTP FAILED — batch timestamps will be omitted");
+    }
+
+    // Resolve server hostname for diagnostics
+    String host = String(g_url);
+    int schemeEnd = host.indexOf("://");
+    if (schemeEnd >= 0) host = host.substring(schemeEnd + 3);
+    int slashPos = host.indexOf('/');
+    if (slashPos >= 0) host = host.substring(0, slashPos);
+    int colonPos = host.indexOf(':');
+    if (colonPos >= 0) host = host.substring(0, colonPos);
+    IPAddress resolved;
+    if (WiFi.hostByName(host.c_str(), resolved))
+        Serial.printf("DNS OK: %s -> %s\n", host.c_str(), resolved.toString().c_str());
+    else
+        Serial.printf("DNS FAILED: could not resolve '%s'\n", host.c_str());
 }
 
-// ── BLE advertisement batch POST ──────────────────────────────────────────────
+// ── HTTP POST to /api/ble-relay ───────────────────────────────────────────────
 
-static void postBatch() {
-    Serial.printf("Scan: %u devices\n", (unsigned)g_seen.size());
-    if (g_seen.empty()) return;
+// Returns true on HTTP 200.
+// If out_tasks is non-null, parses GATT tasks from the 200 response body.
+static bool httpPost(const String& payload, std::vector<GattTask>* out_tasks) {
+    HTTPClient http;
+    http.begin(String(g_url) + "/api/ble-relay");
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", String("Bearer ") + g_token);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    int code = http.POST(const_cast<String&>(payload));
 
+    if (code == 200) {
+        if (out_tasks) {
+            String resp = http.getString();
+            JsonDocument rdoc;
+            if (deserializeJson(rdoc, resp) == DeserializationError::Ok) {
+                JsonArray tasks = rdoc["gatt_tasks"];
+                for (JsonObject t : tasks) {
+                    GattTask gt;
+                    gt.task_id     = t["id"].as<String>();
+                    gt.address     = t["address"].as<String>();
+                    gt.device_type = t["device_type"].as<String>();
+                    out_tasks->push_back(gt);
+                    Serial.printf("GATT task queued: %s  type=%s\n",
+                                  gt.address.c_str(), gt.device_type.c_str());
+                }
+                Serial.printf("POST 200 (%d inserted)\n", rdoc["inserted"].as<int>());
+            }
+        }
+        http.end();
+        return true;
+    }
+
+    const char* reason = (code == -1) ? "connection refused/no route" :
+                         (code == -4) ? "not connected" :
+                         (code == -11) ? "read timeout" : "error";
+    Serial.printf("POST failed: %d (%s) url=%s\n", code, reason, g_url);
+    http.end();
+    return false;
+}
+
+// ── Batch payload builder ─────────────────────────────────────────────────────
+
+// Serialise g_seen into a JSON payload using g_scan_ts as the batch timestamp.
+// If include_presence is true, appends the presence_last_seen map so the server
+// can record accurate last-seen times that span offline periods.
+static String buildPayload(bool include_presence) {
     JsonDocument doc;
     doc["relay_id"] = g_id;
-    JsonArray arr = doc["advertisements"].to<JsonArray>();
+    if (g_scan_ts.length()) doc["batch_ts"] = g_scan_ts;
 
+    JsonArray arr = doc["advertisements"].to<JsonArray>();
     for (auto& kv : g_seen) {
         JsonObject obj = arr.add<JsonObject>();
         obj["address"] = kv.first.c_str();
-        if (kv.second.name.length())
-            obj["name"] = kv.second.name;
+        if (kv.second.name.length()) obj["name"] = kv.second.name;
         obj["rssi"] = kv.second.rssi;
         if (kv.second.has_mfr) {
             JsonObject mfr = obj["manufacturer_data"].to<JsonObject>();
@@ -233,40 +329,49 @@ static void postBatch() {
         }
     }
 
+    if (include_presence && !g_presence_last_seen.empty()) {
+        JsonObject pls = doc["presence_last_seen"].to<JsonObject>();
+        for (auto& kv : g_presence_last_seen)
+            pls[kv.first.c_str()] = kv.second;
+    }
+
     String payload;
     serializeJson(doc, payload);
+    return payload;
+}
 
-    HTTPClient http;
-    http.begin(String(g_url) + "/api/ble-relay");
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("Authorization", String("Bearer ") + g_token);
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    int code = http.POST(payload);
+// ── BLE advertisement batch POST with buffering ───────────────────────────────
 
-    if (code == 200) {
-        // Parse response for pending GATT tasks
-        String resp = http.getString();
-        JsonDocument rdoc;
-        if (deserializeJson(rdoc, resp) == DeserializationError::Ok) {
-            JsonArray tasks = rdoc["gatt_tasks"];
-            for (JsonObject t : tasks) {
-                GattTask gt;
-                gt.task_id    = t["id"].as<String>();
-                gt.address    = t["address"].as<String>();
-                gt.device_type = t["device_type"].as<String>();
-                g_gatt_tasks.push_back(gt);
-                Serial.printf("GATT task queued: %s  type=%s\n",
-                              gt.address.c_str(), gt.device_type.c_str());
-            }
-        }
-        Serial.printf("POST 200 (%d inserted)\n", rdoc["inserted"].as<int>());
-    } else {
-        const char* reason = (code == -1) ? "connection refused/no route" :
-                             (code == -4) ? "not connected" :
-                             (code == -11) ? "read timeout" : "error";
-        Serial.printf("POST failed: %d (%s) url=%s\n", code, reason, g_url);
+static void bufferPush(const String& payload) {
+    if (g_batch_queue.size() >= MAX_BUFFER) {
+        g_batch_queue.erase(g_batch_queue.begin());
+        Serial.println("Buffer full — dropped oldest batch");
     }
-    http.end();
+    g_batch_queue.push_back(payload);
+}
+
+static void postBatch() {
+    Serial.printf("Scan: %u devices  buffer=%u\n",
+                  (unsigned)g_seen.size(), (unsigned)g_batch_queue.size());
+
+    // Drain one buffered batch first (oldest first, no GATT parsing needed)
+    if (!g_batch_queue.empty()) {
+        if (httpPost(g_batch_queue.front(), nullptr)) {
+            g_batch_queue.erase(g_batch_queue.begin());
+            Serial.printf("Buffered batch sent, %u remaining\n", (unsigned)g_batch_queue.size());
+        } else {
+            // Server still unreachable — buffer current scan and give up for this cycle
+            if (!g_seen.empty()) bufferPush(buildPayload(false));
+            return;
+        }
+    }
+
+    if (g_seen.empty()) return;
+
+    // Send the current batch. Include presence_last_seen so the server knows
+    // the most recent local sighting even if prior batches were dropped.
+    if (!httpPost(buildPayload(true), &g_gatt_tasks))
+        bufferPush(buildPayload(false));
 }
 
 // ── GATT helpers ──────────────────────────────────────────────────────────────
@@ -307,12 +412,11 @@ static void processGattTasks() {
         BLEClient* client = BLEDevice::createClient();
         client->setMTU(23);
 
-        // Try to connect by address (works even without a prior scan)
         if (client->connect(BLEAddress(task.address.c_str(), BLE_ADDR_TYPE_PUBLIC),
                             BLE_ADDR_TYPE_PUBLIC, GATT_TIMEOUT_MS / 1000)) {
 
-            BLERemoteService*        svc  = nullptr;
-            BLERemoteCharacteristic* chr  = nullptr;
+            BLERemoteService*        svc = nullptr;
+            BLERemoteCharacteristic* chr = nullptr;
 
             if (task.device_type == "yc01") {
                 svc = client->getService(BLEUUID(YC01_SVC_UUID16));
@@ -356,7 +460,7 @@ void setup() {
                 clearConfig();
                 Serial.println("CONFIG_CLEARED");
                 Serial.flush();
-                break;  // handled — exit probe window immediately
+                break;
             }
         }
         delay(50);
@@ -371,7 +475,8 @@ void setup() {
     connectWiFi();
     String ble_name = String("smart-home_relay_") + g_id;
     BLEDevice::init(ble_name.c_str());
-    Serial.printf("BLE relay ready  id=%s  ble=%s  fw=%s\n", g_id, ble_name.c_str(), FIRMWARE_VERSION);
+    Serial.printf("BLE relay ready  id=%s  ble=%s  fw=%s\n",
+                  g_id, ble_name.c_str(), FIRMWARE_VERSION);
 }
 
 void loop() {
@@ -384,9 +489,11 @@ void loop() {
         return;
     }
 
-    // ── Passive BLE scan ─────────────────────────────────────────────────────
     g_seen.clear();
     g_gatt_tasks.clear();
+
+    // Stamp this scan cycle with the current UTC time
+    g_scan_ts = getTimestamp();
 
     BLEScan* scan = BLEDevice::getScan();
     scan->setAdvertisedDeviceCallbacks(&g_cb, false);
@@ -396,14 +503,11 @@ void loop() {
     scan->start(SCAN_SECONDS, false);
     scan->clearResults();
 
-    // ── Post advertisements; receive GATT tasks in response ──────────────────
     postBatch();
 
-    // ── Execute any GATT tasks (scan is stopped, no conflict) ─────────────────
     if (!g_gatt_tasks.empty())
         processGattTasks();
 
-    // ── Wait for next cycle ───────────────────────────────────────────────────
     unsigned long elapsed = millis() - cycle_start;
     const unsigned long MIN_DELAY = 3000UL;
     if (POST_INTERVAL_MS > elapsed + MIN_DELAY)

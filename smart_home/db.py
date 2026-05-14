@@ -187,12 +187,18 @@ def open_db(path: str) -> sqlite3.Connection:
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS relay_presence_sighting (
-            relay_id TEXT NOT NULL,
-            label    TEXT NOT NULL,
-            ts       TEXT NOT NULL,
+            relay_id     TEXT NOT NULL,
+            label        TEXT NOT NULL,
+            ts           TEXT NOT NULL,
+            last_seen_ts TEXT,
             PRIMARY KEY (relay_id, label)
         )
     """)
+    try:
+        conn.execute("ALTER TABLE relay_presence_sighting ADD COLUMN last_seen_ts TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     return conn
 
@@ -206,8 +212,9 @@ def upsert_ble_rssi(conn: sqlite3.Connection, label: str, address: str | None, r
     conn.commit()
 
 
-def insert_reading(conn: sqlite3.Connection, reading) -> None:
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def insert_reading(conn: sqlite3.Connection, reading, ts: str | None = None) -> None:
+    if ts is None:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
         "INSERT OR IGNORE INTO readings (ts, address, label, temp_f, humidity, rssi, battery, raw_reading) VALUES (?,?,?,?,?,?,?,?)",
         (ts, reading.address, reading.label, reading.temp_f, reading.humidity, reading.rssi, reading.battery, reading.raw_reading),
