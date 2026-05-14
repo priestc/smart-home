@@ -76,27 +76,6 @@ def firmware_missing_message() -> str:
     )
 
 
-def rebuild_firmware(print_fn=print) -> bool:
-    """Rebuild firmware from source using arduino-cli. Returns True if successful."""
-    import subprocess
-    try:
-        subprocess.run(["arduino-cli", "version"], check=True, capture_output=True)
-    except FileNotFoundError:
-        return False
-
-    print_fn("Rebuilding firmware from source...")
-    try:
-        subprocess.run(
-            ["bash", str(FIRMWARE_DIR / "build.sh")],
-            check=True,
-            cwd=str(FIRMWARE_DIR),
-        )
-        return True
-    except subprocess.CalledProcessError:
-        print_fn("Warning: firmware build failed, falling back to pre-built binary.")
-        return False
-
-
 def flash_and_provision(
     port: str,
     relay_id: str,
@@ -110,8 +89,6 @@ def flash_and_provision(
     import subprocess
     import time
     import serial  # pyserial
-
-    rebuild_firmware(print_fn)
 
     if not _APP_BIN.exists():
         raise FileNotFoundError(firmware_missing_message())
