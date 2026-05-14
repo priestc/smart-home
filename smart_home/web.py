@@ -213,8 +213,8 @@ def ble_relay():
         # Log this relay check-in for `smart-home relay-log`
         import json as _json
         conn.execute(
-            "INSERT INTO relay_log (ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json, labeled_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO relay_log (ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json, labeled_json, rev) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                 relay_cfg["id"],
@@ -223,6 +223,7 @@ def ble_relay():
                 inserted,
                 _json.dumps(relay_presence_last_seen) if relay_presence_last_seen else None,
                 _json.dumps(labeled_seen) if labeled_seen else None,
+                data.get("rev"),
             ),
         )
         conn.execute(

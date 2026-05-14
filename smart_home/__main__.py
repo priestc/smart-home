@@ -572,7 +572,7 @@ def relay_log(db):
     try:
         while True:
             rows = conn.execute(
-                "SELECT id, ts, relay_id, batch_ts, n_adverts, n_inserted, labeled_json "
+                "SELECT id, ts, relay_id, batch_ts, n_adverts, n_inserted, labeled_json, rev "
                 "FROM relay_log WHERE id > ? ORDER BY id",
                 (last_id,),
             ).fetchall()
@@ -580,8 +580,10 @@ def relay_log(db):
                 last_id = row["id"]
                 ts_utc = datetime.datetime.strptime(row["ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
                 ts = ts_utc.astimezone().strftime("%H:%M:%S")
+                rev_str = f"r{row['rev']}" if row["rev"] is not None else "r?"
                 parts = [click.style(f"[{ts}]", fg="cyan"),
                          click.style(f"{row['relay_id']:<14}", fg="yellow"),
+                         click.style(rev_str, fg="blue"),
                          f"{row['n_adverts']:>3} devices"]
                 if row["batch_ts"]:
                     try:

@@ -49,6 +49,7 @@
 #include <vector>
 
 #define FIRMWARE_VERSION      "1.5.0"
+#define FIRMWARE_REV          1
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -409,6 +410,7 @@ static bool httpPost(const String& payload, bool parse_gatt) {
 static String buildPayload(bool include_presence) {
     JsonDocument doc;
     doc["relay_id"] = g_id;
+    doc["rev"] = FIRMWARE_REV;
     if (g_scan_ts.length()) doc["batch_ts"] = g_scan_ts;
 
     JsonArray arr = doc["advertisements"].to<JsonArray>();
