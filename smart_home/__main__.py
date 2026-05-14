@@ -1688,8 +1688,8 @@ def monitor(duration, verbose, db, no_db):
                 mac_lower = mac.lower()
                 new_status = "home" if mac_lower in reachable else "away"
                 old_status = presence_state.get(label, {}).get("status")
+                ts = now.strftime("%H:%M:%S")
                 if new_status != old_status:
-                    ts = now.strftime("%H:%M:%S")
                     click.echo(f"[{ts}] Presence (network): {label} is {new_status}")
                     if new_status == "home":
                         _fire_auto_open(label)
@@ -1716,12 +1716,13 @@ def monitor(duration, verbose, db, no_db):
                         "label": label,
                         "status": new_status,
                     })
-                    presence_state[label] = {
-                        "name": label,
-                        "status": new_status,
-                        "last_seen": now.isoformat(),
-                    }
-                    changed = True
+                # Always update state entry (keeps last_seen current and picks up status changes)
+                presence_state[label] = {
+                    "name": label,
+                    "status": new_status,
+                    "last_seen": now.isoformat() if new_status == "home" else presence_state.get(label, {}).get("last_seen"),
+                }
+                changed = True
             if changed:
                 _presence.save_state(presence_state)
 
@@ -1731,7 +1732,10 @@ def monitor(duration, verbose, db, no_db):
     if presence_devices:
         click.echo(f"Tracking presence for {len(presence_devices)} device(s).")
     if network_devices:
-        click.echo(f"Tracking network presence for {len(network_devices)} device(s).")
+        click.echo(f"Tracking network presence for {len(network_devices)} device(s):")
+        for mac, label in network_devices.items():
+            init_status = presence_state.get(label, {}).get("status", "unknown")
+            click.echo(f"  {label} ({mac}): {init_status}")
 
     # Load hourly records from DB:
     # {label_key: {hour_of_day: {temp_max, temp_min, humi_max, humi_min}}}
