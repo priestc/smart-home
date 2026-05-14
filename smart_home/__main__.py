@@ -705,6 +705,62 @@ def add_relay():
     click.echo(f"It will POST to {server_url}/api/ble-relay every ~18 seconds.")
 
 
+@main.command("update-relay")
+def update_relay():
+    """Flash new firmware onto an existing relay, preserving its configuration.
+
+    Unlike add-relay, this does not reset or re-provision the device.
+    The relay's WiFi credentials, token, and name stored in NVS are kept intact.
+    """
+    from smart_home import relay as _relay
+
+    relays = _relay.load_relays()
+    seen: set = set()
+    unique: list = []
+    for r in relays:
+        if r["id"] not in seen:
+            seen.add(r["id"])
+            unique.append(r)
+
+    if not unique:
+        click.echo("No relays registered. Use add-relay to provision one first.")
+        return
+
+    click.echo("Which relay do you want to update?\n")
+    for i, r in enumerate(unique, 1):
+        click.echo(f"  {i}. {r['id']}")
+    choice = click.prompt("\nEnter choice", type=click.IntRange(1, len(unique)))
+    relay_id = unique[choice - 1]["id"]
+
+    ports = _relay.detect_serial_ports()
+    if not ports:
+        click.echo("\nNo USB serial ports detected. Plug in the relay and try again.")
+        return
+
+    if len(ports) == 1:
+        port = ports[0]
+        click.echo(f"\nDetected serial port: {port}")
+    else:
+        click.echo(f"\nFound {len(ports)} serial port(s):\n")
+        for i, p in enumerate(ports, 1):
+            click.echo(f"  {i}. {p}")
+        idx = click.prompt("Which port is the relay?", type=click.IntRange(1, len(ports)))
+        port = ports[idx - 1]
+
+    click.echo(f"\nFlashing firmware to relay '{relay_id}' at {port} ...")
+    click.echo("WiFi credentials and token stored on the device will be preserved.\n")
+    try:
+        _relay.flash_firmware(port, print_fn=click.echo)
+    except (FileNotFoundError, RuntimeError) as e:
+        click.echo(f"\nError: {e}")
+        return
+    except Exception as e:
+        click.echo(f"\nFlash failed: {e}")
+        return
+
+    click.echo(f"\nDone. Relay '{relay_id}' is running the new firmware.")
+
+
 @main.command("pair-relay")
 @click.argument("relay_name")
 @click.argument("label")

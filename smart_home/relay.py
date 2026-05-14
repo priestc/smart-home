@@ -76,19 +76,10 @@ def firmware_missing_message() -> str:
     )
 
 
-def flash_and_provision(
-    port: str,
-    relay_id: str,
-    token: str,
-    wifi_ssid: str,
-    wifi_pass: str,
-    server_url: str,
-    print_fn=print,
-) -> None:
-    """Flash ESP32 firmware and send config over serial."""
+def flash_firmware(port: str, print_fn=print) -> None:
+    """Write firmware binaries to ESP32. NVS config is preserved (no reset)."""
     import subprocess
     import time
-    import serial  # pyserial
 
     if not _APP_BIN.exists():
         raise FileNotFoundError(firmware_missing_message())
@@ -127,6 +118,22 @@ def flash_and_provision(
                 time.sleep(3)
             else:
                 raise
+
+
+def flash_and_provision(
+    port: str,
+    relay_id: str,
+    token: str,
+    wifi_ssid: str,
+    wifi_pass: str,
+    server_url: str,
+    print_fn=print,
+) -> None:
+    """Flash ESP32 firmware and send config over serial."""
+    import time
+    import serial  # pyserial
+
+    flash_firmware(port, print_fn)
 
     print_fn("Waiting for device to boot...")
     time.sleep(2)
