@@ -349,7 +349,8 @@ static void connectWiFi() {
 
 // ── HTTP POST to /api/ble-relay ───────────────────────────────────────────────
 
-static bool httpPost(const String& payload, std::vector<GattTask>* out_tasks) {
+// parse_gatt: if true, parse GATT tasks from the response into g_gatt_tasks.
+static bool httpPost(const String& payload, bool parse_gatt) {
     HTTPClient http;
     http.begin(String(g_url) + "/api/ble-relay");
     http.addHeader("Content-Type", "application/json");
@@ -358,7 +359,7 @@ static bool httpPost(const String& payload, std::vector<GattTask>* out_tasks) {
     int code = http.POST(const_cast<String&>(payload));
 
     if (code == 200) {
-        if (out_tasks) {
+        if (parse_gatt) {
             String resp = http.getString();
             JsonDocument rdoc;
             if (deserializeJson(rdoc, resp) == DeserializationError::Ok) {
@@ -368,7 +369,7 @@ static bool httpPost(const String& payload, std::vector<GattTask>* out_tasks) {
                     gt.task_id     = t["id"].as<String>();
                     gt.address     = t["address"].as<String>();
                     gt.device_type = t["device_type"].as<String>();
-                    out_tasks->push_back(gt);
+                    g_gatt_tasks.push_back(gt);
                     logf("GATT task queued: %s  type=%s",
                          gt.address.c_str(), gt.device_type.c_str());
                 }
@@ -435,7 +436,7 @@ static void postBatch() {
     logf("Scan: %u devices  buffer: %u", (unsigned)g_seen.size(), (unsigned)g_batch_queue.size());
 
     if (!g_batch_queue.empty()) {
-        if (httpPost(g_batch_queue.front(), nullptr)) {
+        if (httpPost(g_batch_queue.front(), false)) {
             g_batch_queue.erase(g_batch_queue.begin());
             logf("Buffered batch sent, %u remaining", (unsigned)g_batch_queue.size());
         } else {
@@ -446,7 +447,7 @@ static void postBatch() {
 
     if (g_seen.empty()) return;
 
-    if (!httpPost(buildPayload(true), &g_gatt_tasks))
+    if (!httpPost(buildPayload(true), true))
         bufferPush(buildPayload(false));
 }
 
