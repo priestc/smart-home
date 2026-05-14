@@ -49,7 +49,7 @@
 #include <vector>
 
 #define FIRMWARE_VERSION      "1.5.0"
-#define FIRMWARE_REV          1
+#define FIRMWARE_REV          2
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
