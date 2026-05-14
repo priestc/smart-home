@@ -481,7 +481,7 @@ void loop() {
 
     BLEScan* scan = BLEDevice::getScan();
     scan->setAdvertisedDeviceCallbacks(&g_cb, false);
-    scan->setActiveScan(false);
+    scan->setActiveScan(true);   // needed to receive scan responses where iPhone advertises its name
     scan->setInterval(160);  // 100 ms — gives WiFi regular radio gaps
     scan->setWindow(80);     // 50 ms active per interval (50% duty cycle)
     scan->start(SCAN_SECONDS, false);
