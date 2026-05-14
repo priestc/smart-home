@@ -1651,16 +1651,19 @@ def monitor(duration, verbose, db, no_db):
                 _presence.save_state(presence_state)
 
     async def check_network_presence():
+        import subprocess as _sp
         loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(10)
             now = datetime.datetime.now()
+            # Reload from disk so add-network-device takes effect without a restart
+            current_network_devices = _presence.load_network_devices()
+            if not current_network_devices:
+                continue
             try:
                 result = await loop.run_in_executor(
                     None,
-                    lambda: __import__("subprocess").run(
-                        ["ip", "neigh", "show"], capture_output=True, text=True
-                    )
+                    lambda: _sp.run(["ip", "neigh", "show"], capture_output=True, text=True)
                 )
                 neigh_output = result.stdout
             except Exception as e:
@@ -1681,7 +1684,7 @@ def monitor(duration, verbose, db, no_db):
                         reachable.add(parts[lladdr_idx].lower())
 
             changed = False
-            for mac, label in network_devices.items():
+            for mac, label in current_network_devices.items():
                 mac_lower = mac.lower()
                 new_status = "home" if mac_lower in reachable else "away"
                 old_status = presence_state.get(label, {}).get("status")
@@ -2605,8 +2608,7 @@ def monitor(duration, verbose, db, no_db):
             extra.append(camera_vitals_loop())
         if presence_devices:
             extra.append(check_presence())
-        if network_devices:
-            extra.append(check_network_presence())
+        extra.append(check_network_presence())
         if ecobee_cfg:
             extra.append(poll_ecobee_loop())
         if ha_cfg:
