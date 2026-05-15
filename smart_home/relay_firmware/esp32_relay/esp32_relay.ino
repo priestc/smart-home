@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.29"
-#define FIRMWARE_REV          36
+#define FIRMWARE_VERSION      "1.7.30"
+#define FIRMWARE_REV          37
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -644,13 +644,14 @@ static void doPoolMonitorCycle() {
     scan->setWindow(80);
     g_current_op = "ble-scan";
 
-    // Non-blocking start; poll for YC01 flag so we can stop from the main task
-    // (calling stop() inside the callback causes a panic in Bluedroid).
+    // Always run the full scan so iPhones get the complete active-scan window to
+    // respond with their name in a scan response. The YC01 continuously advertises
+    // so it will still be present after the scan; no need to cut short for it.
     g_pool_seen_in_scan = false;
     scan->start(SCAN_SECONDS, nullptr, false);
     unsigned long scan_deadline = millis() + (uint32_t)SCAN_SECONDS * 1000UL;
     while (millis() < scan_deadline) {
-        if (g_pool_seen_in_scan || !scan->isScanning()) break;
+        if (!scan->isScanning()) break;
         delay(20);
     }
     if (scan->isScanning()) scan->stop();
