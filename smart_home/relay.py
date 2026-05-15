@@ -8,9 +8,55 @@ _RELAY_FILE = _CONFIG_DIR / "relays.json"
 _DEFAULTS_FILE = _CONFIG_DIR / "relay_defaults.json"
 
 FIRMWARE_DIR = Path(__file__).parent / "relay_firmware"
-_APP_BIN = FIRMWARE_DIR / "esp32_relay.ino.bin"
-_BOOT_BIN = FIRMWARE_DIR / "esp32_relay.ino.bootloader.bin"
-_PART_BIN = FIRMWARE_DIR / "esp32_relay.ino.partitions.bin"
+_APP_BIN    = FIRMWARE_DIR / "esp32_relay.ino.bin"
+_BOOT_BIN   = FIRMWARE_DIR / "esp32_relay.ino.bootloader.bin"
+_PART_BIN   = FIRMWARE_DIR / "esp32_relay.ino.partitions.bin"
+_INO_SOURCE = FIRMWARE_DIR / "esp32_relay" / "esp32_relay.ino"
+
+
+def firmware_version() -> tuple[str, int]:
+    """Return (version_string, rev_int) of the firmware that would be flashed.
+    Reads directly from the .ino source so it's always current."""
+    import re
+    if not _INO_SOURCE.exists():
+        return ("?", 0)
+    text = _INO_SOURCE.read_text()
+    ver_m = re.search(r'#define FIRMWARE_VERSION\s+"([^"]+)"', text)
+    rev_m = re.search(r'#define FIRMWARE_REV\s+(\d+)', text)
+    return (ver_m.group(1) if ver_m else "?", int(rev_m.group(1)) if rev_m else 0)
+
+
+def read_relay_version(port: str, timeout: float = 20.0) -> tuple[str, int] | None:
+    """Read the firmware version from a relay over serial.
+
+    Opening the port resets the ESP32 (DTR), so the boot message appears within
+    a few seconds.  The firmware also prints fw/rev on every scan line, so if
+    the board doesn't auto-reset we'll still see it within one 18-second cycle.
+    Returns (version_str, rev_int) or None if not detected within *timeout*.
+    """
+    import re
+    import time
+    try:
+        import serial
+    except ImportError:
+        return None
+    try:
+        ser = serial.Serial(port, 115200, timeout=0.5)
+    except Exception:
+        return None
+    try:
+        deadline = time.monotonic() + timeout
+        buf = ""
+        while time.monotonic() < deadline:
+            data = ser.read(256)
+            if data:
+                buf += data.decode("ascii", errors="replace")
+                m = re.search(r'fw=(\S+)\s+rev=(\d+)', buf)
+                if m:
+                    return (m.group(1), int(m.group(2)))
+    finally:
+        ser.close()
+    return None
 
 
 def load_relays() -> list[dict]:

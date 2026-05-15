@@ -821,6 +821,23 @@ def update_relay(relay_name):
         idx = click.prompt("Which port is the relay?", type=click.IntRange(1, len(ports)))
         port = ports[idx - 1]
 
+    new_ver, new_rev = _relay.firmware_version()
+    if new_ver != "?":
+        click.echo(f"\nLatest firmware: v{new_ver}  (rev{new_rev})")
+        click.echo("Reading current firmware version from relay (up to 20 s)...")
+        current = _relay.read_relay_version(port)
+        if current is not None:
+            cur_ver, cur_rev = current
+            click.echo(f"Current firmware: v{cur_ver}  (rev{cur_rev})")
+            if cur_rev == new_rev:
+                click.echo(
+                    f"\nRelay '{relay_id}' is already running the latest firmware "
+                    f"(v{cur_ver}  rev{cur_rev}). Nothing to do."
+                )
+                return
+        else:
+            click.echo("Could not read firmware version from relay — proceeding with flash.")
+
     click.echo(f"\nFlashing firmware to relay '{relay_id}' at {port} ...")
     click.echo("WiFi credentials and token stored on the device will be preserved.\n")
     try:
@@ -832,7 +849,7 @@ def update_relay(relay_name):
         click.echo(f"\nFlash failed: {e}")
         return
 
-    click.echo(f"\nDone. Relay '{relay_id}' is running the new firmware.")
+    click.echo(f"\nDone. Relay '{relay_id}' is running v{new_ver} (rev{new_rev}).")
 
 
 @main.command("pair-relay")

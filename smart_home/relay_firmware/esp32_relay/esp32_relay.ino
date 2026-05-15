@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.2"
-#define FIRMWARE_REV          9
+#define FIRMWARE_VERSION      "1.7.3"
+#define FIRMWARE_REV          10
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -554,8 +554,9 @@ static void bufferPush(const String& payload) {
 }
 
 static void postBatch() {
-    Serial.printf("Scan: %u devices  buffer: %u\n",
-                  (unsigned)g_seen.size(), (unsigned)g_batch_queue.size());
+    Serial.printf("Scan: %u devices  buffer: %u  fw=%s  rev=%d\n",
+                  (unsigned)g_seen.size(), (unsigned)g_batch_queue.size(),
+                  FIRMWARE_VERSION, FIRMWARE_REV);
 
     if (!g_batch_queue.empty()) {
         if (httpPost(g_batch_queue.front(), false)) {
