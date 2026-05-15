@@ -2592,6 +2592,11 @@ def monitor(duration, verbose, db, no_db):
         """Queue a GATT task for the next available relay in the fallback chain."""
         if not conn:
             return
+        # Pool monitors with node != "server" are handled by relay firmware directly.
+        _mons = _pool.load_config()
+        _mon = next((m for m in _mons if m["address"].upper() == addr.upper()), None)
+        if _mon and _mon.get("node", "server") != "server":
+            return
         relays = _relay_mod.load_relays()
         if not relays:
             return

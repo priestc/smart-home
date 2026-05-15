@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.9"
-#define FIRMWARE_REV          16
+#define FIRMWARE_VERSION      "1.7.10"
+#define FIRMWARE_REV          17
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -641,12 +641,15 @@ static void processGattTasks() {
                 error_msg = svc ? "characteristic not found" : "service not found";
                 Serial.println("  " + error_msg);
             }
-            client->disconnect();
         } else {
             error_msg = "connection failed";
             Serial.println("  GATT connect failed");
         }
 
+        if (client->isConnected()) {
+            client->disconnect();
+            delay(300);
+        }
         delete client;
         postGattResult(task.task_id, success, result_hex, error_msg);
     }
