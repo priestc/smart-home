@@ -319,6 +319,8 @@ def ble_relay_crash():
     if relay_cfg is None:
         return jsonify({"error": "unknown token"}), 401
 
+    import json as _json
+
     data = request.get_json(silent=True) or {}
     reason = data.get("reason") or "unknown"
     op = data.get("op")
