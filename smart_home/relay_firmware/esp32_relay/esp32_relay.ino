@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.28"
-#define FIRMWARE_REV          35
+#define FIRMWARE_VERSION      "1.7.29"
+#define FIRMWARE_REV          36
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -506,7 +506,7 @@ static bool httpPost(const String& payload, bool parse_gatt) {
 
 static String buildPayload(bool include_presence, bool pool_offline = false,
                             const String& pool_hex = "", int8_t pool_rssi = 0,
-                            bool pool_seen = false) {
+                            bool pool_seen = false, bool pool_skip = false) {
     JsonDocument doc;
     doc["relay_id"] = g_id;
     doc["rev"] = FIRMWARE_REV;
@@ -534,8 +534,9 @@ static String buildPayload(bool include_presence, bool pool_offline = false,
             pls[kv.first.c_str()] = kv.second;
     }
 
-    if (pool_offline) doc["pool_offline"] = true;
-    if (pool_offline && pool_seen) doc["pool_seen"] = true;
+    if (pool_skip) doc["pool_skip"] = true;
+    if (pool_offline && !pool_skip) doc["pool_offline"] = true;
+    if (pool_offline && pool_seen && !pool_skip) doc["pool_seen"] = true;
     if (g_pool_status.length() > 0) doc["pool_status"] = g_pool_status;
     if (pool_hex.length() > 0) {
         JsonObject pr = doc["pool_reading"].to<JsonObject>();
@@ -560,7 +561,7 @@ static void bufferPush(const String& payload) {
     g_batch_queue.push_back(payload);
 }
 
-static void postBatch(bool pool_offline = false, const String& pool_hex = "", int8_t pool_rssi = 0, bool pool_seen = false) {
+static void postBatch(bool pool_offline = false, const String& pool_hex = "", int8_t pool_rssi = 0, bool pool_seen = false, bool pool_skip = false) {
     Serial.printf("Scan: %u devices  buffer: %u  fw=%s  rev=%d\n",
                   (unsigned)g_seen.size(), (unsigned)g_batch_queue.size(),
                   FIRMWARE_VERSION, FIRMWARE_REV);
@@ -575,9 +576,9 @@ static void postBatch(bool pool_offline = false, const String& pool_hex = "", in
         }
     }
 
-    if (g_seen.empty() && !pool_offline && pool_hex.length() == 0) return;
+    if (g_seen.empty() && !pool_offline && pool_hex.length() == 0 && !pool_skip) return;
 
-    if (!httpPost(buildPayload(true, pool_offline, pool_hex, pool_rssi, pool_seen), true))
+    if (!httpPost(buildPayload(true, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip), true))
         bufferPush(buildPayload(false));
 }
 
@@ -794,7 +795,7 @@ static void doPoolMonitorCycle() {
 
     // ── Step 3: Single POST with pool + sensor data ────────────────────────────
     g_current_op = "http-post";
-    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now);
+    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now, !s_pool_read_this_cycle && g_pool_addr.length() > 0);
     g_current_op = "";
     maybeSendPendingCrash();
 

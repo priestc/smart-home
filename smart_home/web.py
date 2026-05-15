@@ -235,6 +235,8 @@ def ble_relay():
 
         # Log this relay check-in for `smart-home relay-log`
         import json as _json
+        if data.get("pool_skip"):
+            labeled_seen["_pool_skip"] = True
         if data.get("pool_offline"):
             labeled_seen["_pool_offline"] = True
         if data.get("pool_seen"):

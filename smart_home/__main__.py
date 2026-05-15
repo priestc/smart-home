@@ -633,7 +633,9 @@ def relay_log(db):
         labeled = _json.loads(row["labeled_json"]) if row["labeled_json"] else {}
         for label, rssi in sorted((k, v) for k, v in labeled.items() if not k.startswith("_")):
             parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
-        if labeled.get("_pool_seen"):
+        if labeled.get("_pool_skip"):
+            parts.append(click.style("pool: skip", fg="white", dim=True))
+        elif labeled.get("_pool_seen"):
             status = labeled.get("_pool_status", "")
             label = f"pool: seen [{status}]" if status else "pool: seen"
             parts.append(click.style(label, fg="blue"))
