@@ -6836,8 +6836,8 @@ def api_pool_relay_reading():
             conn.execute(
                 "INSERT INTO relay_log "
                 "(ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json, labeled_json, rev) "
-                "VALUES (strftime('%Y-%m-%d %H:%M:%S','now'), ?, NULL, 0, 0, NULL, ?, NULL)",
-                (relay_cfg["id"], _json.dumps({"_offline": True})),
+                "VALUES (strftime('%Y-%m-%d %H:%M:%S','now'), ?, NULL, 0, 0, NULL, NULL, NULL)",
+                (relay_cfg["id"],),
             )
             conn.execute(
                 "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"

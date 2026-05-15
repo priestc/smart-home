@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.3"
-#define FIRMWARE_REV          10
+#define FIRMWARE_VERSION      "1.7.4"
+#define FIRMWARE_REV          11
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -748,6 +748,7 @@ static void doPoolMonitorCycle() {
         Serial.printf("Pool: offline (%d failures) — scanning for device...\n", g_pool_fails);
         g_current_op = "pool-scan";
         g_seen.clear();
+        g_gatt_tasks.clear();
         g_scan_ts = getTimestamp();
         BLEScan* scan = BLEDevice::getScan();
         scan->setAdvertisedDeviceCallbacks(&g_cb, false);
@@ -761,15 +762,21 @@ static void doPoolMonitorCycle() {
         // g_seen keys are lowercase; g_pool_addr is uppercase from server.
         String addr_lc = g_pool_addr;
         addr_lc.toLowerCase();
-        if (g_seen.count(addr_lc.c_str())) {
-            Serial.println("Pool: device found advertising — connecting now");
-            g_pool_fails = 0;
-            // Fall through immediately to connect while it's still in the advertising window.
-        } else {
+        bool device_found = g_seen.count(addr_lc.c_str()) > 0;
+
+        if (!device_found) {
+            // Post the BLE batch for presence detection, then report pool offline.
+            g_current_op = "http-post";
+            postBatch();
+            g_current_op = "";
             postOfflineStatus();
             maybeSendPendingCrash();
             return;
         }
+
+        // Device found — connect immediately while it's still in the advertising window.
+        Serial.println("Pool: device found advertising — connecting now");
+        g_pool_fails = 0;
     }
 
     // ── Normal connected mode ────────────────────────────────────────────────
@@ -826,15 +833,40 @@ static void doPoolMonitorCycle() {
 
     g_pool_fails = 0;
     String hex = hexEncode((const uint8_t*)val.c_str(), val.length());
-    Serial.printf("Pool: read %u bytes  label=%s\n",
-                  (unsigned)val.length(), g_pool_label.c_str());
+    Serial.printf("Pool: read %u bytes  label=%s  fw=%s  rev=%d\n",
+                  (unsigned)val.length(), g_pool_label.c_str(),
+                  FIRMWARE_VERSION, FIRMWARE_REV);
 
     g_current_op = "pool-post";
     bool still_assigned = postPoolReading(hex);
     g_current_op = "";
     maybeSendPendingCrash();
+
     if (still_assigned) {
-        delay(30000);
+        // Run a normal BLE scan instead of sleeping, so patio also does
+        // presence detection while keeping the GATT connection alive.
+        g_seen.clear();
+        g_gatt_tasks.clear();
+        g_scan_ts = getTimestamp();
+        BLEScan* scan = BLEDevice::getScan();
+        scan->setAdvertisedDeviceCallbacks(&g_cb, false);
+        scan->setActiveScan(true);
+        scan->setInterval(160);
+        scan->setWindow(80);
+        g_current_op = "ble-scan";
+        scan->start(SCAN_SECONDS, false);
+        scan->clearResults();
+
+        g_current_op = "http-post";
+        postBatch();
+        g_current_op = "";
+        maybeSendPendingCrash();
+
+        if (!g_gatt_tasks.empty()) {
+            g_current_op = "gatt-tasks";
+            processGattTasks();
+            g_current_op = "";
+        }
     }
 }
 

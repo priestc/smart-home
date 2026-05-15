@@ -609,11 +609,11 @@ def relay_log(db):
         rev_str = f"r{row['rev']}" if row["rev"] is not None else "r?"
 
         if is_pool:
+            if row["n_inserted"] == 0:
+                parts.append(click.style("pool offline", fg="yellow"))
+                return "  ".join(parts)
             if row["labeled_json"]:
                 ldata = _json.loads(row["labeled_json"])
-                if ldata.get("_offline"):
-                    parts.append(click.style("pool offline", fg="yellow"))
-                    return "  ".join(parts)
                 for lbl, rssi in sorted((k, v) for k, v in ldata.items() if not k.startswith("_")):
                     parts.append(click.style(f"{lbl} {rssi}dBm", fg="magenta"))
             parts.append(click.style("pool", fg="cyan"))
