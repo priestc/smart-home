@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.20"
-#define FIRMWARE_REV          27
+#define FIRMWARE_VERSION      "1.7.21"
+#define FIRMWARE_REV          28
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -97,6 +97,8 @@ static String              g_pool_label;
 static BLEClient*          g_pool_client        = nullptr;
 static int                 g_pool_fails         = 0;
 static volatile bool       g_pool_seen_in_scan  = false;  // set by AdvCallback, cleared by main task
+static unsigned long       g_pool_retry_after_ms = 0;     // millis() after which next connect is allowed
+#define POOL_RETRY_INTERVAL_MS 30000UL
 
 // ── App watchdog state ────────────────────────────────────────────────────────
 
@@ -166,10 +168,12 @@ class AdvCallback : public BLEAdvertisedDeviceCallbacks {
         if (info.name.length() && g_scan_ts.length())
             g_presence_last_seen[info.name.c_str()] = g_scan_ts;
 
-        // Signal main task to stop the scan. Do NOT call BLE APIs here —
-        // calling stop() from inside the GAP event callback causes a panic.
+        // Signal main task to stop the scan early so we connect immediately.
+        // Only when we are allowed to attempt a connection (cooldown expired).
+        // Do NOT call BLE APIs here — stop() from a GAP callback causes a panic.
         if (g_pool_addr.length() > 0 &&
             !(g_pool_client && g_pool_client->isConnected()) &&
+            millis() >= g_pool_retry_after_ms &&
             (info.name.startsWith("BLE_YC01") || info.name.startsWith("BLE-YC01"))) {
             g_pool_seen_in_scan = true;
         }
@@ -672,8 +676,9 @@ static void doPoolMonitorCycle() {
             g_pool_client->setMTU(23);
         }
 
-        // Connect if not already connected and device is currently advertising.
-        if (!g_pool_client->isConnected() && pool_seen_now) {
+        // Connect if not already connected, device seen, and cooldown expired.
+        if (!g_pool_client->isConnected() && pool_seen_now &&
+            millis() >= g_pool_retry_after_ms) {
             g_current_op = "pool-connect";
             Serial.printf("Pool: connecting to %s (%s) type=%d...\n",
                           g_pool_label.c_str(), cur_addr.c_str(), cur_type);
@@ -685,9 +690,12 @@ static void doPoolMonitorCycle() {
             if (!ok) {
                 g_pool_fails++;
                 poolDisconnect();
-                Serial.printf("Pool: connect failed (fail #%d)\n", g_pool_fails);
+                g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
+                Serial.printf("Pool: connect failed (fail #%d), retry in %lus\n",
+                              g_pool_fails, POOL_RETRY_INTERVAL_MS / 1000UL);
             } else {
                 g_pool_fails = 0;
+                g_pool_retry_after_ms = 0;
                 Serial.printf("Pool: connected to %s\n", g_pool_label.c_str());
             }
         }
