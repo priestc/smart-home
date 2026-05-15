@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.25"
-#define FIRMWARE_REV          32
+#define FIRMWARE_VERSION      "1.7.26"
+#define FIRMWARE_REV          33
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -734,10 +734,26 @@ static void doPoolMonitorCycle() {
 
         // Read GATT if connected (whether we just connected or were already connected).
         if (g_pool_client && g_pool_client->isConnected()) {
-            BLERemoteService* svc = g_pool_client->getService(BLEUUID(YC01_SVC_UUID));
-            BLERemoteCharacteristic* chr = svc
-                ? svc->getCharacteristic(BLEUUID(YC01_CHAR_UUID)) : nullptr;
-            if (chr && chr->canRead()) {
+            // getServices() triggers GATT service discovery and returns the populated map.
+            // We iterate all services manually because Bluedroid's UUID comparator fails to
+            // match both 16-bit and 128-bit forms reliably — mirrors Python's read_gatt_char
+            // which finds the characteristic regardless of service UUID.
+            BLERemoteCharacteristic* chr = nullptr;
+            String svc_uuids;
+            std::map<std::string, BLERemoteService*>* pSvcs = g_pool_client->getServices();
+            if (pSvcs) {
+                for (auto& kv : *pSvcs) {
+                    svc_uuids += String(kv.first.c_str()) + " ";
+                    // Try 128-bit form first, then 16-bit — Bluedroid may store either.
+                    BLERemoteCharacteristic* c = kv.second->getCharacteristic(BLEUUID(YC01_CHAR_UUID));
+                    if (c && c->canRead()) { chr = c; break; }
+                    c = kv.second->getCharacteristic(BLEUUID((uint16_t)0xFF02));
+                    if (c && c->canRead()) { chr = c; break; }
+                }
+            }
+            Serial.printf("Pool: services found: [%s]\n", svc_uuids.c_str());
+
+            if (chr) {
                 g_current_op = "pool-read";
                 String val = chr->readValue();
                 if (val.length() > 0) {
@@ -755,8 +771,8 @@ static void doPoolMonitorCycle() {
                     g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
                 }
             } else {
-                g_pool_status = svc ? "no_char" : "no_service";
-                Serial.println(svc ? "Pool: characteristic not found" : "Pool: service not found");
+                g_pool_status = String("no_char svcs:") + (pSvcs ? String(pSvcs->size()) : "null");
+                Serial.printf("Pool: characteristic not found across %s\n", svc_uuids.c_str());
                 poolDisconnect();
                 g_pool_fails++;
                 g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
