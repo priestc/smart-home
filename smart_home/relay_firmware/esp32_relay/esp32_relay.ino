@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.19"
-#define FIRMWARE_REV          26
+#define FIRMWARE_VERSION      "1.7.20"
+#define FIRMWARE_REV          27
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -94,8 +94,9 @@ static std::vector<String> g_batch_queue;
 
 static String              g_pool_addr;    // configured address (from server/NVS)
 static String              g_pool_label;
-static BLEClient*          g_pool_client = nullptr;
-static int                 g_pool_fails  = 0;
+static BLEClient*          g_pool_client        = nullptr;
+static int                 g_pool_fails         = 0;
+static volatile bool       g_pool_seen_in_scan  = false;  // set by AdvCallback, cleared by main task
 
 // ── App watchdog state ────────────────────────────────────────────────────────
 
@@ -165,12 +166,12 @@ class AdvCallback : public BLEAdvertisedDeviceCallbacks {
         if (info.name.length() && g_scan_ts.length())
             g_presence_last_seen[info.name.c_str()] = g_scan_ts;
 
-        // Stop scan immediately when YC01 is detected so the main task can
-        // connect while the device is still in its connectable window.
+        // Signal main task to stop the scan. Do NOT call BLE APIs here —
+        // calling stop() from inside the GAP event callback causes a panic.
         if (g_pool_addr.length() > 0 &&
             !(g_pool_client && g_pool_client->isConnected()) &&
             (info.name.startsWith("BLE_YC01") || info.name.startsWith("BLE-YC01"))) {
-            BLEDevice::getScan()->stop();
+            g_pool_seen_in_scan = true;
         }
     }
 };
@@ -617,7 +618,17 @@ static void doPoolMonitorCycle() {
     scan->setInterval(160);
     scan->setWindow(80);
     g_current_op = "ble-scan";
-    scan->start(SCAN_SECONDS, false);
+
+    // Non-blocking start; poll for YC01 flag so we can stop from the main task
+    // (calling stop() inside the callback causes a panic in Bluedroid).
+    g_pool_seen_in_scan = false;
+    scan->start(SCAN_SECONDS, nullptr, false);
+    unsigned long scan_deadline = millis() + (uint32_t)SCAN_SECONDS * 1000UL;
+    while (millis() < scan_deadline) {
+        if (g_pool_seen_in_scan || !scan->isScanning()) break;
+        delay(20);
+    }
+    if (scan->isScanning()) scan->stop();
     scan->clearResults();
 
     // ── Step 2: Pool monitor connect + read ───────────────────────────────────
