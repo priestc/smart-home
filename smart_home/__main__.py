@@ -1936,6 +1936,21 @@ def monitor(duration, verbose, db, no_db):
                 pool_last_reading[pool_lbl] = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
                 click.echo(f"Pool monitor '{pool_lbl}' last reading: {row[0]}")
 
+    # Identify relay-connected pools (node != "server"). Their pool_last_reading is
+    # never updated by _yc01_persistent_loop, so snapshot_loop must refresh from DB.
+    _relay_pool_labels: set[str] = {
+        m["label"] for m in _pool.load_config()
+        if m.get("node", "server") != "server"
+    }
+
+    # Pre-seed pool_offline_alerted for relay pools whose last reading is absent or
+    # stale so that the first new reading triggers a sensor_online event.
+    for pool_lbl in _relay_pool_labels:
+        last_dt = pool_last_reading.get(pool_lbl)
+        if last_dt is None or (datetime.datetime.now() - last_dt).total_seconds() >= 600:
+            pool_offline_alerted.add(pool_lbl)
+            click.echo(f"Pool monitor '{pool_lbl}' starts as offline (no recent reading)")
+
     # Tracks which hour-of-day the record check last ran; -1 forces a run at startup
     _last_record_check_hour = -1
 
@@ -2251,6 +2266,16 @@ def monitor(duration, verbose, db, no_db):
 
             # Check pool monitor connectivity
             POOL_OFFLINE_THRESHOLD = datetime.timedelta(minutes=10)
+
+            # Relay pools are not updated by _yc01_persistent_loop — refresh from DB.
+            for pool_lbl in _relay_pool_labels:
+                row = conn.execute(
+                    "SELECT ts FROM pool_readings WHERE label=? ORDER BY ts DESC LIMIT 1",
+                    (pool_lbl,),
+                ).fetchone()
+                if row:
+                    pool_last_reading[pool_lbl] = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+
             for pool_label in list(pool_config.values()):
                 last = pool_last_reading.get(pool_label)
                 if last is None:
