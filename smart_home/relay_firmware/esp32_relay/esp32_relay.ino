@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.6"
-#define FIRMWARE_REV          13
+#define FIRMWARE_VERSION      "1.7.7"
+#define FIRMWARE_REV          14
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -727,7 +727,7 @@ static void doPoolMonitorCycle() {
         scan->setActiveScan(true);
         scan->setInterval(160);
         scan->setWindow(80);
-        scan->start(10, false);
+        scan->start(SCAN_SECONDS, false);
         scan->clearResults();
 
         // Check if our pool monitor MAC appeared in the scan.
