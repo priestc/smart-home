@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.30"
-#define FIRMWARE_REV          37
+#define FIRMWARE_VERSION      "1.7.31"
+#define FIRMWARE_REV          38
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -590,8 +590,12 @@ static void poolDisconnect() {
         g_pool_client->disconnect();
         delay(300);
     }
-    // Do NOT delete — the BLEClient destructor doesn't call esp_ble_gattc_app_unregister,
-    // so deleting leaks the GATT app_id slot. Reuse the same client across all retries.
+    // Delete the client so the next connect always gets a fresh BLEClient with no
+    // stale m_haveServices/m_servicesMap state. After a disconnect, m_haveServices
+    // stays true, causing the next getServices() call to return cached characteristic
+    // objects whose semaphores are in an undefined state — making readValue() hang.
+    delete g_pool_client;
+    g_pool_client = nullptr;
 }
 
 static void resetBLEStack() {
