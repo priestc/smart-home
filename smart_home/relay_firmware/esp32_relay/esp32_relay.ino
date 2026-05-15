@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.16"
-#define FIRMWARE_REV          23
+#define FIRMWARE_VERSION      "1.7.17"
+#define FIRMWARE_REV          24
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -630,9 +630,9 @@ static void doPoolMonitorCycle() {
             Serial.printf("Pool: connecting to %s (%s) type=%d...\n",
                           g_pool_label.c_str(), g_pool_found_addr.c_str(), g_pool_found_type);
             bool ok = g_pool_client->connect(
-                BLEAddress(g_pool_found_addr.c_str(), g_pool_found_type),
-                g_pool_found_type,
-                12
+                BLEAddress(g_pool_found_addr.c_str(), (uint8_t)g_pool_found_type),
+                (uint8_t)g_pool_found_type,
+                12000
             );
             if (!ok) {
                 g_pool_fails++;
