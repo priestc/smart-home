@@ -210,6 +210,29 @@ def ble_relay():
                 (local_ts, relay_cfg["id"], label, local_ts),
             )
 
+        # Handle pool reading if included in the batch (pool-monitor relays only).
+        pool_reading = data.get("pool_reading") or {}
+        if pool_reading:
+            pool_result_hex = pool_reading.get("result_hex") or ""
+            pool_label = pool_reading.get("label") or ""
+            pool_address = (pool_reading.get("address") or "").upper()
+            pool_rssi = pool_reading.get("rssi")
+            try:
+                raw = bytes.fromhex(pool_result_hex)
+            except ValueError:
+                raw = None
+            if raw:
+                from smart_home import pool as _pool
+                from smart_home.db import insert_pool_reading
+                reading = _pool.parse_gatt_data(raw)
+                if reading:
+                    reading.address = pool_address
+                    reading.label = pool_label
+                    reading.rssi = pool_rssi
+                    insert_pool_reading(conn, reading)
+                    if pool_rssi is not None:
+                        labeled_seen[pool_label] = pool_rssi
+
         # Log this relay check-in for `smart-home relay-log`
         import json as _json
         if data.get("pool_offline"):
