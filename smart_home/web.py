@@ -255,16 +255,10 @@ def ble_relay():
             "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"
         )
 
-        # Atomically claim any pending GATT tasks queued for this relay
-        pending_tasks = _relay.claim_pending_tasks(conn, relay_cfg["id"])
 
     response: dict = {
         "ok": True,
         "inserted": inserted,
-        "gatt_tasks": [
-            {"id": t["id"], "address": t["address"], "device_type": t["device_type"]}
-            for t in pending_tasks
-        ],
     }
 
     # If pair mode was requested for this relay, include it once then clear it.
@@ -290,37 +284,6 @@ def ble_relay():
     } if assigned else None
 
     return jsonify(response)
-
-
-@app.post("/api/ble-relay/gatt-result")
-def ble_relay_gatt_result():
-    """Receive a GATT read result from an ESP32 relay."""
-    from smart_home import relay as _relay
-
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        return jsonify({"error": "missing or invalid Authorization header"}), 401
-    token = auth[len("Bearer "):]
-
-    relay_cfg = _relay.find_relay_by_token(token)
-    if relay_cfg is None:
-        return jsonify({"error": "unknown token"}), 401
-
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "invalid JSON body"}), 400
-
-    task_id = (data.get("task_id") or "").strip()
-    if not task_id:
-        return jsonify({"error": "task_id required"}), 400
-
-    with _conn() as conn:
-        if data.get("success"):
-            _relay.set_task_done(conn, task_id, data.get("result_hex") or "")
-        else:
-            _relay.set_task_failed(conn, task_id, data.get("error") or "relay failed")
-
-    return jsonify({"ok": True})
 
 
 @app.post("/api/ble-relay/crash")

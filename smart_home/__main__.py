@@ -1510,12 +1510,6 @@ def monitor(duration, verbose, db, no_db):
 
     scanner_ref: list = []
 
-    # Relay GATT fallback state, keyed by BLE address.
-    # preferred_relay: None = try local first; str = relay_id to start from.
-    # pending_task_id: outstanding DB task ID, or None.
-    # tried_in_chain: relay_ids tried in the current failure chain (cleared on success).
-    _gatt_state: dict[str, dict] = {}
-
     # presence tracking
     presence_devices = _presence.load_devices()
     network_devices = _presence.load_network_devices()  # {mac: label}
@@ -2586,112 +2580,6 @@ def monitor(duration, verbose, db, no_db):
                     click.echo(f"[{ts}] Plug poll failed for '{p['name']}': {e}")
             await asyncio.sleep(POLL_INTERVAL)
 
-    # ── Relay GATT fallback helpers ──────────────────────────────────────────
-
-    def _schedule_relay_gatt(addr: str, device_type: str, label: str) -> None:
-        """Queue a GATT task for the next available relay in the fallback chain."""
-        if not conn:
-            return
-        # Pool monitors with node != "server" are handled by relay firmware directly.
-        _mons = _pool.load_config()
-        _mon = next((m for m in _mons if m["address"].upper() == addr.upper()), None)
-        if _mon and _mon.get("node", "server") != "server":
-            return
-        relays = _relay_mod.load_relays()
-        if not relays:
-            return
-        state = _gatt_state.setdefault(addr, {
-            "preferred_relay": None,
-            "pending_task_id": None,
-            "tried_in_chain": set(),
-        })
-        if state.get("pending_task_id"):
-            return  # already waiting for a result
-        relay_ids = [r["id"] for r in relays]
-        preferred = state.get("preferred_relay")
-        if preferred and preferred in relay_ids:
-            start = relay_ids.index(preferred)
-            ordered = relay_ids[start:] + relay_ids[:start]
-        else:
-            ordered = relay_ids
-        tried = state.get("tried_in_chain") or set()
-        next_id = next((rid for rid in ordered if rid not in tried), None)
-        if next_id is None:
-            ts_s = datetime.datetime.now().strftime("%H:%M:%S")
-            click.echo(f"[{ts_s}] All relays exhausted for {label} — offline")
-            state["tried_in_chain"] = set()
-            state["preferred_relay"] = None
-            return
-        task_id = _relay_mod.create_gatt_task(conn, addr, device_type, label, next_id)
-        state["pending_task_id"] = task_id
-        ts_s = datetime.datetime.now().strftime("%H:%M:%S")
-        click.echo(f"[{ts_s}] GATT queued → relay '{next_id}' for {label} ({addr})")
-
-    def _apply_relay_gatt_success(addr: str, task: dict, raw: bytes, relay_id: str) -> None:
-        """Process a successful relay GATT result and update in-memory state."""
-        state = _gatt_state.get(addr, {})
-        label = task.get("label") or label_map.get(addr) or addr
-        ts_s = datetime.datetime.now().strftime("%H:%M:%S")
-        device_type = task["device_type"]
-
-        if device_type == "yc01":
-            reading = _pool.parse_gatt_data(raw)
-            if reading is None:
-                click.echo(f"[{ts_s}] Relay GATT: YC01 data too short from '{relay_id}'")
-                state["tried_in_chain"] = state.get("tried_in_chain", set()) | {relay_id}
-                _schedule_relay_gatt(addr, device_type, label)
-                return
-            reading.address = addr
-            reading.label = label
-            click.echo(f"[{ts_s}] Relay GATT OK: pool {label} via '{relay_id}'  {reading}")
-            state["preferred_relay"] = relay_id
-            state["tried_in_chain"] = set()
-            state["pending_task_id"] = None
-            if conn:
-                insert_pool_reading(conn, reading)
-                pool_last_reading[label] = datetime.datetime.now()
-
-    async def _relay_gatt_poller() -> None:
-        """Every 5 s: expire stale tasks, process settled results, advance failure chain."""
-        while True:
-            await asyncio.sleep(5)
-            if not conn:
-                continue
-            try:
-                _relay_mod.expire_stale_tasks(conn)
-                settled = _relay_mod.get_settled_tasks(conn)
-            except Exception as e:
-                ts_s = datetime.datetime.now().strftime("%H:%M:%S")
-                click.echo(f"[{ts_s}] relay-poller DB error: {e}")
-                continue
-            for task in settled:
-                task_id = task["id"]
-                addr = task["address"]
-                relay_id = task["relay_id"]
-                try:
-                    _relay_mod.delete_task(conn, task_id)
-                except Exception:
-                    pass
-                state = _gatt_state.get(addr)
-                if state is None or state.get("pending_task_id") != task_id:
-                    continue  # stale / already superseded
-                state["pending_task_id"] = None
-                ts_s = datetime.datetime.now().strftime("%H:%M:%S")
-                if task["status"] == "done":
-                    try:
-                        raw = bytes.fromhex(task.get("result_hex") or "")
-                    except ValueError:
-                        raw = b""
-                    _apply_relay_gatt_success(addr, task, raw, relay_id)
-                else:
-                    lbl = task.get("label") or label_map.get(addr) or addr
-                    click.echo(
-                        f"[{ts_s}] Relay GATT failed: '{relay_id}' for {lbl}: "
-                        f"{task.get('error') or 'unknown'}"
-                    )
-                    state.setdefault("tried_in_chain", set()).add(relay_id)
-                    _schedule_relay_gatt(addr, task["device_type"], lbl)
-
     # ────────────────────────────────────────────────────────────────────────
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
@@ -2711,7 +2599,6 @@ def monitor(duration, verbose, db, no_db):
             extra.append(poll_smart_plugs_loop())
         for m in _pool.load_config():
             extra.append(_yc01_persistent_loop(m["address"], m.get("label", m["address"])))
-        extra.append(_relay_gatt_poller())
         asyncio.run(scan(
             on_reading,
             duration=duration,

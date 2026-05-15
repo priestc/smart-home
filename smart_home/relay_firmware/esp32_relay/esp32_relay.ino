@@ -48,15 +48,14 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.10"
-#define FIRMWARE_REV          17
+#define FIRMWARE_VERSION      "1.7.11"
+#define FIRMWARE_REV          18
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
 #define PROVISION_TIMEOUT_MS   60000UL
 #define BOOT_PROBE_MS          3000UL
 #define HTTP_TIMEOUT_MS        10000
-#define GATT_TIMEOUT_MS        12000
 #define MAX_BUFFER             30
 
 // GATT characteristic UUIDs (must match smart_home/pool.py)
@@ -89,16 +88,6 @@ static std::map<std::string, DevInfo> g_seen;
 static String g_scan_ts;
 static std::map<std::string, String> g_presence_last_seen;
 static std::vector<String> g_batch_queue;
-
-// ── GATT task queue ───────────────────────────────────────────────────────────
-
-struct GattTask {
-    String task_id;
-    String address;
-    String device_type;
-};
-
-static std::vector<GattTask> g_gatt_tasks;
 
 // ── Persistent pool monitor state ─────────────────────────────────────────────
 
@@ -456,16 +445,6 @@ static bool httpPost(const String& payload, bool parse_gatt) {
             String resp = http.getString();
             JsonDocument rdoc;
             if (deserializeJson(rdoc, resp) == DeserializationError::Ok) {
-                JsonArray tasks = rdoc["gatt_tasks"];
-                for (JsonObject t : tasks) {
-                    GattTask gt;
-                    gt.task_id     = t["id"].as<String>();
-                    gt.address     = t["address"].as<String>();
-                    gt.device_type = t["device_type"].as<String>();
-                    g_gatt_tasks.push_back(gt);
-                    Serial.printf("GATT task queued: %s  type=%s\n",
-                                  gt.address.c_str(), gt.device_type.c_str());
-                }
                 // Check for pair mode instruction from server
                 if (rdoc["pair_mode"].is<JsonObject>()) {
                     g_pair_label = rdoc["pair_mode"]["label"].as<String>();
@@ -583,79 +562,6 @@ static void postBatch(bool pool_offline = false, const String& pool_hex = "", in
         bufferPush(buildPayload(false));
 }
 
-// ── GATT helpers ──────────────────────────────────────────────────────────────
-
-static void postGattResult(const String& task_id, bool success,
-                            const String& result_hex, const String& error_msg) {
-    JsonDocument doc;
-    doc["task_id"] = task_id;
-    doc["success"] = success;
-    if (success)
-        doc["result_hex"] = result_hex;
-    else
-        doc["error"] = error_msg;
-
-    String payload;
-    serializeJson(doc, payload);
-
-    HTTPClient http;
-    http.begin(String(g_url) + "/api/ble-relay/gatt-result");
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("Authorization", String("Bearer ") + g_token);
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    int code = http.POST(payload);
-    Serial.printf("GATT result POST -> %d  task=%s  ok=%d\n",
-                  code, task_id.c_str(), (int)success);
-    http.end();
-}
-
-static void processGattTasks() {
-    for (auto& task : g_gatt_tasks) {
-        Serial.printf("Processing GATT task: %s  type=%s\n",
-                      task.address.c_str(), task.device_type.c_str());
-
-        bool success = false;
-        String result_hex;
-        String error_msg;
-
-        BLEClient* client = BLEDevice::createClient();
-        client->setMTU(23);
-
-        if (client->connect(BLEAddress(task.address.c_str(), BLE_ADDR_TYPE_PUBLIC),
-                            BLE_ADDR_TYPE_PUBLIC, GATT_TIMEOUT_MS / 1000)) {
-
-            BLERemoteService*        svc = nullptr;
-            BLERemoteCharacteristic* chr = nullptr;
-
-            if (task.device_type == "yc01") {
-                svc = client->getService(BLEUUID(YC01_SVC_UUID16));
-                if (svc) chr = svc->getCharacteristic(BLEUUID(YC01_CHAR_UUID16));
-            }
-
-            if (chr && chr->canRead()) {
-                String val = chr->readValue();
-                result_hex = hexEncode((const uint8_t*)val.c_str(), val.length());
-                success    = true;
-                Serial.printf("  GATT read OK: %u bytes\n", (unsigned)val.length());
-            } else {
-                error_msg = svc ? "characteristic not found" : "service not found";
-                Serial.println("  " + error_msg);
-            }
-        } else {
-            error_msg = "connection failed";
-            Serial.println("  GATT connect failed");
-        }
-
-        if (client->isConnected()) {
-            client->disconnect();
-            delay(300);
-        }
-        delete client;
-        postGattResult(task.task_id, success, result_hex, error_msg);
-    }
-    g_gatt_tasks.clear();
-}
-
 // ── Persistent pool monitor ───────────────────────────────────────────────────
 
 static void poolDisconnect() {
@@ -705,7 +611,7 @@ static void doPoolMonitorCycle() {
             bool ok = g_pool_client->connect(
                 BLEAddress(g_pool_addr.c_str(), BLE_ADDR_TYPE_PUBLIC),
                 BLE_ADDR_TYPE_PUBLIC,
-                GATT_TIMEOUT_MS / 1000
+                12
             );
             if (!ok) {
                 g_pool_fails++;
@@ -747,7 +653,6 @@ static void doPoolMonitorCycle() {
 
     // ── Step 2: BLE scan for other sensors ────────────────────────────────────
     g_seen.clear();
-    g_gatt_tasks.clear();
     g_scan_ts = getTimestamp();
     BLEScan* scan = BLEDevice::getScan();
     scan->setAdvertisedDeviceCallbacks(&g_cb, false);
@@ -773,12 +678,6 @@ static void doPoolMonitorCycle() {
     postBatch(pool_offline, pool_hex, pool_rssi);
     g_current_op = "";
     maybeSendPendingCrash();
-
-    if (!g_gatt_tasks.empty()) {
-        g_current_op = "gatt-tasks";
-        processGattTasks();
-        g_current_op = "";
-    }
 }
 
 // ── Arduino entry points ──────────────────────────────────────────────────────
@@ -882,7 +781,6 @@ void loop() {
 
     g_current_op = "ble-scan";
     g_seen.clear();
-    g_gatt_tasks.clear();
     g_scan_ts = getTimestamp();
 
     BLEScan* scan = BLEDevice::getScan();
@@ -897,12 +795,6 @@ void loop() {
     postBatch();
     g_current_op = "";
     maybeSendPendingCrash();
-
-    if (!g_gatt_tasks.empty()) {
-        g_current_op = "gatt-tasks";
-        processGattTasks();
-        g_current_op = "";
-    }
 
     if (g_pair_mode)
         pairModeStart(g_pair_label);
