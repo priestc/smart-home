@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.5"
-#define FIRMWARE_REV          12
+#define FIRMWARE_VERSION      "1.7.6"
+#define FIRMWARE_REV          13
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -509,7 +509,7 @@ static bool httpPost(const String& payload, bool parse_gatt) {
 
 // ── Batch payload builder ─────────────────────────────────────────────────────
 
-static String buildPayload(bool include_presence) {
+static String buildPayload(bool include_presence, bool pool_offline = false) {
     JsonDocument doc;
     doc["relay_id"] = g_id;
     doc["rev"] = FIRMWARE_REV;
@@ -537,6 +537,8 @@ static String buildPayload(bool include_presence) {
             pls[kv.first.c_str()] = kv.second;
     }
 
+    if (pool_offline) doc["pool_offline"] = true;
+
     String payload;
     serializeJson(doc, payload);
     return payload;
@@ -552,7 +554,7 @@ static void bufferPush(const String& payload) {
     g_batch_queue.push_back(payload);
 }
 
-static void postBatch() {
+static void postBatch(bool pool_offline = false) {
     Serial.printf("Scan: %u devices  buffer: %u  fw=%s  rev=%d\n",
                   (unsigned)g_seen.size(), (unsigned)g_batch_queue.size(),
                   FIRMWARE_VERSION, FIRMWARE_REV);
@@ -567,9 +569,9 @@ static void postBatch() {
         }
     }
 
-    if (g_seen.empty()) return;
+    if (g_seen.empty() && !pool_offline) return;
 
-    if (!httpPost(buildPayload(true), true))
+    if (!httpPost(buildPayload(true, pool_offline), true))
         bufferPush(buildPayload(false));
 }
 
@@ -693,35 +695,6 @@ static bool postPoolReading(const String& hex) {
     return still_assigned;
 }
 
-static void postOfflineStatus() {
-    JsonDocument doc;
-    doc["relay_id"] = g_id;
-    doc["address"]  = g_pool_addr;
-    doc["label"]    = g_pool_label;
-    doc["offline"]  = true;
-    String payload;
-    serializeJson(doc, payload);
-
-    HTTPClient http;
-    http.begin(String(g_url) + "/api/pool/relay-reading");
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("Authorization", String("Bearer ") + g_token);
-    http.setTimeout(HTTP_TIMEOUT_MS);
-    int code = http.POST(payload);
-    if (code == 200) {
-        g_last_post_ok_ms = millis();
-        String resp = http.getString();
-        JsonDocument rdoc;
-        if (deserializeJson(rdoc, resp) == DeserializationError::Ok && rdoc["pool_monitor"].isNull()) {
-            Serial.println("Pool: server cleared assignment while offline");
-            savePoolMonitor("", "");
-            g_pool_addr  = "";
-            g_pool_label = "";
-        }
-    }
-    http.end();
-}
-
 static void doPoolMonitorCycle() {
     checkAppWatchdog();
 
@@ -764,11 +737,9 @@ static void doPoolMonitorCycle() {
         bool device_found = g_seen.count(addr_lc.c_str()) > 0;
 
         if (!device_found) {
-            // Post the BLE batch for presence detection, then report pool offline.
             g_current_op = "http-post";
-            postBatch();
+            postBatch(true);
             g_current_op = "";
-            postOfflineStatus();
             maybeSendPendingCrash();
             return;
         }

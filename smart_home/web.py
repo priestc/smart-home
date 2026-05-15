@@ -230,6 +230,14 @@ def ble_relay():
             "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"
         )
 
+        if data.get("pool_offline"):
+            conn.execute(
+                "INSERT INTO relay_log "
+                "(ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json, labeled_json, rev) "
+                "VALUES (strftime('%Y-%m-%d %H:%M:%S','now'), ?, NULL, 0, 0, NULL, NULL, NULL)",
+                (relay_cfg["id"],),
+            )
+
         # Atomically claim any pending GATT tasks queued for this relay
         pending_tasks = _relay.claim_pending_tasks(conn, relay_cfg["id"])
 
