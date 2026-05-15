@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.21"
-#define FIRMWARE_REV          28
+#define FIRMWARE_VERSION      "1.7.22"
+#define FIRMWARE_REV          29
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -592,6 +592,7 @@ static void poolDisconnect() {
 
 static void doPoolMonitorCycle() {
     checkAppWatchdog();
+    unsigned long cycle_start_ms = millis();
 
     static int s_pool_wifi_fails = 0;
     if (WiFi.status() != WL_CONNECTED) {
@@ -732,6 +733,14 @@ static void doPoolMonitorCycle() {
     postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now);
     g_current_op = "";
     maybeSendPendingCrash();
+
+    // Pace the cycle the same way the regular loop does — prevents rapid BLE cycling
+    // when scans fail to start (BLE stack needs idle time to recover after a failed connect).
+    unsigned long elapsed = millis() - cycle_start_ms;
+    if (POST_INTERVAL_MS > elapsed + 3000UL)
+        delay(POST_INTERVAL_MS - elapsed);
+    else
+        delay(3000UL);
 }
 
 // ── Arduino entry points ──────────────────────────────────────────────────────
