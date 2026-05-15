@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.13"
-#define FIRMWARE_REV          20
+#define FIRMWARE_VERSION      "1.7.15"
+#define FIRMWARE_REV          22
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -73,6 +73,7 @@ static char g_id[32];
 struct DevInfo {
     String name;
     int8_t rssi;
+    esp_ble_addr_type_t addr_type;
     bool has_mfr;
     uint16_t mfr_company;
     String mfr_hex;
@@ -91,11 +92,12 @@ static std::vector<String> g_batch_queue;
 
 // ── Persistent pool monitor state ─────────────────────────────────────────────
 
-static String     g_pool_addr;
-static String     g_pool_label;
-static BLEClient* g_pool_client   = nullptr;
-static int        g_pool_fails    = 0;
-static bool       g_pool_seen_last = false;  // was pool monitor advertising in the previous scan?
+static String              g_pool_addr;
+static String              g_pool_label;
+static BLEClient*          g_pool_client    = nullptr;
+static int                 g_pool_fails     = 0;
+static bool                g_pool_seen_last = false;
+static esp_ble_addr_type_t g_pool_addr_type = BLE_ADDR_TYPE_PUBLIC;
 #define POOL_OFFLINE_THRESHOLD 2
 
 // ── App watchdog state ────────────────────────────────────────────────────────
@@ -139,10 +141,11 @@ class AdvCallback : public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice dev) override {
         std::string addr = dev.getAddress().toString().c_str();
         DevInfo info;
-        info.name    = dev.haveName() ? dev.getName().c_str() : "";
-        info.rssi    = dev.getRSSI();
-        info.has_mfr = false;
-        info.has_svc = false;
+        info.name      = dev.haveName() ? dev.getName().c_str() : "";
+        info.rssi      = dev.getRSSI();
+        info.addr_type = (esp_ble_addr_type_t)dev.getAddressType();
+        info.has_mfr   = false;
+        info.has_svc   = false;
 
         if (dev.haveManufacturerData()) {
             String mfr = dev.getManufacturerData();
@@ -621,9 +624,10 @@ static void doPoolMonitorCycle() {
             g_current_op = "pool-connect";
             Serial.printf("Pool: connecting to %s (%s)...\n",
                           g_pool_label.c_str(), g_pool_addr.c_str());
+            Serial.printf("Pool: addr_type=%d\n", g_pool_addr_type);
             bool ok = g_pool_client->connect(
-                BLEAddress(g_pool_addr.c_str(), BLE_ADDR_TYPE_PUBLIC),
-                BLE_ADDR_TYPE_PUBLIC,
+                BLEAddress(g_pool_addr.c_str(), g_pool_addr_type),
+                g_pool_addr_type,
                 12
             );
             if (!ok) {
@@ -676,15 +680,24 @@ static void doPoolMonitorCycle() {
     scan->start(SCAN_SECONDS, false);
     scan->clearResults();
 
-    // Check if pool monitor is advertising. If offline and seen, the NEXT cycle
-    // will reset g_pool_fails before scanning so the connect attempt runs first.
+    // Check if pool monitor is advertising. Update addr type from scan so the
+    // next connect attempt uses the correct type. If offline and seen, the NEXT
+    // cycle will reset g_pool_fails before scanning so connect runs first.
     bool pool_seen_now = false;
     if (g_pool_addr.length() > 0) {
         String addr_lc = g_pool_addr;
         addr_lc.toLowerCase();
-        pool_seen_now = g_seen.count(addr_lc.c_str()) > 0;
-        if (pool_offline && pool_seen_now)
-            Serial.println("Pool: device found advertising — will reconnect next cycle");
+        auto it = g_seen.find(addr_lc.c_str());
+        pool_seen_now = (it != g_seen.end());
+        if (pool_seen_now) {
+            if (it->second.addr_type != g_pool_addr_type) {
+                Serial.printf("Pool: addr_type updated %d -> %d\n",
+                              g_pool_addr_type, it->second.addr_type);
+                g_pool_addr_type = it->second.addr_type;
+            }
+            if (pool_offline)
+                Serial.println("Pool: device found advertising — will reconnect next cycle");
+        }
     }
     g_pool_seen_last = pool_seen_now;
 
