@@ -824,19 +824,24 @@ def update_relay(relay_name):
     new_ver, new_rev = _relay.firmware_version()
     if new_ver != "?":
         click.echo(f"\nLatest firmware: v{new_ver}  (rev{new_rev})")
-        click.echo("Reading current firmware version from relay (up to 20 s)...")
-        current = _relay.read_relay_version(port)
-        if current is not None:
-            cur_ver, cur_rev = current
-            click.echo(f"Current firmware: v{cur_ver}  (rev{cur_rev})")
+        conn = open_db(DEFAULT_DB)
+        row = conn.execute(
+            "SELECT rev FROM relay_log WHERE relay_id = ? AND rev IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (relay_id,),
+        ).fetchone()
+        conn.close()
+        if row is not None:
+            cur_rev = row["rev"]
+            click.echo(f"Last seen revision: rev{cur_rev}")
             if cur_rev == new_rev:
                 click.echo(
                     f"\nRelay '{relay_id}' is already running the latest firmware "
-                    f"(v{cur_ver}  rev{cur_rev}). Nothing to do."
+                    f"(rev{cur_rev}). Nothing to do."
                 )
                 return
         else:
-            click.echo("Could not read firmware version from relay — proceeding with flash.")
+            click.echo(f"No relay-log entries found for '{relay_id}' — proceeding with flash.")
 
     click.echo(f"\nFlashing firmware to relay '{relay_id}' at {port} ...")
     click.echo("WiFi credentials and token stored on the device will be preserved.\n")
@@ -849,7 +854,7 @@ def update_relay(relay_name):
         click.echo(f"\nFlash failed: {e}")
         return
 
-    click.echo(f"\nDone. Relay '{relay_id}' is running v{new_ver} (rev{new_rev}).")
+    click.echo(f"\nDone. Relay '{relay_id}' flashed with v{new_ver} (rev{new_rev}).")
 
 
 @main.command("pair-relay")
