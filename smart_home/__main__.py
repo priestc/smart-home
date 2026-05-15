@@ -1943,13 +1943,28 @@ def monitor(duration, verbose, db, no_db):
         if m.get("node", "server") != "server"
     }
 
-    # Pre-seed pool_offline_alerted for relay pools whose last reading is absent or
-    # stale so that the first new reading triggers a sensor_online event.
-    for pool_lbl in _relay_pool_labels:
-        last_dt = pool_last_reading.get(pool_lbl)
-        if last_dt is None or (datetime.datetime.now() - last_dt).total_seconds() >= 600:
-            pool_offline_alerted.add(pool_lbl)
-            click.echo(f"Pool monitor '{pool_lbl}' starts as offline (no recent reading)")
+    # For relay pools whose last reading is absent or stale: record a sensor_offline
+    # DB event (if not already offline) so that the next relay POST fires sensor_online.
+    # The snapshot_loop skips relay pools — events are handled by web.py on each POST.
+    if conn:
+        for pool_lbl in _relay_pool_labels:
+            last_dt = pool_last_reading.get(pool_lbl)
+            if last_dt is None or (datetime.datetime.now() - last_dt).total_seconds() >= 600:
+                pool_offline_alerted.add(pool_lbl)
+                last_evt = conn.execute(
+                    "SELECT event_type FROM temperature_events "
+                    "WHERE event_type IN ('sensor_offline','sensor_online') "
+                    "AND (details=? OR details LIKE ?) ORDER BY ts DESC LIMIT 1",
+                    (pool_lbl, f"{pool_lbl} — %"),
+                ).fetchone()
+                if last_evt is None or last_evt[0] == "sensor_online":
+                    ts_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    conn.execute(
+                        "INSERT OR IGNORE INTO temperature_events (ts, event_type, value, details) VALUES (?,?,?,?)",
+                        (ts_now, "sensor_offline", None, pool_lbl),
+                    )
+                    conn.commit()
+                    click.echo(f"Pool monitor '{pool_lbl}' offline event inserted at startup")
 
     # Tracks which hour-of-day the record check last ran; -1 forces a run at startup
     _last_record_check_hour = -1
@@ -2277,6 +2292,8 @@ def monitor(duration, verbose, db, no_db):
                     pool_last_reading[pool_lbl] = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
 
             for pool_label in list(pool_config.values()):
+                if pool_label in _relay_pool_labels:
+                    continue  # events fired immediately by web.py on each relay POST
                 last = pool_last_reading.get(pool_label)
                 if last is None:
                     continue

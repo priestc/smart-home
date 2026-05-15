@@ -212,6 +212,7 @@ def ble_relay():
 
         # Handle pool reading if included in the batch (pool-monitor relays only).
         pool_reading = data.get("pool_reading") or {}
+        _pool_reading_stored = False
         if pool_reading:
             pool_result_hex = pool_reading.get("result_hex") or ""
             pool_label = pool_reading.get("label") or ""
@@ -230,8 +231,69 @@ def ble_relay():
                     reading.label = pool_label
                     reading.rssi = pool_rssi
                     insert_pool_reading(conn, reading)
+                    _pool_reading_stored = True
                     if pool_rssi is not None:
                         labeled_seen[pool_label] = pool_rssi
+
+        # Fire sensor_online/offline events immediately from the relay's pool state.
+        # The relay detects the pool's presence in every scan, so we don't need to
+        # wait for the snapshot_loop's 10-minute timer to catch state transitions.
+        _relay_id = relay_cfg.get("id", "")
+        if _relay_id:
+            from smart_home import pool as _pool_mod
+            _relay_pool = next(
+                (m for m in _pool_mod.load_config() if m.get("node") == _relay_id),
+                None,
+            )
+            if _relay_pool:
+                _evt_label = _relay_pool.get("label", "")
+            if _relay_pool and _evt_label:
+                _last_pool_evt = conn.execute(
+                    "SELECT event_type FROM temperature_events "
+                    "WHERE event_type IN ('sensor_offline','sensor_online') "
+                    "AND (details=? OR details LIKE ?) ORDER BY ts DESC LIMIT 1",
+                    (_evt_label, f"{_evt_label} — %"),
+                ).fetchone()
+                _now_ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+                if _pool_reading_stored:
+                    # Successful read — fire online if we were offline.
+                    if _last_pool_evt and _last_pool_evt[0] == "sensor_offline":
+                        _off_row = conn.execute(
+                            "SELECT ts FROM temperature_events WHERE event_type='sensor_offline' AND details=? ORDER BY ts DESC LIMIT 1",
+                            (_evt_label,),
+                        ).fetchone()
+                        if _off_row:
+                            _off_dt = datetime.datetime.strptime(_off_row[0], "%Y-%m-%d %H:%M:%S")
+                            _secs = int((datetime.datetime.utcnow() - _off_dt).total_seconds())
+                            _hrs, _rem = divmod(_secs, 3600)
+                            _m = _rem // 60
+                            _dur = f"{_hrs}h {_m}m" if _hrs else f"{_m}m"
+                            _online_details = f"{_evt_label} — offline for {_dur}"
+                        else:
+                            _online_details = _evt_label
+                        conn.execute(
+                            "INSERT OR IGNORE INTO temperature_events (ts, event_type, value, details) VALUES (?,?,?,?)",
+                            (_now_ts, "sensor_online", None, _online_details),
+                        )
+                        from smart_home import push as _push
+                        _push.send_notification(
+                            title="Pool Monitor Online",
+                            body=f"{_evt_label} is back online",
+                        )
+
+                elif data.get("pool_offline") and not data.get("pool_seen") and not data.get("pool_skip"):
+                    # Device not found in scan — fire offline if we were online.
+                    if _last_pool_evt is None or _last_pool_evt[0] == "sensor_online":
+                        conn.execute(
+                            "INSERT OR IGNORE INTO temperature_events (ts, event_type, value, details) VALUES (?,?,?,?)",
+                            (_now_ts, "sensor_offline", None, _evt_label),
+                        )
+                        from smart_home import push as _push
+                        _push.send_notification(
+                            title="Pool Monitor Offline",
+                            body=f"{_evt_label} has stopped responding",
+                        )
 
         # Log this relay check-in for `smart-home relay-log`
         import json as _json
