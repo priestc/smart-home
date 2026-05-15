@@ -584,15 +584,30 @@ def relay_log(db):
             delta_str = click.style(f"+{secs}s", fg="bright_black")
         last_ts_per_relay[relay_id] = ts_utc
 
-        is_pool = row["rev"] is None and row["n_adverts"] == 0
-        rev_str = f"r{row['rev']}" if row["rev"] is not None else "r?"
-
         parts = [
             click.style(f"[{ts_local}]", fg="blue"),
             click.style(f"{relay_id:<14}", fg="green", bold=True),
         ]
         if delta_str:
             parts.append(delta_str)
+
+        # Crash entry (n_adverts == -1)
+        if row["n_adverts"] == -1:
+            crash_info = _json.loads(row["labeled_json"] or "{}")
+            reason = crash_info.get("_crash", "?")
+            op = crash_info.get("_op")
+            uptime = crash_info.get("_uptime")
+            msg = f"CRASH: {reason}"
+            if op:
+                msg += f" (in: {op})"
+            if uptime is not None:
+                msg += f" [up {uptime}s]"
+            parts.append(click.style(msg, fg="red", bold=True))
+            return "  ".join(parts)
+
+        is_pool = row["rev"] is None and row["n_adverts"] == 0
+        rev_str = f"r{row['rev']}" if row["rev"] is not None else "r?"
+
         if is_pool:
             parts.append(click.style("pool", fg="cyan"))
         else:

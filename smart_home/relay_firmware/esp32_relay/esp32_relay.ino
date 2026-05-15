@@ -43,12 +43,13 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <esp_system.h>
 #include <map>
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.5.0"
-#define FIRMWARE_REV          5
+#define FIRMWARE_VERSION      "1.6.0"
+#define FIRMWARE_REV          6
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -106,6 +107,13 @@ static String     g_pool_label;
 static BLEClient* g_pool_client  = nullptr;
 static int        g_pool_fails   = 0;
 #define POOL_OFFLINE_THRESHOLD 2
+
+// ── App watchdog state ────────────────────────────────────────────────────────
+
+static String         g_current_op;
+static unsigned long  g_last_post_ok_ms = 0;
+static unsigned long  g_startup_ms      = 0;
+#define APP_WDT_MS (4UL * 60UL * 1000UL)
 
 // ── Pair mode state ───────────────────────────────────────────────────────────
 
@@ -384,6 +392,41 @@ static void connectWiFi() {
 
 static void poolDisconnect();  // forward declaration
 
+// ── Crash reporting ───────────────────────────────────────────────────────────
+
+static void sendCrashReport(const String& reason) {
+    if (WiFi.status() != WL_CONNECTED || strlen(g_url) == 0) return;
+    JsonDocument doc;
+    doc["relay_id"] = g_id;
+    doc["reason"]   = reason;
+    doc["uptime_s"] = millis() / 1000;
+    if (g_current_op.length()) doc["op"] = g_current_op;
+    String payload;
+    serializeJson(doc, payload);
+    HTTPClient http;
+    http.begin(String(g_url) + "/api/ble-relay/crash");
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", String("Bearer ") + g_token);
+    http.setTimeout(10000);
+    int code = http.POST(payload);
+    Serial.printf("Crash report POST -> %d\n", code);
+    http.end();
+}
+
+static void checkAppWatchdog() {
+    unsigned long ref = g_last_post_ok_ms > 0 ? g_last_post_ok_ms : g_startup_ms;
+    if (ref == 0) return;
+    unsigned long elapsed = millis() - ref;
+    if (elapsed > APP_WDT_MS) {
+        String msg = "no POST for " + String(elapsed / 1000) + "s";
+        if (g_current_op.length()) msg += "; stuck in: " + g_current_op;
+        Serial.println("App watchdog: " + msg);
+        sendCrashReport(msg);
+        delay(3000);
+        ESP.restart();
+    }
+}
+
 // ── HTTP POST to /api/ble-relay ───────────────────────────────────────────────
 
 static bool httpPost(const String& payload, bool parse_gatt) {
@@ -395,6 +438,7 @@ static bool httpPost(const String& payload, bool parse_gatt) {
     int code = http.POST(const_cast<String&>(payload));
 
     if (code == 200) {
+        g_last_post_ok_ms = millis();
         if (parse_gatt) {
             String resp = http.getString();
             JsonDocument rdoc;
@@ -616,6 +660,7 @@ static bool postPoolReading(const String& hex) {
 
     bool still_assigned = true;
     if (code == 200) {
+        g_last_post_ok_ms = millis();
         String resp = http.getString();
         JsonDocument rdoc;
         if (deserializeJson(rdoc, resp) == DeserializationError::Ok) {
@@ -650,6 +695,7 @@ static void postOfflineStatus() {
     http.setTimeout(HTTP_TIMEOUT_MS);
     int code = http.POST(payload);
     if (code == 200) {
+        g_last_post_ok_ms = millis();
         String resp = http.getString();
         JsonDocument rdoc;
         if (deserializeJson(rdoc, resp) == DeserializationError::Ok && rdoc["pool_monitor"].isNull()) {
@@ -663,6 +709,8 @@ static void postOfflineStatus() {
 }
 
 static void doPoolMonitorCycle() {
+    checkAppWatchdog();
+
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("Pool: WiFi lost — reconnecting...");
         WiFi.reconnect();
@@ -673,6 +721,7 @@ static void doPoolMonitorCycle() {
     // ── Offline/scanning mode ────────────────────────────────────────────────
     if (g_pool_fails >= POOL_OFFLINE_THRESHOLD) {
         Serial.printf("Pool: offline (%d failures) — scanning for device...\n", g_pool_fails);
+        g_current_op = "pool-scan";
         g_seen.clear();
         g_scan_ts = getTimestamp();
         BLEScan* scan = BLEDevice::getScan();
@@ -704,6 +753,7 @@ static void doPoolMonitorCycle() {
     }
 
     if (!g_pool_client->isConnected()) {
+        g_current_op = "pool-connect";
         Serial.printf("Pool: connecting to %s (%s)...\n",
                       g_pool_label.c_str(), g_pool_addr.c_str());
         bool ok = g_pool_client->connect(
@@ -738,6 +788,7 @@ static void doPoolMonitorCycle() {
         return;
     }
 
+    g_current_op = "pool-read";
     String val = chr->readValue();
     if (val.length() == 0) {
         Serial.println("Pool: empty GATT read — reconnecting");
@@ -752,7 +803,9 @@ static void doPoolMonitorCycle() {
     Serial.printf("Pool: read %u bytes  label=%s\n",
                   (unsigned)val.length(), g_pool_label.c_str());
 
+    g_current_op = "pool-post";
     bool still_assigned = postPoolReading(hex);
+    g_current_op = "";
     if (still_assigned) {
         delay(30000);
     }
@@ -792,6 +845,16 @@ void setup() {
     }
 
     connectWiFi();
+    g_startup_ms = millis();
+    {
+        esp_reset_reason_t rst = esp_reset_reason();
+        const char* rst_str = nullptr;
+        if      (rst == ESP_RST_PANIC)    rst_str = "panic/exception";
+        else if (rst == ESP_RST_INT_WDT)  rst_str = "interrupt watchdog";
+        else if (rst == ESP_RST_TASK_WDT) rst_str = "task watchdog";
+        else if (rst == ESP_RST_WDT)      rst_str = "other watchdog";
+        if (rst_str) sendCrashReport(String("hard reset: ") + rst_str);
+    }
     String ble_name = String("SmHome-") + g_id;
     BLEDevice::init(ble_name.c_str());
     Serial.printf("BLE relay ready  id=%s  ble=%s  fw=%s  rev=%d\n",
@@ -805,6 +868,8 @@ void loop() {
         return;
     }
 
+    checkAppWatchdog();
+
     unsigned long cycle_start = millis();
 
     if (WiFi.status() != WL_CONNECTED) {
@@ -814,6 +879,7 @@ void loop() {
         return;
     }
 
+    g_current_op = "ble-scan";
     g_seen.clear();
     g_gatt_tasks.clear();
     g_scan_ts = getTimestamp();
@@ -826,10 +892,15 @@ void loop() {
     scan->start(SCAN_SECONDS, false);
     scan->clearResults();
 
+    g_current_op = "http-post";
     postBatch();
+    g_current_op = "";
 
-    if (!g_gatt_tasks.empty())
+    if (!g_gatt_tasks.empty()) {
+        g_current_op = "gatt-tasks";
         processGattTasks();
+        g_current_op = "";
+    }
 
     if (g_pair_mode)
         pairModeStart(g_pair_label);

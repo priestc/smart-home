@@ -227,7 +227,7 @@ def ble_relay():
             ),
         )
         conn.execute(
-            "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes')"
+            "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"
         )
 
         # Atomically claim any pending GATT tasks queued for this relay
@@ -294,6 +294,44 @@ def ble_relay_gatt_result():
             _relay.set_task_done(conn, task_id, data.get("result_hex") or "")
         else:
             _relay.set_task_failed(conn, task_id, data.get("error") or "relay failed")
+
+    return jsonify({"ok": True})
+
+
+@app.post("/api/ble-relay/crash")
+def ble_relay_crash():
+    """Receive a crash report from an ESP32 relay."""
+    from smart_home import relay as _relay
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return jsonify({"error": "missing or invalid Authorization header"}), 401
+    token = auth[len("Bearer "):]
+    relay_cfg = _relay.find_relay_by_token(token)
+    if relay_cfg is None:
+        return jsonify({"error": "unknown token"}), 401
+
+    data = request.get_json(silent=True) or {}
+    reason = data.get("reason") or "unknown"
+    op = data.get("op")
+    uptime_s = data.get("uptime_s")
+
+    crash_info: dict = {"_crash": reason}
+    if op:
+        crash_info["_op"] = op
+    if uptime_s is not None:
+        crash_info["_uptime"] = uptime_s
+
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO relay_log "
+            "(ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json, labeled_json, rev) "
+            "VALUES (strftime('%Y-%m-%d %H:%M:%S','now'), ?, NULL, -1, 0, NULL, ?, NULL)",
+            (relay_cfg["id"], _json.dumps(crash_info)),
+        )
+        conn.execute(
+            "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"
+        )
 
     return jsonify({"ok": True})
 
@@ -6835,7 +6873,7 @@ def api_pool_relay_reading():
                 (relay_cfg["id"], labeled_json),
             )
             conn.execute(
-                "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes')"
+                "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"
             )
 
     # Return current pool_monitor assignment so the relay knows if it should stop.
