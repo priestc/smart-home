@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.8"
-#define FIRMWARE_REV          15
+#define FIRMWARE_VERSION      "1.7.9"
+#define FIRMWARE_REV          16
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -656,10 +656,13 @@ static void processGattTasks() {
 // ── Persistent pool monitor ───────────────────────────────────────────────────
 
 static void poolDisconnect() {
-    if (g_pool_client && g_pool_client->isConnected()) {
+    if (!g_pool_client) return;
+    if (g_pool_client->isConnected()) {
         g_pool_client->disconnect();
         delay(300);
     }
+    delete g_pool_client;
+    g_pool_client = nullptr;
 }
 
 static void doPoolMonitorCycle() {
@@ -704,6 +707,8 @@ static void doPoolMonitorCycle() {
             if (!ok) {
                 g_pool_fails++;
                 pool_offline = true;
+                poolDisconnect();
+                delay(500);
                 Serial.printf("Pool: connect failed (%d/%d)\n", g_pool_fails, POOL_OFFLINE_THRESHOLD);
             } else {
                 Serial.printf("Pool: connected to %s\n", g_pool_label.c_str());
