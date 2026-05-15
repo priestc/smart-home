@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.6.0"
-#define FIRMWARE_REV          6
+#define FIRMWARE_VERSION      "1.7.0"
+#define FIRMWARE_REV          7
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -111,9 +111,10 @@ static int        g_pool_fails   = 0;
 // ── App watchdog state ────────────────────────────────────────────────────────
 
 static String         g_current_op;
+static String         g_pending_crash_reason;
 static unsigned long  g_last_post_ok_ms = 0;
 static unsigned long  g_startup_ms      = 0;
-#define APP_WDT_MS (4UL * 60UL * 1000UL)
+#define APP_WDT_MS (2UL * 60UL * 1000UL)
 
 // ── Pair mode state ───────────────────────────────────────────────────────────
 
@@ -421,10 +422,23 @@ static void checkAppWatchdog() {
         String msg = "no POST for " + String(elapsed / 1000) + "s";
         if (g_current_op.length()) msg += "; stuck in: " + g_current_op;
         Serial.println("App watchdog: " + msg);
+        // Save to NVS so it's sent after reboot if sendCrashReport fails now
+        {
+            Preferences p;
+            p.begin("relay", false);
+            p.putString("crash_reason", msg);
+            p.end();
+        }
         sendCrashReport(msg);
         delay(3000);
         ESP.restart();
     }
+}
+
+static void maybeSendPendingCrash() {
+    if (g_pending_crash_reason.length() == 0 || g_last_post_ok_ms == 0) return;
+    sendCrashReport(g_pending_crash_reason);
+    g_pending_crash_reason = "";
 }
 
 // ── HTTP POST to /api/ble-relay ───────────────────────────────────────────────
@@ -711,12 +725,22 @@ static void postOfflineStatus() {
 static void doPoolMonitorCycle() {
     checkAppWatchdog();
 
+    static int s_pool_wifi_fails = 0;
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Pool: WiFi lost — reconnecting...");
-        WiFi.reconnect();
+        s_pool_wifi_fails++;
+        if (s_pool_wifi_fails % 4 == 0) {
+            Serial.printf("Pool: WiFi lost (%d failures) — full reconnect\n", s_pool_wifi_fails);
+            WiFi.disconnect();
+            delay(1000);
+            WiFi.begin(g_ssid, g_pass);
+        } else {
+            Serial.println("Pool: WiFi lost — reconnecting...");
+            WiFi.reconnect();
+        }
         delay(5000);
         return;
     }
+    s_pool_wifi_fails = 0;
 
     // ── Offline/scanning mode ────────────────────────────────────────────────
     if (g_pool_fails >= POOL_OFFLINE_THRESHOLD) {
@@ -742,6 +766,7 @@ static void doPoolMonitorCycle() {
             // Fall through immediately to connect while it's still in the advertising window.
         } else {
             postOfflineStatus();
+            maybeSendPendingCrash();
             return;
         }
     }
@@ -806,6 +831,7 @@ static void doPoolMonitorCycle() {
     g_current_op = "pool-post";
     bool still_assigned = postPoolReading(hex);
     g_current_op = "";
+    maybeSendPendingCrash();
     if (still_assigned) {
         delay(30000);
     }
@@ -847,13 +873,34 @@ void setup() {
     connectWiFi();
     g_startup_ms = millis();
     {
-        esp_reset_reason_t rst = esp_reset_reason();
-        const char* rst_str = nullptr;
-        if      (rst == ESP_RST_PANIC)    rst_str = "panic/exception";
-        else if (rst == ESP_RST_INT_WDT)  rst_str = "interrupt watchdog";
-        else if (rst == ESP_RST_TASK_WDT) rst_str = "task watchdog";
-        else if (rst == ESP_RST_WDT)      rst_str = "other watchdog";
-        if (rst_str) sendCrashReport(String("hard reset: ") + rst_str);
+        // Check NVS for crash reason saved by app watchdog on previous boot
+        Preferences p;
+        p.begin("relay", true);
+        String saved = p.getString("crash_reason", "");
+        p.end();
+        if (saved.length() > 0) {
+            g_pending_crash_reason = saved;
+            Preferences p2;
+            p2.begin("relay", false);
+            p2.remove("crash_reason");
+            p2.end();
+            Serial.println("Pending crash report (from NVS): " + saved);
+        }
+
+        // Check hardware reset reason (only set if no NVS reason already loaded)
+        if (g_pending_crash_reason.length() == 0) {
+            esp_reset_reason_t rst = esp_reset_reason();
+            const char* rst_str = nullptr;
+            if      (rst == ESP_RST_PANIC)    rst_str = "panic/exception";
+            else if (rst == ESP_RST_INT_WDT)  rst_str = "interrupt watchdog";
+            else if (rst == ESP_RST_TASK_WDT) rst_str = "task watchdog";
+            else if (rst == ESP_RST_WDT)      rst_str = "other watchdog";
+            else if (rst == ESP_RST_BROWNOUT) rst_str = "brownout";
+            if (rst_str) {
+                g_pending_crash_reason = String("hard reset: ") + rst_str;
+                Serial.println("Crash detected: " + g_pending_crash_reason);
+            }
+        }
     }
     String ble_name = String("SmHome-") + g_id;
     BLEDevice::init(ble_name.c_str());
@@ -872,12 +919,22 @@ void loop() {
 
     unsigned long cycle_start = millis();
 
+    static int s_wifi_fail_count = 0;
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("WiFi lost — reconnecting...");
-        WiFi.reconnect();
+        s_wifi_fail_count++;
+        if (s_wifi_fail_count % 4 == 0) {
+            Serial.printf("WiFi lost (%d failures) — full reconnect\n", s_wifi_fail_count);
+            WiFi.disconnect();
+            delay(1000);
+            WiFi.begin(g_ssid, g_pass);
+        } else {
+            Serial.println("WiFi lost — reconnecting...");
+            WiFi.reconnect();
+        }
         delay(5000);
         return;
     }
+    s_wifi_fail_count = 0;
 
     g_current_op = "ble-scan";
     g_seen.clear();
@@ -895,6 +952,7 @@ void loop() {
     g_current_op = "http-post";
     postBatch();
     g_current_op = "";
+    maybeSendPendingCrash();
 
     if (!g_gatt_tasks.empty()) {
         g_current_op = "gatt-tasks";
