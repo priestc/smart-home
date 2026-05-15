@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.27"
-#define FIRMWARE_REV          34
+#define FIRMWARE_VERSION      "1.7.28"
+#define FIRMWARE_REV          35
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -664,8 +664,14 @@ static void doPoolMonitorCycle() {
     bool pool_offline = true;
     bool pool_seen_now = false;
 
+    // Only attempt GATT read every other cycle — the YC01 data changes slowly
+    // and back-to-back connects stress the BLE stack unnecessarily.
+    static bool s_pool_read_this_cycle = false;
+    s_pool_read_this_cycle = !s_pool_read_this_cycle;
+
     if (g_pool_addr.length() > 0) {
         // Find YC01 by name first; fall back to configured address.
+        // Always do this — even on skipped cycles — so pool_seen_now is accurate.
         String cur_addr;
         uint8_t cur_type = BLE_ADDR_TYPE_PUBLIC;
         for (auto& kv : g_seen) {
@@ -691,95 +697,97 @@ static void doPoolMonitorCycle() {
         }
         pool_seen_now = (cur_addr.length() > 0);
 
-        if (!g_pool_client) {
-            g_pool_client = BLEDevice::createClient();
-            g_pool_client->setMTU(23);
-        }
+        if (s_pool_read_this_cycle) {
+            if (!g_pool_client) {
+                g_pool_client = BLEDevice::createClient();
+                g_pool_client->setMTU(23);
+            }
 
-        // Connect if not already connected, device seen, and cooldown expired.
-        if (!g_pool_client->isConnected() && pool_seen_now &&
-            millis() >= g_pool_retry_after_ms) {
-            g_current_op = "pool-connect";
-            unsigned long connect_start = millis();
-            Serial.printf("Pool: connecting to %s (%s) type=%d...\n",
-                          g_pool_label.c_str(), cur_addr.c_str(), cur_type);
-            bool ok = g_pool_client->connect(
-                BLEAddress(cur_addr.c_str(), cur_type),
-                cur_type,
-                20000  // 20 s — matches Python BleakClient timeout
-            );
-            unsigned long connect_ms = millis() - connect_start;
-            if (!ok) {
-                g_pool_fails++;
-                g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
-                g_pool_status = connect_ms < 2000 ? "connect_fail_fast" : "connect_timeout";
-                Serial.printf("Pool: connect failed in %lums (fail #%d) [%s], retry in %lus\n",
-                              connect_ms, g_pool_fails, g_pool_status.c_str(),
-                              POOL_RETRY_INTERVAL_MS / 1000UL);
-                if (connect_ms >= 18000) {
-                    // Timeout: BLE controller is stuck in connection-initiation mode
-                    // and can no longer scan. Reset the stack to recover.
-                    resetBLEStack();
+            // Connect if not already connected, device seen, and cooldown expired.
+            if (!g_pool_client->isConnected() && pool_seen_now &&
+                millis() >= g_pool_retry_after_ms) {
+                g_current_op = "pool-connect";
+                unsigned long connect_start = millis();
+                Serial.printf("Pool: connecting to %s (%s) type=%d...\n",
+                              g_pool_label.c_str(), cur_addr.c_str(), cur_type);
+                bool ok = g_pool_client->connect(
+                    BLEAddress(cur_addr.c_str(), cur_type),
+                    cur_type,
+                    20000  // 20 s — matches Python BleakClient timeout
+                );
+                unsigned long connect_ms = millis() - connect_start;
+                if (!ok) {
+                    g_pool_fails++;
+                    g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
+                    g_pool_status = connect_ms < 2000 ? "connect_fail_fast" : "connect_timeout";
+                    Serial.printf("Pool: connect failed in %lums (fail #%d) [%s], retry in %lus\n",
+                                  connect_ms, g_pool_fails, g_pool_status.c_str(),
+                                  POOL_RETRY_INTERVAL_MS / 1000UL);
+                    if (connect_ms >= 18000) {
+                        // Timeout: BLE controller is stuck in connection-initiation mode
+                        // and can no longer scan. Reset the stack to recover.
+                        resetBLEStack();
+                    } else {
+                        poolDisconnect();
+                    }
                 } else {
-                    poolDisconnect();
-                }
-            } else {
-                g_pool_fails = 0;
-                g_pool_retry_after_ms = 0;
-                g_pool_status = "";
-                Serial.printf("Pool: connected to %s in %lums\n",
-                              g_pool_label.c_str(), connect_ms);
-            }
-        }
-
-        // Read GATT if connected (whether we just connected or were already connected).
-        if (g_pool_client && g_pool_client->isConnected()) {
-            // getServices() triggers GATT service discovery and returns the populated map.
-            // We iterate all services manually because Bluedroid's UUID comparator fails to
-            // match both 16-bit and 128-bit forms reliably — mirrors Python's read_gatt_char
-            // which finds the characteristic regardless of service UUID.
-            BLERemoteCharacteristic* chr = nullptr;
-            String svc_uuids;
-            std::map<std::string, BLERemoteService*>* pSvcs = g_pool_client->getServices();
-            if (pSvcs) {
-                for (auto& kv : *pSvcs) {
-                    svc_uuids += String(kv.first.c_str()) + " ";
-                    // Try 128-bit form first, then 16-bit — Bluedroid may store either.
-                    BLERemoteCharacteristic* c = kv.second->getCharacteristic(BLEUUID(YC01_CHAR_UUID));
-                    if (c && c->canRead()) { chr = c; break; }
-                    c = kv.second->getCharacteristic(BLEUUID((uint16_t)0xFF02));
-                    if (c && c->canRead()) { chr = c; break; }
-                }
-            }
-            Serial.printf("Pool: services found: [%s]\n", svc_uuids.c_str());
-
-            if (chr) {
-                g_current_op = "pool-read";
-                String val = chr->readValue();
-                if (val.length() > 0) {
-                    pool_hex  = hexEncode((const uint8_t*)val.c_str(), val.length());
-                    pool_rssi = g_pool_client->getRssi();
-                    pool_offline = false;
                     g_pool_fails = 0;
+                    g_pool_retry_after_ms = 0;
                     g_pool_status = "";
-                    Serial.printf("Pool: read %u bytes\n", (unsigned)val.length());
-                    // Disconnect immediately after reading — mirrors Python's connect-read-disconnect
-                    // pattern. Keeping the connection open risks hanging on the next readValue()
-                    // or getServices() call if the YC01 goes out of range before we reconnect.
-                    poolDisconnect();
+                    Serial.printf("Pool: connected to %s in %lums\n",
+                                  g_pool_label.c_str(), connect_ms);
+                }
+            }
+
+            // Read GATT if connected.
+            if (g_pool_client && g_pool_client->isConnected()) {
+                // getServices() triggers GATT service discovery and returns the populated map.
+                // We iterate all services manually because Bluedroid's UUID comparator fails to
+                // match both 16-bit and 128-bit forms reliably — mirrors Python's read_gatt_char
+                // which finds the characteristic regardless of service UUID.
+                BLERemoteCharacteristic* chr = nullptr;
+                String svc_uuids;
+                std::map<std::string, BLERemoteService*>* pSvcs = g_pool_client->getServices();
+                if (pSvcs) {
+                    for (auto& kv : *pSvcs) {
+                        svc_uuids += String(kv.first.c_str()) + " ";
+                        // Try 128-bit form first, then 16-bit — Bluedroid may store either.
+                        BLERemoteCharacteristic* c = kv.second->getCharacteristic(BLEUUID(YC01_CHAR_UUID));
+                        if (c && c->canRead()) { chr = c; break; }
+                        c = kv.second->getCharacteristic(BLEUUID((uint16_t)0xFF02));
+                        if (c && c->canRead()) { chr = c; break; }
+                    }
+                }
+                Serial.printf("Pool: services found: [%s]\n", svc_uuids.c_str());
+
+                if (chr) {
+                    g_current_op = "pool-read";
+                    String val = chr->readValue();
+                    if (val.length() > 0) {
+                        pool_hex  = hexEncode((const uint8_t*)val.c_str(), val.length());
+                        pool_rssi = g_pool_client->getRssi();
+                        pool_offline = false;
+                        g_pool_fails = 0;
+                        g_pool_status = "";
+                        Serial.printf("Pool: read %u bytes\n", (unsigned)val.length());
+                        // Disconnect immediately after reading — mirrors Python's connect-read-disconnect
+                        // pattern. Keeping the connection open risks hanging on the next readValue()
+                        // or getServices() call if the YC01 goes out of range before we reconnect.
+                        poolDisconnect();
+                    } else {
+                        g_pool_status = "empty_read";
+                        Serial.println("Pool: empty GATT read");
+                        poolDisconnect();
+                        g_pool_fails++;
+                        g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
+                    }
                 } else {
-                    g_pool_status = "empty_read";
-                    Serial.println("Pool: empty GATT read");
+                    g_pool_status = String("no_char svcs:") + (pSvcs ? String(pSvcs->size()) : "null");
+                    Serial.printf("Pool: characteristic not found across %s\n", svc_uuids.c_str());
                     poolDisconnect();
                     g_pool_fails++;
                     g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
                 }
-            } else {
-                g_pool_status = String("no_char svcs:") + (pSvcs ? String(pSvcs->size()) : "null");
-                Serial.printf("Pool: characteristic not found across %s\n", svc_uuids.c_str());
-                poolDisconnect();
-                g_pool_fails++;
-                g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
             }
         }
     }
