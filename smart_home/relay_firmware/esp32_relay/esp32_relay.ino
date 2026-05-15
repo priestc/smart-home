@@ -103,7 +103,9 @@ static std::vector<GattTask> g_gatt_tasks;
 
 static String     g_pool_addr;
 static String     g_pool_label;
-static BLEClient* g_pool_client = nullptr;
+static BLEClient* g_pool_client  = nullptr;
+static int        g_pool_fails   = 0;
+#define POOL_OFFLINE_THRESHOLD 2
 
 // ── Pair mode state ───────────────────────────────────────────────────────────
 
@@ -632,6 +634,34 @@ static bool postPoolReading(const String& hex) {
     return still_assigned;
 }
 
+static void postOfflineStatus() {
+    JsonDocument doc;
+    doc["relay_id"] = g_id;
+    doc["address"]  = g_pool_addr;
+    doc["label"]    = g_pool_label;
+    doc["offline"]  = true;
+    String payload;
+    serializeJson(doc, payload);
+
+    HTTPClient http;
+    http.begin(String(g_url) + "/api/pool/relay-reading");
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", String("Bearer ") + g_token);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    int code = http.POST(payload);
+    if (code == 200) {
+        String resp = http.getString();
+        JsonDocument rdoc;
+        if (deserializeJson(rdoc, resp) == DeserializationError::Ok && rdoc["pool_monitor"].isNull()) {
+            Serial.println("Pool: server cleared assignment while offline");
+            savePoolMonitor("", "");
+            g_pool_addr  = "";
+            g_pool_label = "";
+        }
+    }
+    http.end();
+}
+
 static void doPoolMonitorCycle() {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("Pool: WiFi lost — reconnecting...");
@@ -640,6 +670,34 @@ static void doPoolMonitorCycle() {
         return;
     }
 
+    // ── Offline/scanning mode ────────────────────────────────────────────────
+    if (g_pool_fails >= POOL_OFFLINE_THRESHOLD) {
+        Serial.printf("Pool: offline (%d failures) — scanning for device...\n", g_pool_fails);
+        g_seen.clear();
+        g_scan_ts = getTimestamp();
+        BLEScan* scan = BLEDevice::getScan();
+        scan->setAdvertisedDeviceCallbacks(&g_cb, false);
+        scan->setActiveScan(true);
+        scan->setInterval(160);
+        scan->setWindow(80);
+        scan->start(10, false);
+        scan->clearResults();
+
+        // Check if our pool monitor MAC appeared in the scan.
+        // g_seen keys are lowercase; g_pool_addr is uppercase from server.
+        String addr_lc = g_pool_addr;
+        addr_lc.toLowerCase();
+        if (g_seen.count(addr_lc.c_str())) {
+            Serial.println("Pool: device found advertising — attempting reconnect");
+            g_pool_fails = 0;
+            // Fall through to connect on next cycle; report online via first reading POST.
+        } else {
+            postOfflineStatus();
+        }
+        return;
+    }
+
+    // ── Normal connected mode ────────────────────────────────────────────────
     if (!g_pool_client) {
         g_pool_client = BLEDevice::createClient();
         g_pool_client->setMTU(23);
@@ -654,17 +712,20 @@ static void doPoolMonitorCycle() {
             GATT_TIMEOUT_MS / 1000
         );
         if (!ok) {
-            Serial.println("Pool: connect failed, retry in 10s");
-            delay(10000);
+            g_pool_fails++;
+            Serial.printf("Pool: connect failed (%d/%d)\n", g_pool_fails, POOL_OFFLINE_THRESHOLD);
+            delay(5000);
             return;
         }
         Serial.printf("Pool: connected to %s\n", g_pool_label.c_str());
+        g_pool_fails = 0;
     }
 
     BLERemoteService* svc = g_pool_client->getService(BLEUUID(YC01_SVC_UUID16));
     if (!svc) {
         Serial.println("Pool: service not found");
         poolDisconnect();
+        g_pool_fails++;
         delay(5000);
         return;
     }
@@ -672,6 +733,7 @@ static void doPoolMonitorCycle() {
     if (!chr || !chr->canRead()) {
         Serial.println("Pool: characteristic not found");
         poolDisconnect();
+        g_pool_fails++;
         delay(5000);
         return;
     }
@@ -680,10 +742,12 @@ static void doPoolMonitorCycle() {
     if (val.length() == 0) {
         Serial.println("Pool: empty GATT read — reconnecting");
         poolDisconnect();
+        g_pool_fails++;
         delay(5000);
         return;
     }
 
+    g_pool_fails = 0;
     String hex = hexEncode((const uint8_t*)val.c_str(), val.length());
     Serial.printf("Pool: read %u bytes  label=%s\n",
                   (unsigned)val.length(), g_pool_label.c_str());
@@ -692,7 +756,6 @@ static void doPoolMonitorCycle() {
     if (still_assigned) {
         delay(30000);
     }
-    // If not still_assigned, loop() will fall through to normal scan mode next iteration.
 }
 
 // ── Arduino entry points ──────────────────────────────────────────────────────

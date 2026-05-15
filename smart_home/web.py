@@ -4768,6 +4768,14 @@ def index():
     .garage-card .gstate.open   { color: #c0392b; }
     .garage-card .gstate.unknown { color: #aabbc8; }
     .garage-card .gtimer { font-size: 0.75rem; color: #c0392b; font-weight: 600; margin-top: .2rem; min-height: 1em; }
+    .pool-cards { display: flex; gap: 1rem; margin-bottom: 2rem; flex-wrap: wrap; }
+    .pool-card { background: #fff; border-radius: 12px; padding: 1.1rem 1.5rem; min-width: 200px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); text-decoration: none; color: inherit; display: block; }
+    .pool-card .pc-label { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .35rem; }
+    .pool-card .pc-status { font-size: .8rem; font-weight: 700; display: flex; align-items: center; gap: .45rem; margin-bottom: .3rem; }
+    .pool-card .pc-status.online  { color: #2a9d6e; }
+    .pool-card .pc-status.offline { color: #c0392b; }
+    .pool-card .pc-metrics { font-size: .92rem; color: #1a2535; font-weight: 600; }
+    .pool-card .pc-ts { font-size: .72rem; color: #aabbc8; margin-top: .3rem; }
     .chart-links { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 2rem; }
     .chart-link { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; background: #fff; border-radius: 12px; padding: 1rem 1.5rem; min-width: 220px; text-decoration: none; color: #1a2535; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); transition: box-shadow .15s, transform .15s; }
     .chart-link:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12), 0 6px 18px rgba(0,0,0,.08); transform: translateY(-1px); }
@@ -4785,6 +4793,7 @@ def index():
     <div class="garage-cards" id="garage-cards" style="margin-bottom:0"></div>
   </div>
   <div class="presence-cards" id="presence-cards"></div>
+  <div class="pool-cards"    id="pool-cards"    style="display:none"></div>
 
   <div class="section-title">Charts</div>
   <div class="chart-links">
@@ -4961,6 +4970,27 @@ async function loadPool() {
     const rows = await fetchJSON('/api/pool/current');
     if (!rows.length) return;
     document.getElementById('pool-link').style.display = '';
+    const wrap = document.getElementById('pool-cards');
+    wrap.style.display = '';
+    wrap.innerHTML = rows.map(r => {
+      const offline = r.offline;
+      const statusClass = offline ? 'offline' : 'online';
+      const statusDot   = offline ? '●' : '●';
+      const statusText  = offline ? 'Offline' : 'Online';
+      const metrics = offline ? '' :
+        [r.temp_f != null ? r.temp_f.toFixed(1) + '°F' : null,
+         r.ph     != null ? 'pH ' + r.ph.toFixed(2) : null]
+        .filter(Boolean).join('  ');
+      const tsText = offline
+        ? 'Last reading ' + timeSince(new Date(r.ts.replace(' ', 'T')))
+        : r.ts.slice(11, 16);
+      return `<a href="/pool" class="pool-card">
+        <div class="pc-label">${r.label}</div>
+        <div class="pc-status ${statusClass}">${statusDot} ${statusText}</div>
+        ${metrics ? `<div class="pc-metrics">${metrics}</div>` : ''}
+        <div class="pc-ts">${tsText}</div>
+      </a>`;
+    }).join('');
   } catch(e) { /* pool not configured — silently skip */ }
 }
 loadCurrent();
@@ -4972,6 +5002,7 @@ setInterval(loadCurrent, 30000);
 setInterval(loadPresence, 30000);
 setInterval(loadEvents, 60000);
 setInterval(loadGarage, 15000);
+setInterval(loadPool, 60000);
 </script>
 </body>
 </html>"""
@@ -6646,10 +6677,16 @@ def api_pool_current():
             )
             ORDER BY label
         """).fetchall()
+    now = datetime.datetime.now()
     result = []
     for r in rows:
         d = dict(r)
         d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
+        try:
+            age = (now - datetime.datetime.strptime(d["ts"], "%Y-%m-%d %H:%M:%S")).total_seconds()
+            d["offline"] = age > 600
+        except (ValueError, TypeError):
+            d["offline"] = True
         result.append(d)
     return jsonify(result)
 
@@ -6748,6 +6785,26 @@ def api_pool_relay_reading():
     label = data.get("label") or ""
     result_hex = data.get("result_hex") or ""
     rssi = data.get("rssi")
+
+    # Relay is reporting that the pool monitor is offline (no reading available).
+    if data.get("offline"):
+        with _conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO relay_checkin (relay_id, ts) "
+                "VALUES (?, strftime('%Y-%m-%d %H:%M:%S','now'))",
+                (relay_cfg["id"],),
+            )
+        monitors = _pool.load_config()
+        assigned = next(
+            (m for m in monitors if m.get("node") == relay_cfg["id"]), None
+        )
+        return jsonify({
+            "ok": True,
+            "pool_monitor": {
+                "address": assigned["address"],
+                "label": assigned.get("label", assigned["address"]),
+            } if assigned else None,
+        })
 
     if not result_hex:
         return jsonify({"error": "result_hex required"}), 400
@@ -6862,6 +6919,8 @@ _POOL_PAGE = """<!DOCTYPE html>
 <body>
   <div id="error-bar"></div>
   <h1>Pool Monitor <a class="back" href="/">&larr; Home</a></h1>
+
+  <div id="status-bar" style="display:none;margin-bottom:1.25rem;padding:.6rem 1.1rem;border-radius:10px;font-size:.85rem;font-weight:600"></div>
 
   <div id="current-wrap">
     <div class="section" style="margin-bottom:.75rem">Current readings</div>
@@ -7124,6 +7183,22 @@ async function loadCurrent() {
     if (!rows.length) {
       container.innerHTML = '<span class="no-data">No pool monitor readings yet.</span>';
       return;
+    }
+    const bar = document.getElementById('status-bar');
+    const anyOffline = rows.some(r => r.offline);
+    const allOffline = rows.every(r => r.offline);
+    if (allOffline) {
+      bar.style.display = '';
+      bar.style.background = '#fde8e8';
+      bar.style.color = '#c0392b';
+      bar.textContent = '● Pool monitor offline — last reading ' + agо(rows[0].ts);
+    } else if (anyOffline) {
+      bar.style.display = '';
+      bar.style.background = '#fde8e8';
+      bar.style.color = '#c0392b';
+      bar.textContent = '● One or more pool monitors offline';
+    } else {
+      bar.style.display = 'none';
     }
     const sel = document.getElementById('label-sel');
     const existing = new Set(Array.from(sel.options).map(o => o.value));
