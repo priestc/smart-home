@@ -688,13 +688,13 @@ static void doPoolMonitorCycle() {
         String addr_lc = g_pool_addr;
         addr_lc.toLowerCase();
         if (g_seen.count(addr_lc.c_str())) {
-            Serial.println("Pool: device found advertising — attempting reconnect");
+            Serial.println("Pool: device found advertising — connecting now");
             g_pool_fails = 0;
-            // Fall through to connect on next cycle; report online via first reading POST.
+            // Fall through immediately to connect while it's still in the advertising window.
         } else {
             postOfflineStatus();
+            return;
         }
-        return;
     }
 
     // ── Normal connected mode ────────────────────────────────────────────────
