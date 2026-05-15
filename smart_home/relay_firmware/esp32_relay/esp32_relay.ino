@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.17"
-#define FIRMWARE_REV          24
+#define FIRMWARE_VERSION      "1.7.18"
+#define FIRMWARE_REV          25
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -92,14 +92,10 @@ static std::vector<String> g_batch_queue;
 
 // ── Persistent pool monitor state ─────────────────────────────────────────────
 
-static String              g_pool_addr;        // configured address (from server/NVS)
+static String              g_pool_addr;    // configured address (from server/NVS)
 static String              g_pool_label;
-static BLEClient*          g_pool_client      = nullptr;
-static int                 g_pool_fails       = 0;
-static bool                g_pool_seen_last   = false;
-static String              g_pool_found_addr;  // actual BLE address from last scan (handles RPA rotation)
-static esp_ble_addr_type_t g_pool_found_type  = BLE_ADDR_TYPE_PUBLIC;
-#define POOL_OFFLINE_THRESHOLD 2
+static BLEClient*          g_pool_client = nullptr;
+static int                 g_pool_fails  = 0;
 
 // ── App watchdog state ────────────────────────────────────────────────────────
 
@@ -601,78 +597,10 @@ static void doPoolMonitorCycle() {
     }
     s_pool_wifi_fails = 0;
 
-    // ── Step 1: Pool monitor connect/read ──────────────────────────────────────
-    // Connect before the scan using g_pool_found_addr/type learned from the
-    // PREVIOUS scan. This avoids active-scan interference (SCAN_REQ packets
-    // can prevent the YC01 from accepting a connection immediately after).
-    // g_pool_found_addr is discovered by device name ("BLE_YC01"), which
-    // handles RPA rotation — the advertising address may differ from the
-    // configured g_pool_addr.
-    String pool_hex;
-    int8_t pool_rssi = 0;
-
-    if (g_pool_addr.length() > 0 &&
-        g_pool_fails >= POOL_OFFLINE_THRESHOLD && g_pool_seen_last) {
-        Serial.println("Pool: device was seen last cycle — resetting for reconnect");
-        g_pool_fails = 0;
-    }
-    // Treat as offline if fail threshold exceeded OR device never seen in any scan yet.
-    bool pool_offline = (g_pool_fails >= POOL_OFFLINE_THRESHOLD) ||
-                        (g_pool_addr.length() > 0 && g_pool_found_addr.length() == 0);
-
-    if (!pool_offline) {
-        if (!g_pool_client) {
-            g_pool_client = BLEDevice::createClient();
-            g_pool_client->setMTU(23);
-        }
-        if (!g_pool_client->isConnected()) {
-            g_current_op = "pool-connect";
-            Serial.printf("Pool: connecting to %s (%s) type=%d...\n",
-                          g_pool_label.c_str(), g_pool_found_addr.c_str(), g_pool_found_type);
-            bool ok = g_pool_client->connect(
-                BLEAddress(g_pool_found_addr.c_str(), (uint8_t)g_pool_found_type),
-                (uint8_t)g_pool_found_type,
-                12000
-            );
-            if (!ok) {
-                g_pool_fails++;
-                pool_offline = true;
-                poolDisconnect();
-                delay(500);
-                Serial.printf("Pool: connect failed (%d/%d)\n", g_pool_fails, POOL_OFFLINE_THRESHOLD);
-            } else {
-                Serial.printf("Pool: connected to %s\n", g_pool_label.c_str());
-            }
-        }
-        if (!pool_offline) {
-            BLERemoteService* svc = g_pool_client->getService(BLEUUID(YC01_SVC_UUID16));
-            BLERemoteCharacteristic* chr = svc
-                ? svc->getCharacteristic(BLEUUID(YC01_CHAR_UUID16)) : nullptr;
-            if (chr && chr->canRead()) {
-                g_current_op = "pool-read";
-                String val = chr->readValue();
-                if (val.length() > 0) {
-                    pool_hex  = hexEncode((const uint8_t*)val.c_str(), val.length());
-                    pool_rssi = g_pool_client->getRssi();
-                    g_pool_fails = 0;
-                    Serial.printf("Pool: read %u bytes  label=%s\n",
-                                  (unsigned)val.length(), g_pool_label.c_str());
-                } else {
-                    Serial.println("Pool: empty GATT read");
-                    poolDisconnect();
-                    g_pool_fails++;
-                    pool_offline = true;
-                }
-            } else {
-                Serial.println(svc ? "Pool: characteristic not found" : "Pool: service not found");
-                poolDisconnect();
-                g_pool_fails++;
-                pool_offline = true;
-            }
-        }
-    }
-
-    // ── Step 2: BLE scan for other sensors ────────────────────────────────────
+    // ── Step 1: BLE scan ──────────────────────────────────────────────────────
+    // Scan first so we know the YC01's current address/type before connecting.
+    // The v3.3.x library auto-stops the scanner before any connect attempt, so
+    // there is no SCAN_REQ interference when we connect right after the scan.
     g_seen.clear();
     g_scan_ts = getTimestamp();
     BLEScan* scan = BLEDevice::getScan();
@@ -684,47 +612,97 @@ static void doPoolMonitorCycle() {
     scan->start(SCAN_SECONDS, false);
     scan->clearResults();
 
-    // Find pool monitor by device name (handles RPA rotation), with fallback
-    // to configured address. Update g_pool_found_addr/type for next connect.
-    g_pool_seen_last = false;
-    bool pool_device_connected = (g_pool_client && g_pool_client->isConnected());
+    // ── Step 2: Pool monitor connect + read ───────────────────────────────────
+    // Mirror the Python _yc01_persistent_loop approach: find the device by name
+    // in the scan just completed, then connect immediately while it is still
+    // actively advertising. Handles RPA rotation (address changes, name doesn't).
+    String pool_hex;
+    int8_t pool_rssi = 0;
+    bool pool_offline = true;
+    bool pool_seen_now = false;
+
     if (g_pool_addr.length() > 0) {
-        bool found = false;
+        // Find YC01 by name first; fall back to configured address.
+        String cur_addr;
+        uint8_t cur_type = BLE_ADDR_TYPE_PUBLIC;
         for (auto& kv : g_seen) {
             const DevInfo& di = kv.second;
             if (di.name.startsWith("BLE_YC01") || di.name.startsWith("BLE-YC01")) {
-                g_pool_found_addr = String(kv.first.c_str());
-                g_pool_found_type = di.addr_type;
-                found = true;
-                Serial.printf("Pool: found '%s' at %s (type=%d)\n",
-                              di.name.c_str(), g_pool_found_addr.c_str(), g_pool_found_type);
+                cur_addr = String(kv.first.c_str());
+                cur_type = (uint8_t)di.addr_type;
+                Serial.printf("Pool: found '%s' at %s type=%d\n",
+                              di.name.c_str(), cur_addr.c_str(), cur_type);
                 break;
             }
         }
-        if (!found) {
+        if (cur_addr.length() == 0) {
             String addr_lc = g_pool_addr;
             addr_lc.toLowerCase();
             auto it = g_seen.find(addr_lc.c_str());
             if (it != g_seen.end()) {
-                g_pool_found_addr = String(it->first.c_str());
-                g_pool_found_type = it->second.addr_type;
-                found = true;
-                Serial.printf("Pool: found by addr %s (type=%d)\n",
-                              g_pool_found_addr.c_str(), g_pool_found_type);
+                cur_addr = String(it->first.c_str());
+                cur_type = (uint8_t)it->second.addr_type;
+                Serial.printf("Pool: found by addr %s type=%d\n",
+                              cur_addr.c_str(), cur_type);
             }
         }
-        if (found) {
-            g_pool_seen_last = true;
-            if (pool_offline)
-                Serial.println("Pool: will reconnect next cycle");
-        } else if (!pool_device_connected) {
-            g_pool_found_addr = "";  // not visible and not connected — forget address
+        pool_seen_now = (cur_addr.length() > 0);
+
+        if (!g_pool_client) {
+            g_pool_client = BLEDevice::createClient();
+            g_pool_client->setMTU(23);
+        }
+
+        // Connect if not already connected and device is currently advertising.
+        if (!g_pool_client->isConnected() && pool_seen_now) {
+            g_current_op = "pool-connect";
+            Serial.printf("Pool: connecting to %s (%s) type=%d...\n",
+                          g_pool_label.c_str(), cur_addr.c_str(), cur_type);
+            bool ok = g_pool_client->connect(
+                BLEAddress(cur_addr.c_str(), cur_type),
+                cur_type,
+                12000
+            );
+            if (!ok) {
+                g_pool_fails++;
+                poolDisconnect();
+                Serial.printf("Pool: connect failed (fail #%d)\n", g_pool_fails);
+            } else {
+                g_pool_fails = 0;
+                Serial.printf("Pool: connected to %s\n", g_pool_label.c_str());
+            }
+        }
+
+        // Read GATT if connected (whether we just connected or were already connected).
+        if (g_pool_client && g_pool_client->isConnected()) {
+            BLERemoteService* svc = g_pool_client->getService(BLEUUID(YC01_SVC_UUID16));
+            BLERemoteCharacteristic* chr = svc
+                ? svc->getCharacteristic(BLEUUID(YC01_CHAR_UUID16)) : nullptr;
+            if (chr && chr->canRead()) {
+                g_current_op = "pool-read";
+                String val = chr->readValue();
+                if (val.length() > 0) {
+                    pool_hex  = hexEncode((const uint8_t*)val.c_str(), val.length());
+                    pool_rssi = g_pool_client->getRssi();
+                    pool_offline = false;
+                    g_pool_fails = 0;
+                    Serial.printf("Pool: read %u bytes\n", (unsigned)val.length());
+                } else {
+                    Serial.println("Pool: empty GATT read");
+                    poolDisconnect();
+                    g_pool_fails++;
+                }
+            } else {
+                Serial.println(svc ? "Pool: characteristic not found" : "Pool: service not found");
+                poolDisconnect();
+                g_pool_fails++;
+            }
         }
     }
 
     // ── Step 3: Single POST with pool + sensor data ────────────────────────────
     g_current_op = "http-post";
-    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && g_pool_seen_last);
+    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now);
     g_current_op = "";
     maybeSendPendingCrash();
 }
