@@ -630,10 +630,11 @@ def relay_log(db):
             except (ValueError, TypeError):
                 batch_t = row["batch_ts"][11:19]
             parts.append(f"batch={batch_t}")
-        if row["labeled_json"]:
-            labeled = _json.loads(row["labeled_json"])
-            for label, rssi in sorted((k, v) for k, v in labeled.items() if not k.startswith("_")):
-                parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
+        labeled = _json.loads(row["labeled_json"]) if row["labeled_json"] else {}
+        for label, rssi in sorted((k, v) for k, v in labeled.items() if not k.startswith("_")):
+            parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
+        if labeled.get("_pool_offline"):
+            parts.append(click.style("pool offline", fg="yellow"))
         return "  ".join(parts)
 
     # Show last 10 entries so there's immediate context on startup.
