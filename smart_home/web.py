@@ -6826,11 +6826,21 @@ def api_pool_relay_reading():
 
     # Relay is reporting that the pool monitor is offline (no reading available).
     if data.get("offline"):
+        import json as _json
         with _conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO relay_checkin (relay_id, ts) "
                 "VALUES (?, strftime('%Y-%m-%d %H:%M:%S','now'))",
                 (relay_cfg["id"],),
+            )
+            conn.execute(
+                "INSERT INTO relay_log "
+                "(ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json, labeled_json, rev) "
+                "VALUES (strftime('%Y-%m-%d %H:%M:%S','now'), ?, NULL, 0, 0, NULL, ?, NULL)",
+                (relay_cfg["id"], _json.dumps({"_offline": True})),
+            )
+            conn.execute(
+                "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"
             )
         monitors = _pool.load_config()
         assigned = next(

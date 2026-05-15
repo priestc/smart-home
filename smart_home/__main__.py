@@ -609,10 +609,18 @@ def relay_log(db):
         rev_str = f"r{row['rev']}" if row["rev"] is not None else "r?"
 
         if is_pool:
+            if row["labeled_json"]:
+                ldata = _json.loads(row["labeled_json"])
+                if ldata.get("_offline"):
+                    parts.append(click.style("pool offline", fg="yellow"))
+                    return "  ".join(parts)
+                for lbl, rssi in sorted((k, v) for k, v in ldata.items() if not k.startswith("_")):
+                    parts.append(click.style(f"{lbl} {rssi}dBm", fg="magenta"))
             parts.append(click.style("pool", fg="cyan"))
-        else:
-            parts.append(click.style(rev_str, fg="cyan"))
-            parts.append(f"{row['n_adverts']:>3} devices")
+            return "  ".join(parts)
+
+        parts.append(click.style(rev_str, fg="cyan"))
+        parts.append(f"{row['n_adverts']:>3} devices")
         if row["batch_ts"]:
             try:
                 b_utc = datetime.datetime.strptime(row["batch_ts"], "%Y-%m-%d %H:%M:%S").replace(
@@ -624,7 +632,7 @@ def relay_log(db):
             parts.append(f"batch={batch_t}")
         if row["labeled_json"]:
             labeled = _json.loads(row["labeled_json"])
-            for label, rssi in sorted(labeled.items()):
+            for label, rssi in sorted((k, v) for k, v in labeled.items() if not k.startswith("_")):
                 parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
         return "  ".join(parts)
 
