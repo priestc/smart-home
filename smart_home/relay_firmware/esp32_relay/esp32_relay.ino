@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.26"
-#define FIRMWARE_REV          33
+#define FIRMWARE_VERSION      "1.7.27"
+#define FIRMWARE_REV          34
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -763,6 +763,10 @@ static void doPoolMonitorCycle() {
                     g_pool_fails = 0;
                     g_pool_status = "";
                     Serial.printf("Pool: read %u bytes\n", (unsigned)val.length());
+                    // Disconnect immediately after reading — mirrors Python's connect-read-disconnect
+                    // pattern. Keeping the connection open risks hanging on the next readValue()
+                    // or getServices() call if the YC01 goes out of range before we reconnect.
+                    poolDisconnect();
                 } else {
                     g_pool_status = "empty_read";
                     Serial.println("Pool: empty GATT read");
