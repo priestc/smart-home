@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.4"
-#define FIRMWARE_REV          11
+#define FIRMWARE_VERSION      "1.7.5"
+#define FIRMWARE_REV          12
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -170,8 +170,7 @@ class AdvCallback : public BLEAdvertisedDeviceCallbacks {
             String svc   = dev.getServiceData();
             info.svc_hex = hexEncode((const uint8_t*)svc.c_str(), svc.length());
         }
-        if (info.name.length() || info.has_mfr || info.has_svc)
-            g_seen[addr] = info;
+        g_seen[addr] = info;
 
         if (info.name.length() && g_scan_ts.length())
             g_presence_last_seen[info.name.c_str()] = g_scan_ts;
