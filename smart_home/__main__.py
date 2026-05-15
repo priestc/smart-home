@@ -580,11 +580,15 @@ def relay_log(db):
                 last_id = row["id"]
                 ts_utc = datetime.datetime.strptime(row["ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
                 ts = ts_utc.astimezone().strftime("%H:%M:%S")
+                is_pool = row["rev"] is None and row["n_adverts"] == 0
                 rev_str = f"r{row['rev']}" if row["rev"] is not None else "r?"
                 parts = [click.style(f"[{ts}]", fg="cyan"),
-                         click.style(f"{row['relay_id']:<14}", fg="yellow"),
-                         click.style(rev_str, fg="blue"),
-                         f"{row['n_adverts']:>3} devices"]
+                         click.style(f"{row['relay_id']:<14}", fg="yellow")]
+                if is_pool:
+                    parts.append(click.style("pool", fg="blue"))
+                else:
+                    parts.append(click.style(rev_str, fg="blue"))
+                    parts.append(f"{row['n_adverts']:>3} devices")
                 if row["batch_ts"]:
                     try:
                         b_utc = datetime.datetime.strptime(row["batch_ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
@@ -1869,6 +1873,13 @@ def monitor(duration, verbose, db, no_db):
         first_attempt = True
 
         while True:
+            # Re-read config each iteration so node changes take effect without restart.
+            _monitors = _pool.load_config()
+            _mcfg = next((m for m in _monitors if m["address"].upper() == addr_upper), None)
+            if (_mcfg or {}).get("node", "server") != "server":
+                await asyncio.sleep(30)
+                continue
+
             def _pick_device():
                 """Return BLEDevice for this pool monitor, handling RPA address rotation."""
                 if addr_upper in yc01_devices:
@@ -1936,14 +1947,6 @@ def monitor(duration, verbose, db, no_db):
                 click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}")
                 # Remove stale cache entry — forces a fresh advertisement wait next loop.
                 yc01_devices.pop(addr_upper, None)
-                # After 2+ consecutive failures, try handing off to a relay.
-                if fail_count >= 2 and conn:
-                    state = _gatt_state.get(addr_upper, {})
-                    if not state.get("pending_task_id"):
-                        _schedule_relay_gatt(addr_upper, "yc01", label)
-            else:
-                # Successful read cycle — clear any relay preference
-                _gatt_state.pop(addr_upper, None)
             finally:
                 if scanner:
                     try:

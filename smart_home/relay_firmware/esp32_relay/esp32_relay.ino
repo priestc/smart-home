@@ -99,6 +99,12 @@ struct GattTask {
 
 static std::vector<GattTask> g_gatt_tasks;
 
+// ── Persistent pool monitor state ─────────────────────────────────────────────
+
+static String     g_pool_addr;
+static String     g_pool_label;
+static BLEClient* g_pool_client = nullptr;
+
 // ── Pair mode state ───────────────────────────────────────────────────────────
 
 static bool   g_pair_mode   = false;  // set by server response; cleared when mode starts
@@ -180,6 +186,22 @@ static void clearConfig() {
     Preferences p;
     p.begin("relay", false);
     p.clear();
+    p.end();
+}
+
+static void loadPoolMonitor() {
+    Preferences p;
+    p.begin("relay", true);
+    g_pool_addr  = p.getString("pool_addr",  "");
+    g_pool_label = p.getString("pool_label", "");
+    p.end();
+}
+
+static void savePoolMonitor(const String& addr, const String& label) {
+    Preferences p;
+    p.begin("relay", false);
+    p.putString("pool_addr",  addr);
+    p.putString("pool_label", label);
     p.end();
 }
 
@@ -358,6 +380,8 @@ static void connectWiFi() {
         Serial.printf("DNS FAILED: could not resolve '%s'\n", host.c_str());
 }
 
+static void poolDisconnect();  // forward declaration
+
 // ── HTTP POST to /api/ble-relay ───────────────────────────────────────────────
 
 static bool httpPost(const String& payload, bool parse_gatt) {
@@ -389,6 +413,25 @@ static bool httpPost(const String& payload, bool parse_gatt) {
                     g_pair_mode  = true;
                     Serial.printf("Pair mode requested for label: '%s'\n",
                                   g_pair_label.c_str());
+                }
+                // Check for pool monitor assignment change
+                if (!rdoc["pool_monitor"].isNull()) {
+                    String new_addr  = rdoc["pool_monitor"]["address"].as<String>();
+                    String new_label = rdoc["pool_monitor"]["label"].as<String>();
+                    if (new_addr != g_pool_addr) {
+                        Serial.printf("Pool monitor assigned: %s (%s)\n",
+                                      new_label.c_str(), new_addr.c_str());
+                        savePoolMonitor(new_addr, new_label);
+                        g_pool_addr  = new_addr;
+                        g_pool_label = new_label;
+                        poolDisconnect();
+                    }
+                } else if (g_pool_addr.length() > 0) {
+                    Serial.println("Pool monitor cleared by server");
+                    savePoolMonitor("", "");
+                    g_pool_addr  = "";
+                    g_pool_label = "";
+                    poolDisconnect();
                 }
                 Serial.printf("POST 200 (%d inserted)\n", rdoc["inserted"].as<int>());
             }
@@ -540,6 +583,118 @@ static void processGattTasks() {
     g_gatt_tasks.clear();
 }
 
+// ── Persistent pool monitor ───────────────────────────────────────────────────
+
+static void poolDisconnect() {
+    if (g_pool_client && g_pool_client->isConnected()) {
+        g_pool_client->disconnect();
+        delay(300);
+    }
+}
+
+// POST a pool reading and return false if the server has cleared the assignment.
+static bool postPoolReading(const String& hex) {
+    JsonDocument doc;
+    doc["relay_id"]   = g_id;
+    doc["address"]    = g_pool_addr;
+    doc["label"]      = g_pool_label;
+    doc["result_hex"] = hex;
+    if (g_pool_client && g_pool_client->isConnected()) {
+        doc["rssi"] = g_pool_client->getRssi();
+    }
+    String payload;
+    serializeJson(doc, payload);
+
+    HTTPClient http;
+    http.begin(String(g_url) + "/api/pool/relay-reading");
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", String("Bearer ") + g_token);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    int code = http.POST(payload);
+
+    bool still_assigned = true;
+    if (code == 200) {
+        String resp = http.getString();
+        JsonDocument rdoc;
+        if (deserializeJson(rdoc, resp) == DeserializationError::Ok) {
+            if (rdoc["pool_monitor"].isNull()) {
+                Serial.println("Pool: server cleared assignment — returning to normal mode");
+                savePoolMonitor("", "");
+                g_pool_addr  = "";
+                g_pool_label = "";
+                still_assigned = false;
+            }
+        }
+    } else {
+        Serial.printf("Pool: reading POST failed: %d\n", code);
+    }
+    http.end();
+    return still_assigned;
+}
+
+static void doPoolMonitorCycle() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("Pool: WiFi lost — reconnecting...");
+        WiFi.reconnect();
+        delay(5000);
+        return;
+    }
+
+    if (!g_pool_client) {
+        g_pool_client = BLEDevice::createClient();
+        g_pool_client->setMTU(23);
+    }
+
+    if (!g_pool_client->isConnected()) {
+        Serial.printf("Pool: connecting to %s (%s)...\n",
+                      g_pool_label.c_str(), g_pool_addr.c_str());
+        bool ok = g_pool_client->connect(
+            BLEAddress(g_pool_addr.c_str(), BLE_ADDR_TYPE_PUBLIC),
+            BLE_ADDR_TYPE_PUBLIC,
+            GATT_TIMEOUT_MS / 1000
+        );
+        if (!ok) {
+            Serial.println("Pool: connect failed, retry in 10s");
+            delay(10000);
+            return;
+        }
+        Serial.printf("Pool: connected to %s\n", g_pool_label.c_str());
+    }
+
+    BLERemoteService* svc = g_pool_client->getService(BLEUUID(YC01_SVC_UUID16));
+    if (!svc) {
+        Serial.println("Pool: service not found");
+        poolDisconnect();
+        delay(5000);
+        return;
+    }
+    BLERemoteCharacteristic* chr = svc->getCharacteristic(BLEUUID(YC01_CHAR_UUID16));
+    if (!chr || !chr->canRead()) {
+        Serial.println("Pool: characteristic not found");
+        poolDisconnect();
+        delay(5000);
+        return;
+    }
+
+    String val = chr->readValue();
+    if (val.length() == 0) {
+        Serial.println("Pool: empty GATT read — reconnecting");
+        poolDisconnect();
+        delay(5000);
+        return;
+    }
+
+    String hex = hexEncode((const uint8_t*)val.c_str(), val.length());
+    Serial.printf("Pool: read %u bytes  label=%s\n",
+                  (unsigned)val.length(), g_pool_label.c_str());
+
+    bool still_assigned = postPoolReading(hex);
+    if (still_assigned) {
+        delay(30000);
+    }
+    // If not still_assigned, loop() will fall through to normal scan mode next iteration.
+}
+
 // ── Arduino entry points ──────────────────────────────────────────────────────
 
 void setup() {
@@ -567,6 +722,12 @@ void setup() {
         while (true) delay(1000);
     }
 
+    loadPoolMonitor();
+    if (g_pool_addr.length() > 0) {
+        Serial.printf("Pool monitor mode active: %s (%s)\n",
+                      g_pool_label.c_str(), g_pool_addr.c_str());
+    }
+
     connectWiFi();
     String ble_name = String("SmHome-") + g_id;
     BLEDevice::init(ble_name.c_str());
@@ -575,6 +736,12 @@ void setup() {
 }
 
 void loop() {
+    // If assigned as a pool monitor node, run the persistent GATT loop exclusively.
+    if (g_pool_addr.length() > 0) {
+        doPoolMonitorCycle();
+        return;
+    }
+
     unsigned long cycle_start = millis();
 
     if (WiFi.status() != WL_CONNECTED) {

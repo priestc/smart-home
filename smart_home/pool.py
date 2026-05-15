@@ -55,6 +55,20 @@ def save_config(monitors: list[dict]) -> None:
     CONFIG_PATH.write_text(json.dumps(monitors, indent=2))
 
 
+def set_node(label: str, node: str) -> bool:
+    """Set the node responsible for this pool monitor ('server' or a relay ID).
+
+    Returns False if no monitor with the given label is found.
+    """
+    monitors = load_config()
+    for m in monitors:
+        if m.get("label") == label:
+            m["node"] = node
+            save_config(monitors)
+            return True
+    return False
+
+
 def _decode_bytes(raw: bytes) -> list[int]:
     """Reverse the BLE_YC01 byte encoding (paired bit-swap XOR transform)."""
     frame = list(raw)

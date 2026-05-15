@@ -253,6 +253,17 @@ def ble_relay():
                 break
         _relay.save_relays(relays)
 
+    # Tell the relay which pool monitor (if any) it is assigned to handle.
+    from smart_home import pool as _pool
+    pool_monitors = _pool.load_config()
+    assigned = next(
+        (m for m in pool_monitors if m.get("node") == relay_cfg["id"]), None
+    )
+    response["pool_monitor"] = {
+        "address": assigned["address"],
+        "label": assigned.get("label", assigned["address"]),
+    } if assigned else None
+
     return jsonify(response)
 
 
@@ -6681,6 +6692,109 @@ def api_pool_history():
     return jsonify(list(reversed(result)))
 
 
+@app.get("/api/pool/node")
+def api_pool_node_get():
+    """Return node assignment and available options for each pool monitor."""
+    from smart_home import pool as _pool
+    from smart_home import relay as _relay
+    monitors = _pool.load_config()
+    relay_ids = [r["id"] for r in _relay.load_relays()]
+    options = [{"id": "server"}] + [{"id": rid} for rid in relay_ids]
+    result = {}
+    for m in monitors:
+        lbl = m.get("label") or m.get("address", "")
+        result[lbl] = {
+            "node": m.get("node", "server"),
+            "relay_options": options,
+        }
+    return jsonify(result)
+
+
+@app.post("/api/pool/node")
+def api_pool_node_set():
+    """Set the node for a pool monitor."""
+    from smart_home import pool as _pool
+    from smart_home import relay as _relay
+    data = request.get_json(silent=True) or {}
+    label = data.get("label")
+    node = data.get("node")
+    if not label or not node:
+        return jsonify({"error": "label and node required"}), 400
+    valid = {"server"} | {r["id"] for r in _relay.load_relays()}
+    if node not in valid:
+        return jsonify({"error": f"unknown node: {node}"}), 400
+    if not _pool.set_node(label, node):
+        return jsonify({"error": f"pool monitor '{label}' not found"}), 404
+    return jsonify({"ok": True, "label": label, "node": node})
+
+
+@app.post("/api/pool/relay-reading")
+def api_pool_relay_reading():
+    """Receive a pool reading POSTed directly by a relay in persistent pool-monitor mode."""
+    from smart_home import relay as _relay
+    from smart_home import pool as _pool
+    from smart_home.db import insert_pool_reading
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return jsonify({"error": "missing or invalid Authorization header"}), 401
+    token = auth[len("Bearer "):]
+    relay_cfg = _relay.find_relay_by_token(token)
+    if relay_cfg is None:
+        return jsonify({"error": "unknown token"}), 401
+
+    data = request.get_json(silent=True) or {}
+    address = (data.get("address") or "").upper()
+    label = data.get("label") or ""
+    result_hex = data.get("result_hex") or ""
+    rssi = data.get("rssi")
+
+    if not result_hex:
+        return jsonify({"error": "result_hex required"}), 400
+
+    try:
+        raw = bytes.fromhex(result_hex)
+    except ValueError:
+        return jsonify({"error": "invalid result_hex"}), 400
+
+    import json as _json
+    reading = _pool.parse_gatt_data(raw)
+    if reading:
+        reading.address = address
+        reading.label = label
+        reading.rssi = rssi
+        with _conn() as conn:
+            insert_pool_reading(conn, reading)
+            conn.execute(
+                "INSERT OR REPLACE INTO relay_checkin (relay_id, ts) "
+                "VALUES (?, strftime('%Y-%m-%d %H:%M:%S','now'))",
+                (relay_cfg["id"],),
+            )
+            labeled_json = _json.dumps({label: rssi}) if rssi is not None else None
+            conn.execute(
+                "INSERT INTO relay_log "
+                "(ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json, labeled_json, rev) "
+                "VALUES (strftime('%Y-%m-%d %H:%M:%S','now'), ?, NULL, 0, 1, NULL, ?, NULL)",
+                (relay_cfg["id"], labeled_json),
+            )
+            conn.execute(
+                "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes')"
+            )
+
+    # Return current pool_monitor assignment so the relay knows if it should stop.
+    monitors = _pool.load_config()
+    assigned = next(
+        (m for m in monitors if m.get("node") == relay_cfg["id"]), None
+    )
+    return jsonify({
+        "ok": True,
+        "pool_monitor": {
+            "address": assigned["address"],
+            "label": assigned.get("label", assigned["address"]),
+        } if assigned else None,
+    })
+
+
 _POOL_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6740,6 +6854,9 @@ _POOL_PAGE = """<!DOCTYPE html>
     .badge-on  { background: #e6f7f0; color: #2a9d6e; }
     .ev-ts { color: #aabbc8; font-size: .78rem; white-space: nowrap; }
     .ev-detail { color: #1a2535; }
+    .node-msg { font-size: .8rem; color: #7a90a8; }
+    .node-msg.ok  { color: #2a9d6e; }
+    .node-msg.err { color: #c0392b; }
   </style>
 </head>
 <body>
@@ -6749,6 +6866,12 @@ _POOL_PAGE = """<!DOCTYPE html>
   <div id="current-wrap">
     <div class="section" style="margin-bottom:.75rem">Current readings</div>
     <div class="cards" id="cards"><span class="no-data">Loading&hellip;</span></div>
+  </div>
+
+  <div id="node-wrap" style="display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem">
+    <div class="section" style="margin-bottom:0">Connection node</div>
+    <select class="label-select" id="node-sel" onchange="setNode()"></select>
+    <span id="node-msg" class="node-msg"></span>
   </div>
 
   <div style="display:flex;align-items:center;gap:1rem;margin-bottom:.75rem">
@@ -6944,6 +7067,56 @@ document.getElementById('metric-btns').addEventListener('click', e => {
 // Show description for the initially active button
 updateDesc(document.querySelector('.metric-btn.active'));
 
+let _nodeLabel = null;
+
+async function loadNode() {
+  try {
+    const data = await fetchJSON('/api/pool/node');
+    const labels = Object.keys(data);
+    if (!labels.length) {
+      document.getElementById('node-wrap').style.display = 'none';
+      return;
+    }
+    _nodeLabel = labels[0];
+    const info = data[_nodeLabel];
+    const sel = document.getElementById('node-sel');
+    sel.innerHTML = info.relay_options.map(opt => {
+      const name = opt.id === 'server' ? 'Server (tank2)' : opt.id;
+      const selected = opt.id === info.node ? ' selected' : '';
+      return `<option value="${opt.id}"${selected}>${name}</option>`;
+    }).join('');
+  } catch(e) {
+    showError('Failed to load node config: ' + e.message);
+  }
+}
+
+async function setNode() {
+  if (!_nodeLabel) return;
+  const sel = document.getElementById('node-sel');
+  const node = sel.value;
+  const msg = document.getElementById('node-msg');
+  msg.className = 'node-msg';
+  msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/pool/node', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({label: _nodeLabel, node}),
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+    msg.className = 'node-msg ok';
+    msg.textContent = node === 'server'
+      ? 'Server will handle on next restart'
+      : `Relay '${node}' will activate on its next check-in (~18s)`;
+    setTimeout(() => { msg.textContent = ''; }, 5000);
+  } catch(e) {
+    msg.className = 'node-msg err';
+    msg.textContent = 'Error: ' + e.message;
+    showError('Failed to set node: ' + e.message);
+  }
+}
+
 async function loadCurrent() {
   try {
     const rows = await fetchJSON('/api/pool/current');
@@ -7034,6 +7207,7 @@ async function loadEvents() {
   }
 }
 
+loadNode();
 loadCurrent().then(() => { loadHistory(); loadEvents(); });
 setInterval(loadCurrent, 30000);
 </script>
