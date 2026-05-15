@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.23"
-#define FIRMWARE_REV          30
+#define FIRMWARE_VERSION      "1.7.24"
+#define FIRMWARE_REV          31
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -58,9 +58,10 @@
 #define HTTP_TIMEOUT_MS        10000
 #define MAX_BUFFER             30
 
-// GATT characteristic UUIDs (must match smart_home/pool.py)
-static const uint16_t YC01_SVC_UUID16  = 0xFF00;
-static const uint16_t YC01_CHAR_UUID16 = 0xFF02;
+// GATT UUIDs — full 128-bit form matches what Python pool.py uses and avoids
+// 16-bit→128-bit expansion mismatches in the Bluedroid BLEUUID comparator.
+static const char* YC01_SVC_UUID  = "0000ff00-0000-1000-8000-00805f9b34fb";
+static const char* YC01_CHAR_UUID = "0000ff02-0000-1000-8000-00805f9b34fb";
 
 static char g_ssid[64];
 static char g_pass[64];
@@ -712,9 +713,9 @@ static void doPoolMonitorCycle() {
 
         // Read GATT if connected (whether we just connected or were already connected).
         if (g_pool_client && g_pool_client->isConnected()) {
-            BLERemoteService* svc = g_pool_client->getService(BLEUUID(YC01_SVC_UUID16));
+            BLERemoteService* svc = g_pool_client->getService(BLEUUID(YC01_SVC_UUID));
             BLERemoteCharacteristic* chr = svc
-                ? svc->getCharacteristic(BLEUUID(YC01_CHAR_UUID16)) : nullptr;
+                ? svc->getCharacteristic(BLEUUID(YC01_CHAR_UUID)) : nullptr;
             if (chr && chr->canRead()) {
                 g_current_op = "pool-read";
                 String val = chr->readValue();
