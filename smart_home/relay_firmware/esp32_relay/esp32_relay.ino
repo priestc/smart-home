@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.24"
-#define FIRMWARE_REV          31
+#define FIRMWARE_VERSION      "1.7.25"
+#define FIRMWARE_REV          32
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -593,9 +593,25 @@ static void poolDisconnect() {
     // so deleting leaks the GATT app_id slot. Reuse the same client across all retries.
 }
 
+static void resetBLEStack() {
+    // After a connect timeout the BLE controller stays in connection-initiation
+    // mode and can no longer scan. Deinit + reinit restores a clean state.
+    // We abandon g_pool_client without deleting: after deinit the GATT resources
+    // are released by the stack, and calling the destructor on a dead interface
+    // could crash.
+    Serial.println("Pool: resetting BLE stack after connect timeout");
+    g_pool_client = nullptr;
+    String ble_name = String("SmHome-") + g_id;
+    BLEDevice::deinit();
+    delay(500);
+    BLEDevice::init(ble_name.c_str());
+    Serial.println("Pool: BLE stack reset complete");
+}
+
 static void doPoolMonitorCycle() {
     checkAppWatchdog();
     unsigned long cycle_start_ms = millis();
+    g_pool_status = "";  // clear each cycle so stale statuses don't persist
 
     static int s_pool_wifi_fails = 0;
     if (WiFi.status() != WL_CONNECTED) {
@@ -695,13 +711,18 @@ static void doPoolMonitorCycle() {
             unsigned long connect_ms = millis() - connect_start;
             if (!ok) {
                 g_pool_fails++;
-                poolDisconnect();
                 g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
-                // Status tag lets relay-log show the exact failure mode.
                 g_pool_status = connect_ms < 2000 ? "connect_fail_fast" : "connect_timeout";
                 Serial.printf("Pool: connect failed in %lums (fail #%d) [%s], retry in %lus\n",
                               connect_ms, g_pool_fails, g_pool_status.c_str(),
                               POOL_RETRY_INTERVAL_MS / 1000UL);
+                if (connect_ms >= 18000) {
+                    // Timeout: BLE controller is stuck in connection-initiation mode
+                    // and can no longer scan. Reset the stack to recover.
+                    resetBLEStack();
+                } else {
+                    poolDisconnect();
+                }
             } else {
                 g_pool_fails = 0;
                 g_pool_retry_after_ms = 0;
