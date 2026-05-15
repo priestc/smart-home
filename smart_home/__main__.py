@@ -633,7 +633,9 @@ def relay_log(db):
         labeled = _json.loads(row["labeled_json"]) if row["labeled_json"] else {}
         for label, rssi in sorted((k, v) for k, v in labeled.items() if not k.startswith("_")):
             parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
-        if labeled.get("_pool_offline"):
+        if labeled.get("_pool_seen"):
+            parts.append(click.style("pool: seen", fg="blue"))
+        elif labeled.get("_pool_offline"):
             parts.append(click.style("pool offline", fg="yellow"))
         return "  ".join(parts)
 

@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.11"
-#define FIRMWARE_REV          18
+#define FIRMWARE_VERSION      "1.7.12"
+#define FIRMWARE_REV          19
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -489,7 +489,8 @@ static bool httpPost(const String& payload, bool parse_gatt) {
 // ── Batch payload builder ─────────────────────────────────────────────────────
 
 static String buildPayload(bool include_presence, bool pool_offline = false,
-                            const String& pool_hex = "", int8_t pool_rssi = 0) {
+                            const String& pool_hex = "", int8_t pool_rssi = 0,
+                            bool pool_seen = false) {
     JsonDocument doc;
     doc["relay_id"] = g_id;
     doc["rev"] = FIRMWARE_REV;
@@ -518,6 +519,7 @@ static String buildPayload(bool include_presence, bool pool_offline = false,
     }
 
     if (pool_offline) doc["pool_offline"] = true;
+    if (pool_offline && pool_seen) doc["pool_seen"] = true;
     if (pool_hex.length() > 0) {
         JsonObject pr = doc["pool_reading"].to<JsonObject>();
         pr["address"]    = g_pool_addr;
@@ -541,7 +543,7 @@ static void bufferPush(const String& payload) {
     g_batch_queue.push_back(payload);
 }
 
-static void postBatch(bool pool_offline = false, const String& pool_hex = "", int8_t pool_rssi = 0) {
+static void postBatch(bool pool_offline = false, const String& pool_hex = "", int8_t pool_rssi = 0, bool pool_seen = false) {
     Serial.printf("Scan: %u devices  buffer: %u  fw=%s  rev=%d\n",
                   (unsigned)g_seen.size(), (unsigned)g_batch_queue.size(),
                   FIRMWARE_VERSION, FIRMWARE_REV);
@@ -558,7 +560,7 @@ static void postBatch(bool pool_offline = false, const String& pool_hex = "", in
 
     if (g_seen.empty() && !pool_offline && pool_hex.length() == 0) return;
 
-    if (!httpPost(buildPayload(true, pool_offline, pool_hex, pool_rssi), true))
+    if (!httpPost(buildPayload(true, pool_offline, pool_hex, pool_rssi, pool_seen), true))
         bufferPush(buildPayload(false));
 }
 
@@ -594,64 +596,7 @@ static void doPoolMonitorCycle() {
     }
     s_pool_wifi_fails = 0;
 
-    // ── Step 1: Pool monitor read ──────────────────────────────────────────────
-    String pool_hex;
-    int8_t pool_rssi  = 0;
-    bool pool_offline = (g_pool_fails >= POOL_OFFLINE_THRESHOLD);
-
-    if (!pool_offline) {
-        if (!g_pool_client) {
-            g_pool_client = BLEDevice::createClient();
-            g_pool_client->setMTU(23);
-        }
-        if (!g_pool_client->isConnected()) {
-            g_current_op = "pool-connect";
-            Serial.printf("Pool: connecting to %s (%s)...\n",
-                          g_pool_label.c_str(), g_pool_addr.c_str());
-            bool ok = g_pool_client->connect(
-                BLEAddress(g_pool_addr.c_str(), BLE_ADDR_TYPE_PUBLIC),
-                BLE_ADDR_TYPE_PUBLIC,
-                12
-            );
-            if (!ok) {
-                g_pool_fails++;
-                pool_offline = true;
-                poolDisconnect();
-                delay(500);
-                Serial.printf("Pool: connect failed (%d/%d)\n", g_pool_fails, POOL_OFFLINE_THRESHOLD);
-            } else {
-                Serial.printf("Pool: connected to %s\n", g_pool_label.c_str());
-            }
-        }
-        if (!pool_offline) {
-            BLERemoteService* svc = g_pool_client->getService(BLEUUID(YC01_SVC_UUID16));
-            BLERemoteCharacteristic* chr = svc
-                ? svc->getCharacteristic(BLEUUID(YC01_CHAR_UUID16)) : nullptr;
-            if (chr && chr->canRead()) {
-                g_current_op = "pool-read";
-                String val = chr->readValue();
-                if (val.length() > 0) {
-                    pool_hex  = hexEncode((const uint8_t*)val.c_str(), val.length());
-                    pool_rssi = g_pool_client->getRssi();
-                    g_pool_fails = 0;
-                    Serial.printf("Pool: read %u bytes  label=%s\n",
-                                  (unsigned)val.length(), g_pool_label.c_str());
-                } else {
-                    Serial.println("Pool: empty GATT read");
-                    poolDisconnect();
-                    g_pool_fails++;
-                    pool_offline = true;
-                }
-            } else {
-                Serial.println(svc ? "Pool: characteristic not found" : "Pool: service not found");
-                poolDisconnect();
-                g_pool_fails++;
-                pool_offline = true;
-            }
-        }
-    }
-
-    // ── Step 2: BLE scan for other sensors ────────────────────────────────────
+    // ── Step 1: BLE scan (first, so we know if pool is advertising before deciding to connect) ──
     g_seen.clear();
     g_scan_ts = getTimestamp();
     BLEScan* scan = BLEDevice::getScan();
@@ -663,19 +608,80 @@ static void doPoolMonitorCycle() {
     scan->start(SCAN_SECONDS, false);
     scan->clearResults();
 
-    // When offline, check if the pool monitor is advertising — reconnect next cycle.
-    if (pool_offline) {
+    // ── Step 2: Pool monitor connect/read ──────────────────────────────────────
+    String pool_hex;
+    int8_t pool_rssi = 0;
+    bool pool_offline = false;
+    bool pool_seen = false;
+
+    if (g_pool_addr.length() > 0) {
         String addr_lc = g_pool_addr;
         addr_lc.toLowerCase();
-        if (g_seen.count(addr_lc.c_str()) > 0) {
-            Serial.println("Pool: device found advertising — will reconnect next cycle");
-            g_pool_fails = 0;
+        pool_seen = g_seen.count(addr_lc.c_str()) > 0;
+
+        if (g_pool_fails >= POOL_OFFLINE_THRESHOLD && !pool_seen) {
+            // Too many failures and device not advertising — skip connect, report offline.
+            pool_offline = true;
+        } else {
+            if (pool_seen && g_pool_fails >= POOL_OFFLINE_THRESHOLD) {
+                Serial.println("Pool: device found advertising — reconnecting immediately");
+                g_pool_fails = 0;
+            }
+            if (!g_pool_client) {
+                g_pool_client = BLEDevice::createClient();
+                g_pool_client->setMTU(23);
+            }
+            if (!g_pool_client->isConnected()) {
+                g_current_op = "pool-connect";
+                Serial.printf("Pool: connecting to %s (%s)...\n",
+                              g_pool_label.c_str(), g_pool_addr.c_str());
+                bool ok = g_pool_client->connect(
+                    BLEAddress(g_pool_addr.c_str(), BLE_ADDR_TYPE_PUBLIC),
+                    BLE_ADDR_TYPE_PUBLIC,
+                    12
+                );
+                if (!ok) {
+                    g_pool_fails++;
+                    pool_offline = true;
+                    poolDisconnect();
+                    delay(500);
+                    Serial.printf("Pool: connect failed (%d/%d)\n", g_pool_fails, POOL_OFFLINE_THRESHOLD);
+                } else {
+                    Serial.printf("Pool: connected to %s\n", g_pool_label.c_str());
+                }
+            }
+            if (!pool_offline) {
+                BLERemoteService* svc = g_pool_client->getService(BLEUUID(YC01_SVC_UUID16));
+                BLERemoteCharacteristic* chr = svc
+                    ? svc->getCharacteristic(BLEUUID(YC01_CHAR_UUID16)) : nullptr;
+                if (chr && chr->canRead()) {
+                    g_current_op = "pool-read";
+                    String val = chr->readValue();
+                    if (val.length() > 0) {
+                        pool_hex  = hexEncode((const uint8_t*)val.c_str(), val.length());
+                        pool_rssi = g_pool_client->getRssi();
+                        g_pool_fails = 0;
+                        Serial.printf("Pool: read %u bytes  label=%s\n",
+                                      (unsigned)val.length(), g_pool_label.c_str());
+                    } else {
+                        Serial.println("Pool: empty GATT read");
+                        poolDisconnect();
+                        g_pool_fails++;
+                        pool_offline = true;
+                    }
+                } else {
+                    Serial.println(svc ? "Pool: characteristic not found" : "Pool: service not found");
+                    poolDisconnect();
+                    g_pool_fails++;
+                    pool_offline = true;
+                }
+            }
         }
     }
 
     // ── Step 3: Single POST with pool + sensor data ────────────────────────────
     g_current_op = "http-post";
-    postBatch(pool_offline, pool_hex, pool_rssi);
+    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen);
     g_current_op = "";
     maybeSendPendingCrash();
 }
