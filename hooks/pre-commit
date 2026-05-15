@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Rebuild ESP32 relay firmware when the .ino source is staged for commit.
+# Auto-increments FIRMWARE_REV and FIRMWARE_VERSION patch number each build.
 # Install: ln -sf ../../hooks/pre-commit .git/hooks/pre-commit
 
 SKETCH="smart_home/relay_firmware/esp32_relay/esp32_relay.ino"
@@ -18,7 +19,31 @@ if ! command -v arduino-cli &>/dev/null; then
     exit 0
 fi
 
-echo "Firmware source changed — rebuilding before commit..."
+# Bump FIRMWARE_REV (integer) and FIRMWARE_VERSION patch (x.y.Z) in the .ino.
+python3 - "$REPO_ROOT/$SKETCH" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+text = re.sub(
+    r'(#define FIRMWARE_REV\s+)(\d+)',
+    lambda m: m.group(1) + str(int(m.group(2)) + 1),
+    text,
+)
+text = re.sub(
+    r'(#define FIRMWARE_VERSION\s+")(\d+\.\d+\.)(\d+)(")',
+    lambda m: m.group(1) + m.group(2) + str(int(m.group(3)) + 1) + m.group(4),
+    text,
+)
+open(path, 'w').write(text)
+PYEOF
+
+NEW_VER=$(grep -E '#define FIRMWARE_VERSION' "$REPO_ROOT/$SKETCH" | grep -oE '"[^"]+"' | tr -d '"')
+NEW_REV=$(grep -E '#define FIRMWARE_REV ' "$REPO_ROOT/$SKETCH" | grep -oE '[0-9]+$')
+echo "Firmware source changed — rebuilding before commit... (v${NEW_VER} rev${NEW_REV})"
+
+# Re-stage the .ino with the bumped version numbers.
+git add "$REPO_ROOT/$SKETCH"
+
 if ! bash "$FIRMWARE_DIR/build.sh"; then
     echo "Error: firmware build failed. Fix the build error and try again."
     exit 1

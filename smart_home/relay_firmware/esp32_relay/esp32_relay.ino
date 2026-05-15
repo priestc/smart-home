@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.0"
-#define FIRMWARE_REV          7
+#define FIRMWARE_VERSION      "1.7.2"
+#define FIRMWARE_REV          9
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -970,3 +970,4 @@ void loop() {
     else
         delay(MIN_DELAY);
 }
+
