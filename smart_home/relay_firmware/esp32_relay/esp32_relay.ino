@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.18"
-#define FIRMWARE_REV          25
+#define FIRMWARE_VERSION      "1.7.19"
+#define FIRMWARE_REV          26
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -164,6 +164,14 @@ class AdvCallback : public BLEAdvertisedDeviceCallbacks {
 
         if (info.name.length() && g_scan_ts.length())
             g_presence_last_seen[info.name.c_str()] = g_scan_ts;
+
+        // Stop scan immediately when YC01 is detected so the main task can
+        // connect while the device is still in its connectable window.
+        if (g_pool_addr.length() > 0 &&
+            !(g_pool_client && g_pool_client->isConnected()) &&
+            (info.name.startsWith("BLE_YC01") || info.name.startsWith("BLE-YC01"))) {
+            BLEDevice::getScan()->stop();
+        }
     }
 };
 
