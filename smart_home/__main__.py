@@ -567,7 +567,65 @@ def relay_log(db):
     import sqlite3
     conn = open_db(db)
     conn.row_factory = sqlite3.Row
-    last_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM relay_log").fetchone()[0]
+
+    # Per-relay last-seen timestamp for delta calculation.
+    last_ts_per_relay: dict[str, datetime.datetime] = {}
+
+    def _format_row(row) -> str:
+        ts_utc = datetime.datetime.strptime(row["ts"], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=datetime.timezone.utc
+        )
+        ts_local = ts_utc.astimezone().strftime("%H:%M:%S")
+
+        delta_str = ""
+        relay_id = row["relay_id"]
+        if relay_id in last_ts_per_relay:
+            secs = int((ts_utc - last_ts_per_relay[relay_id]).total_seconds())
+            delta_str = click.style(f"+{secs}s", fg="white", dim=True)
+        last_ts_per_relay[relay_id] = ts_utc
+
+        is_pool = row["rev"] is None and row["n_adverts"] == 0
+        rev_str = f"r{row['rev']}" if row["rev"] is not None else "r?"
+
+        parts = [
+            click.style(f"[{ts_local}]", fg="cyan"),
+            click.style(f"{relay_id:<14}", fg="yellow"),
+        ]
+        if delta_str:
+            parts.append(delta_str)
+        if is_pool:
+            parts.append(click.style("pool", fg="blue"))
+        else:
+            parts.append(click.style(rev_str, fg="blue"))
+            parts.append(f"{row['n_adverts']:>3} devices")
+        if row["batch_ts"]:
+            try:
+                b_utc = datetime.datetime.strptime(row["batch_ts"], "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=datetime.timezone.utc
+                )
+                batch_t = b_utc.astimezone().strftime("%H:%M:%S")
+            except (ValueError, TypeError):
+                batch_t = row["batch_ts"][11:19]
+            parts.append(f"batch={batch_t}")
+        if row["labeled_json"]:
+            labeled = _json.loads(row["labeled_json"])
+            for label, rssi in sorted(labeled.items()):
+                parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
+        return "  ".join(parts)
+
+    # Show last 10 entries so there's immediate context on startup.
+    recent = conn.execute(
+        "SELECT id, ts, relay_id, batch_ts, n_adverts, n_inserted, labeled_json, rev "
+        "FROM relay_log ORDER BY id DESC LIMIT 10",
+    ).fetchall()
+    recent = list(reversed(recent))
+    if recent:
+        click.echo(click.style("--- last 10 entries ---", dim=True))
+        for row in recent:
+            click.echo(_format_row(row))
+        click.echo(click.style("--- live ---", dim=True))
+    last_id = recent[-1]["id"] if recent else 0
+
     click.echo("Watching relay traffic… (Ctrl+C to stop)\n")
     try:
         while True:
@@ -578,29 +636,7 @@ def relay_log(db):
             ).fetchall()
             for row in rows:
                 last_id = row["id"]
-                ts_utc = datetime.datetime.strptime(row["ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
-                ts = ts_utc.astimezone().strftime("%H:%M:%S")
-                is_pool = row["rev"] is None and row["n_adverts"] == 0
-                rev_str = f"r{row['rev']}" if row["rev"] is not None else "r?"
-                parts = [click.style(f"[{ts}]", fg="cyan"),
-                         click.style(f"{row['relay_id']:<14}", fg="yellow")]
-                if is_pool:
-                    parts.append(click.style("pool", fg="blue"))
-                else:
-                    parts.append(click.style(rev_str, fg="blue"))
-                    parts.append(f"{row['n_adverts']:>3} devices")
-                if row["batch_ts"]:
-                    try:
-                        b_utc = datetime.datetime.strptime(row["batch_ts"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
-                        batch_t = b_utc.astimezone().strftime("%H:%M:%S")
-                    except (ValueError, TypeError):
-                        batch_t = row["batch_ts"][11:19]
-                    parts.append(f"batch={batch_t}")
-                if row["labeled_json"]:
-                    labeled = _json.loads(row["labeled_json"])
-                    for label, rssi in sorted(labeled.items()):
-                        parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
-                click.echo("  ".join(parts))
+                click.echo(_format_row(row))
             time.sleep(1)
     except KeyboardInterrupt:
         click.echo("\033[0m", nl=False)  # reset any partial ANSI colour sequence
