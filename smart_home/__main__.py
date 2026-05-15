@@ -581,22 +581,22 @@ def relay_log(db):
         relay_id = row["relay_id"]
         if relay_id in last_ts_per_relay:
             secs = int((ts_utc - last_ts_per_relay[relay_id]).total_seconds())
-            delta_str = click.style(f"+{secs}s", fg="white", dim=True)
+            delta_str = click.style(f"+{secs}s", fg="bright_black")
         last_ts_per_relay[relay_id] = ts_utc
 
         is_pool = row["rev"] is None and row["n_adverts"] == 0
         rev_str = f"r{row['rev']}" if row["rev"] is not None else "r?"
 
         parts = [
-            click.style(f"[{ts_local}]", fg="cyan"),
-            click.style(f"{relay_id:<14}", fg="yellow"),
+            click.style(f"[{ts_local}]", fg="blue"),
+            click.style(f"{relay_id:<14}", fg="green", bold=True),
         ]
         if delta_str:
             parts.append(delta_str)
         if is_pool:
-            parts.append(click.style("pool", fg="blue"))
+            parts.append(click.style("pool", fg="cyan"))
         else:
-            parts.append(click.style(rev_str, fg="blue"))
+            parts.append(click.style(rev_str, fg="cyan"))
             parts.append(f"{row['n_adverts']:>3} devices")
         if row["batch_ts"]:
             try:
