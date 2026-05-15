@@ -239,6 +239,8 @@ def ble_relay():
             labeled_seen["_pool_offline"] = True
         if data.get("pool_seen"):
             labeled_seen["_pool_seen"] = True
+        if data.get("pool_status"):
+            labeled_seen["_pool_status"] = data["pool_status"]
         conn.execute(
             "INSERT INTO relay_log (ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json, labeled_json, rev) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

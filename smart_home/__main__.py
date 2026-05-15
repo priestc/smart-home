@@ -634,9 +634,13 @@ def relay_log(db):
         for label, rssi in sorted((k, v) for k, v in labeled.items() if not k.startswith("_")):
             parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
         if labeled.get("_pool_seen"):
-            parts.append(click.style("pool: seen", fg="blue"))
+            status = labeled.get("_pool_status", "")
+            label = f"pool: seen [{status}]" if status else "pool: seen"
+            parts.append(click.style(label, fg="blue"))
         elif labeled.get("_pool_offline"):
-            parts.append(click.style("pool offline", fg="yellow"))
+            status = labeled.get("_pool_status", "")
+            label = f"pool: {status}" if status else "pool offline"
+            parts.append(click.style(label, fg="yellow"))
         return "  ".join(parts)
 
     # Show last 10 entries so there's immediate context on startup.

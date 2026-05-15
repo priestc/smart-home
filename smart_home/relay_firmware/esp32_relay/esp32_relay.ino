@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.22"
-#define FIRMWARE_REV          29
+#define FIRMWARE_VERSION      "1.7.23"
+#define FIRMWARE_REV          30
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define POST_INTERVAL_MS       18000UL
@@ -98,6 +98,7 @@ static BLEClient*          g_pool_client        = nullptr;
 static int                 g_pool_fails         = 0;
 static volatile bool       g_pool_seen_in_scan  = false;  // set by AdvCallback, cleared by main task
 static unsigned long       g_pool_retry_after_ms = 0;     // millis() after which next connect is allowed
+static String              g_pool_status;                  // last outcome, sent in POST for relay-log
 #define POOL_RETRY_INTERVAL_MS 30000UL
 
 // ── App watchdog state ────────────────────────────────────────────────────────
@@ -534,6 +535,7 @@ static String buildPayload(bool include_presence, bool pool_offline = false,
 
     if (pool_offline) doc["pool_offline"] = true;
     if (pool_offline && pool_seen) doc["pool_seen"] = true;
+    if (g_pool_status.length() > 0) doc["pool_status"] = g_pool_status;
     if (pool_hex.length() > 0) {
         JsonObject pr = doc["pool_reading"].to<JsonObject>();
         pr["address"]    = g_pool_addr;
@@ -586,8 +588,8 @@ static void poolDisconnect() {
         g_pool_client->disconnect();
         delay(300);
     }
-    delete g_pool_client;
-    g_pool_client = nullptr;
+    // Do NOT delete — the BLEClient destructor doesn't call esp_ble_gattc_app_unregister,
+    // so deleting leaks the GATT app_id slot. Reuse the same client across all retries.
 }
 
 static void doPoolMonitorCycle() {
@@ -681,23 +683,30 @@ static void doPoolMonitorCycle() {
         if (!g_pool_client->isConnected() && pool_seen_now &&
             millis() >= g_pool_retry_after_ms) {
             g_current_op = "pool-connect";
+            unsigned long connect_start = millis();
             Serial.printf("Pool: connecting to %s (%s) type=%d...\n",
                           g_pool_label.c_str(), cur_addr.c_str(), cur_type);
             bool ok = g_pool_client->connect(
                 BLEAddress(cur_addr.c_str(), cur_type),
                 cur_type,
-                12000
+                20000  // 20 s — matches Python BleakClient timeout
             );
+            unsigned long connect_ms = millis() - connect_start;
             if (!ok) {
                 g_pool_fails++;
                 poolDisconnect();
                 g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
-                Serial.printf("Pool: connect failed (fail #%d), retry in %lus\n",
-                              g_pool_fails, POOL_RETRY_INTERVAL_MS / 1000UL);
+                // Status tag lets relay-log show the exact failure mode.
+                g_pool_status = connect_ms < 2000 ? "connect_fail_fast" : "connect_timeout";
+                Serial.printf("Pool: connect failed in %lums (fail #%d) [%s], retry in %lus\n",
+                              connect_ms, g_pool_fails, g_pool_status.c_str(),
+                              POOL_RETRY_INTERVAL_MS / 1000UL);
             } else {
                 g_pool_fails = 0;
                 g_pool_retry_after_ms = 0;
-                Serial.printf("Pool: connected to %s\n", g_pool_label.c_str());
+                g_pool_status = "";
+                Serial.printf("Pool: connected to %s in %lums\n",
+                              g_pool_label.c_str(), connect_ms);
             }
         }
 
@@ -714,16 +723,21 @@ static void doPoolMonitorCycle() {
                     pool_rssi = g_pool_client->getRssi();
                     pool_offline = false;
                     g_pool_fails = 0;
+                    g_pool_status = "";
                     Serial.printf("Pool: read %u bytes\n", (unsigned)val.length());
                 } else {
+                    g_pool_status = "empty_read";
                     Serial.println("Pool: empty GATT read");
                     poolDisconnect();
                     g_pool_fails++;
+                    g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
                 }
             } else {
+                g_pool_status = svc ? "no_char" : "no_service";
                 Serial.println(svc ? "Pool: characteristic not found" : "Pool: service not found");
                 poolDisconnect();
                 g_pool_fails++;
+                g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
             }
         }
     }
