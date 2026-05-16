@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.37"
-#define FIRMWARE_REV          44
+#define FIRMWARE_VERSION      "1.7.38"
+#define FIRMWARE_REV          45
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -848,7 +848,8 @@ static void doPoolMonitorCycle() {
                         Serial.println("Pool: empty GATT read");
                         poolDisconnect();
                         g_pool_fails++;
-                        g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
+                        // Connection was healthy — no cooldown needed, retry next cycle.
+                        g_pool_retry_after_ms = 0;
                     }
                 } else {
                     g_pool_status = String("no_char svcs:") + (pSvcs ? String(pSvcs->size()) : "null");
@@ -856,7 +857,8 @@ static void doPoolMonitorCycle() {
                     Serial.printf("Pool: characteristic not found across %s\n", svc_uuids.c_str());
                     poolDisconnect();
                     g_pool_fails++;
-                    g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
+                    // Connection was healthy — no cooldown needed, retry next cycle.
+                    g_pool_retry_after_ms = 0;
                 }
             }
         }
