@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.35"
-#define FIRMWARE_REV          42
+#define FIRMWARE_VERSION      "1.7.36"
+#define FIRMWARE_REV          43
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -106,8 +106,9 @@ static int                 g_relay_offset = 0;             // seconds offset wit
 
 static String         g_current_op;
 static String         g_pending_crash_reason;
-static unsigned long  g_last_post_ok_ms = 0;
-static unsigned long  g_startup_ms      = 0;
+static unsigned long  g_last_post_ok_ms   = 0;  // gate for maybeSendPendingCrash only
+static unsigned long  g_last_cycle_start_ms = 0; // watchdog reference: set after each cycle begins
+static unsigned long  g_startup_ms         = 0;
 #define APP_WDT_MS (2UL * 60UL * 1000UL)
 
 // ── Pair mode state ───────────────────────────────────────────────────────────
@@ -420,11 +421,14 @@ static void sendCrashReport(const String& reason) {
 }
 
 static void checkAppWatchdog() {
-    unsigned long ref = g_last_post_ok_ms > 0 ? g_last_post_ok_ms : g_startup_ms;
+    // Use cycle-start time so a server outage (failed POSTs, healthy cycles)
+    // does not trigger a restart. Only fire when a cycle itself takes too long,
+    // which indicates the relay is hung inside a BLE or HTTP operation.
+    unsigned long ref = g_last_cycle_start_ms > 0 ? g_last_cycle_start_ms : g_startup_ms;
     if (ref == 0) return;
     unsigned long elapsed = millis() - ref;
     if (elapsed > APP_WDT_MS) {
-        String msg = "no POST for " + String(elapsed / 1000) + "s";
+        String msg = "cycle took " + String(elapsed / 1000) + "s";
         if (g_current_op.length()) msg += "; stuck in: " + g_current_op;
         Serial.println("App watchdog: " + msg);
         // Save to NVS so it's sent after reboot if sendCrashReport fails now
@@ -676,6 +680,7 @@ static void doPoolMonitorCycle() {
     bool do_gatt = is_gatt_cycle || !s_pool_last_read_ok;
 
     checkAppWatchdog();
+    g_last_cycle_start_ms = millis();  // watchdog measures from here to next cycle start
     g_pool_status = "";  // clear each cycle so stale statuses don't persist
 
     static int s_pool_wifi_fails = 0;
@@ -948,6 +953,7 @@ void loop() {
     sleepUntilNextSlot();
 
     checkAppWatchdog();
+    g_last_cycle_start_ms = millis();
 
     static int s_wifi_fail_count = 0;
     if (WiFi.status() != WL_CONNECTED) {
