@@ -627,9 +627,13 @@ def relay_log(db):
                     tzinfo=datetime.timezone.utc
                 )
                 batch_t = b_utc.astimezone().strftime("%H:%M:%S")
+                lag_s = int((ts_utc - b_utc).total_seconds())
+                lag_color = "green" if abs(lag_s) < 5 else "yellow" if abs(lag_s) < 15 else "red"
+                lag_str = click.style(f"({lag_s:+d}s)", fg=lag_color)
             except (ValueError, TypeError):
                 batch_t = row["batch_ts"][11:19]
-            parts.append(f"batch={batch_t}")
+                lag_str = ""
+            parts.append(f"batch={batch_t} {lag_str}")
         labeled = _json.loads(row["labeled_json"]) if row["labeled_json"] else {}
         for label, rssi in sorted((k, v) for k, v in labeled.items() if not k.startswith("_")):
             parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
