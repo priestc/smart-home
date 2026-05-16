@@ -48,13 +48,13 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.41"
-#define FIRMWARE_REV          48
+#define FIRMWARE_VERSION      "1.7.42"
+#define FIRMWARE_REV          49
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
 #define BOOT_PROBE_MS          3000UL
-#define HTTP_TIMEOUT_MS        3000
+#define HTTP_TIMEOUT_MS        2000
 #define MAX_BUFFER             30
 
 // GATT UUIDs — full 128-bit form matches what Python pool.py uses and avoids
@@ -522,11 +522,13 @@ static bool httpPost(const String& payload, bool parse_gatt) {
 
 static String buildPayload(bool include_presence, bool pool_offline = false,
                             const String& pool_hex = "", int8_t pool_rssi = 0,
-                            bool pool_seen = false, bool pool_skip = false) {
+                            bool pool_seen = false, bool pool_skip = false,
+                            bool buffered = false) {
     JsonDocument doc;
     doc["relay_id"] = g_id;
     doc["rev"] = FIRMWARE_REV;
     if (g_scan_ts.length()) doc["batch_ts"] = g_scan_ts;
+    if (buffered) doc["buffered"] = true;
 
     JsonArray arr = doc["advertisements"].to<JsonArray>();
     for (auto& kv : g_seen) {
@@ -597,7 +599,7 @@ static void postBatch(bool pool_offline = false, const String& pool_hex = "", in
                 // Connection dropped mid-drain — leave remainder in buffer.
                 // The next successful current-batch POST will reschedule the drain.
                 Serial.println("Drain interrupted — will retry on next reconnect.");
-                bufferPush(buildPayload(false, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip));
+                bufferPush(buildPayload(false, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip, true));
                 return;
             }
             g_batch_queue.erase(g_batch_queue.begin());
@@ -608,7 +610,7 @@ static void postBatch(bool pool_offline = false, const String& pool_hex = "", in
     if (g_seen.empty() && !pool_offline && pool_hex.length() == 0 && !pool_skip) return;
 
     if (!httpPost(buildPayload(true, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip), true)) {
-        bufferPush(buildPayload(false, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip));
+        bufferPush(buildPayload(false, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip, true));
     } else if (!g_batch_queue.empty()) {
         // First successful POST with a non-empty buffer — drain on the next cycle.
         s_drain_next_cycle = true;

@@ -647,6 +647,8 @@ def relay_log(db):
             status = labeled.get("_pool_status", "")
             label = f"pool: {status}" if status else "pool offline"
             parts.append(click.style(label, fg="yellow"))
+        if labeled.get("_buffered"):
+            parts.append(click.style("*buffered", fg="cyan"))
         return "  ".join(parts)
 
     # Show last 10 entries so there's immediate context on startup.
