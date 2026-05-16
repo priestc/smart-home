@@ -426,6 +426,7 @@ def ble_relay():
     response["pool_monitor"] = {
         "address": assigned["address"],
         "label": assigned.get("label", assigned["address"]),
+        "poll_skip_cycles": max(0, assigned.get("poll_interval_s", 60) // 30 - 1),
     } if assigned else None
 
     # Compute stagger offset so relays share the 30-second period evenly.
@@ -6948,6 +6949,7 @@ def api_pool_node_get():
         lbl = m.get("label") or m.get("address", "")
         result[lbl] = {
             "node": m.get("node", "server"),
+            "poll_interval_s": m.get("poll_interval_s", 60),
             "relay_options": options,
         }
     return jsonify(result)
@@ -6969,6 +6971,21 @@ def api_pool_node_set():
     if not _pool.set_node(label, node):
         return jsonify({"error": f"pool monitor '{label}' not found"}), 404
     return jsonify({"ok": True, "label": label, "node": node})
+
+
+@app.post("/api/pool/poll-rate")
+def api_pool_poll_rate_set():
+    """Set the poll interval for a pool monitor."""
+    from smart_home import pool as _pool
+    data = request.get_json(silent=True) or {}
+    label = data.get("label")
+    interval_s = data.get("interval_s")
+    valid = {30, 60, 180, 300, 420}
+    if not label or interval_s not in valid:
+        return jsonify({"error": "label and valid interval_s (30/60/180/300/420) required"}), 400
+    if not _pool.set_poll_interval(label, interval_s):
+        return jsonify({"error": f"pool monitor '{label}' not found"}), 404
+    return jsonify({"ok": True, "label": label, "interval_s": interval_s})
 
 
 @app.post("/api/pool/relay-reading")
@@ -7070,6 +7087,7 @@ def api_pool_relay_reading():
         "pool_monitor": {
             "address": assigned["address"],
             "label": assigned.get("label", assigned["address"]),
+            "poll_skip_cycles": max(0, assigned.get("poll_interval_s", 60) // 30 - 1),
         } if assigned else None,
     })
 
@@ -7149,9 +7167,17 @@ _POOL_PAGE = """<!DOCTYPE html>
     <div class="cards" id="cards"><span class="no-data">Loading&hellip;</span></div>
   </div>
 
-  <div id="node-wrap" style="display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem">
+  <div id="node-wrap" style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem">
     <div class="section" style="margin-bottom:0">Connection node</div>
     <select class="label-select" id="node-sel" onchange="setNode()"></select>
+    <div class="section" style="margin-bottom:0;margin-left:.5rem">Poll rate</div>
+    <select class="label-select" id="poll-rate-sel" onchange="setPollRate()">
+      <option value="30">30 seconds</option>
+      <option value="60">1 minute</option>
+      <option value="180">3 minutes</option>
+      <option value="300">5 minutes</option>
+      <option value="420">7 minutes</option>
+    </select>
     <span id="node-msg" class="node-msg"></span>
   </div>
 
@@ -7366,8 +7392,37 @@ async function loadNode() {
       const selected = opt.id === info.node ? ' selected' : '';
       return `<option value="${opt.id}"${selected}>${name}</option>`;
     }).join('');
+    const pollSel = document.getElementById('poll-rate-sel');
+    const interval = info.poll_interval_s ?? 60;
+    for (const opt of pollSel.options) {
+      if (parseInt(opt.value) === interval) { opt.selected = true; break; }
+    }
   } catch(e) {
     showError('Failed to load node config: ' + e.message);
+  }
+}
+
+async function setPollRate() {
+  if (!_nodeLabel) return;
+  const interval_s = parseInt(document.getElementById('poll-rate-sel').value);
+  const msg = document.getElementById('node-msg');
+  msg.className = 'node-msg';
+  msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/pool/poll-rate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({label: _nodeLabel, interval_s}),
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+    msg.className = 'node-msg ok';
+    msg.textContent = 'Poll rate saved — relay will apply on next check-in';
+    setTimeout(() => { msg.textContent = ''; }, 5000);
+  } catch(e) {
+    msg.className = 'node-msg err';
+    msg.textContent = 'Error: ' + e.message;
+    showError('Failed to set poll rate: ' + e.message);
   }
 }
 

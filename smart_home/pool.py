@@ -69,6 +69,20 @@ def set_node(label: str, node: str) -> bool:
     return False
 
 
+def set_poll_interval(label: str, interval_s: int) -> bool:
+    """Set the poll interval in seconds for a pool monitor.
+
+    Returns False if no monitor with the given label is found.
+    """
+    monitors = load_config()
+    for m in monitors:
+        if m.get("label") == label:
+            m["poll_interval_s"] = interval_s
+            save_config(monitors)
+            return True
+    return False
+
+
 def _decode_bytes(raw: bytes) -> list[int]:
     """Reverse the BLE_YC01 byte encoding (paired bit-swap XOR transform)."""
     frame = list(raw)

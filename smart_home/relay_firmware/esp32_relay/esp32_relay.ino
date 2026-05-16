@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.48"
-#define FIRMWARE_REV          55
+#define FIRMWARE_VERSION      "1.7.49"
+#define FIRMWARE_REV          56
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -117,6 +117,7 @@ static volatile bool       g_pool_seen_in_scan  = false;  // set by AdvCallback,
 static unsigned long       g_pool_retry_after_ms = 0;     // millis() after which next connect is allowed
 static String              g_pool_status;                  // last outcome, sent in POST for relay-log
 static int                 g_relay_offset = 0;             // seconds offset within 30-s period (0–29)
+static int                 g_poll_skip_cycles = 1;         // cycles to skip between pool reads when stable
 #define POOL_RETRY_INTERVAL_MS 30000UL
 
 // ── App watchdog state ────────────────────────────────────────────────────────
@@ -226,8 +227,9 @@ static void clearConfig() {
 static void loadPoolMonitor() {
     Preferences p;
     p.begin("relay", true);
-    g_pool_addr  = p.getString("pool_addr",  "");
-    g_pool_label = p.getString("pool_label", "");
+    g_pool_addr        = p.getString("pool_addr",  "");
+    g_pool_label       = p.getString("pool_label", "");
+    g_poll_skip_cycles = p.getInt("poll_skip",  1);
     p.end();
 }
 
@@ -236,6 +238,13 @@ static void savePoolMonitor(const String& addr, const String& label) {
     p.begin("relay", false);
     p.putString("pool_addr",  addr);
     p.putString("pool_label", label);
+    p.end();
+}
+
+static void savePollSkipCycles(int cycles) {
+    Preferences p;
+    p.begin("relay", false);
+    p.putInt("poll_skip", cycles);
     p.end();
 }
 
@@ -526,6 +535,15 @@ static bool httpPost(const String& payload, bool parse_gatt) {
                 if (!rdoc["pool_monitor"].isNull()) {
                     String new_addr  = rdoc["pool_monitor"]["address"].as<String>();
                     String new_label = rdoc["pool_monitor"]["label"].as<String>();
+                    if (rdoc["pool_monitor"]["poll_skip_cycles"].is<int>()) {
+                        int new_skip = rdoc["pool_monitor"]["poll_skip_cycles"].as<int>();
+                        if (new_skip != g_poll_skip_cycles) {
+                            g_poll_skip_cycles = new_skip;
+                            savePollSkipCycles(new_skip);
+                            Serial.printf("Pool: poll rate updated — skip %d cycle(s) (%ds interval)\n",
+                                          new_skip, (new_skip + 1) * 30);
+                        }
+                    }
                     if (new_addr != g_pool_addr) {
                         Serial.printf("Pool monitor assigned: %s (%s)\n",
                                       new_label.c_str(), new_addr.c_str());
@@ -743,9 +761,9 @@ static void doPoolMonitorCycle() {
     // do_gatt is determined after the scan based on whether the device was seen.
     // s_pool_last_read_ok drives pool_skip: suppresses offline events when the pool
     // was recently readable but just isn't visible in the current scan.
-    // s_pool_skip_next: after a successful read, skip one cycle so YC01 can sleep.
-    static bool s_pool_last_read_ok = false;
-    static bool s_pool_skip_next    = false;
+    // s_pool_skip_counter counts down g_poll_skip_cycles skips between GATT reads.
+    static bool s_pool_last_read_ok  = false;
+    static int  s_pool_skip_counter  = 0;
 
     checkAppWatchdog();
     g_last_cycle_start_ms = millis();  // watchdog measures from here to next cycle start
@@ -832,13 +850,13 @@ static void doPoolMonitorCycle() {
         }
         pool_seen_now = (cur_addr.length() > 0);
 
-        // After a successful read, skip one cycle so the YC01 can idle briefly.
-        // On skip, reset the flag so the next cycle reads normally.
-        // On any failure or when device is not seen, clear skip so we retry immediately.
-        do_gatt = pool_seen_now && !s_pool_skip_next;
-        if (pool_seen_now && s_pool_skip_next) {
-            Serial.println("Pool: skip cycle (read ok last cycle)");
-            s_pool_skip_next = false;
+        // After a successful read, count down g_poll_skip_cycles cycles before
+        // attempting another GATT read. Counter is cleared on any failure so we
+        // retry immediately rather than waiting out the configured interval.
+        do_gatt = pool_seen_now && (s_pool_skip_counter == 0);
+        if (pool_seen_now && s_pool_skip_counter > 0) {
+            Serial.printf("Pool: skip cycle (%d remaining)\n", s_pool_skip_counter);
+            s_pool_skip_counter--;
         }
         if (do_gatt) {
             if (!g_pool_client) {
@@ -864,7 +882,7 @@ static void doPoolMonitorCycle() {
                     g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
                     g_pool_status = connect_ms < 2000 ? "connect_fail_fast" : "connect_timeout";
                     s_pool_last_read_ok = false;
-                    s_pool_skip_next    = false;
+                    s_pool_skip_counter = 0;
                     Serial.printf("Pool: connect failed in %lums (fail #%d) [%s], retry in %lus\n",
                                   connect_ms, g_pool_fails, g_pool_status.c_str(),
                                   POOL_RETRY_INTERVAL_MS / 1000UL);
@@ -921,7 +939,7 @@ static void doPoolMonitorCycle() {
                         g_pool_fails = 0;
                         g_pool_status = "";
                         s_pool_last_read_ok = true;
-                        s_pool_skip_next    = true;  // skip next cycle — read ok
+                        s_pool_skip_counter = g_poll_skip_cycles;
                         Serial.printf("Pool: read %u bytes\n", (unsigned)val.length());
                         // Disconnect immediately after reading — mirrors Python's connect-read-disconnect
                         // pattern. Keeping the connection open risks hanging on the next readValue()
@@ -930,7 +948,7 @@ static void doPoolMonitorCycle() {
                     } else {
                         g_pool_status = "empty_read";
                         s_pool_last_read_ok = false;
-                        s_pool_skip_next    = false;
+                        s_pool_skip_counter = 0;
                         Serial.println("Pool: empty GATT read");
                         poolDisconnect();
                         g_pool_fails++;
@@ -940,7 +958,7 @@ static void doPoolMonitorCycle() {
                 } else {
                     g_pool_status = String("no_char svcs:") + (pSvcs ? String(pSvcs->size()) : "null");
                     s_pool_last_read_ok = false;
-                    s_pool_skip_next    = false;
+                    s_pool_skip_counter = 0;
                     Serial.printf("Pool: characteristic not found across %s\n", svc_uuids.c_str());
                     poolDisconnect();
                     g_pool_fails++;
