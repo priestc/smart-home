@@ -1794,11 +1794,13 @@ def monitor(duration, verbose, db, no_db):
                 click.echo(f"[{now.strftime('%H:%M:%S')}] Network presence: ip neigh error: {e}")
                 continue
 
-            # Build set of MACs currently reachable (not FAILED)
+            # Build set of MACs currently reachable.
+            # Only count REACHABLE/DELAY/PROBE — not STALE. STALE entries linger for
+            # up to ~25 min after a device leaves, causing false "home" detections.
             reachable: set[str] = set()
             for line in neigh_output.splitlines():
                 parts = line.split()
-                if len(parts) >= 5 and parts[-1] != "FAILED":
+                if len(parts) >= 5 and parts[-1] in ("REACHABLE", "DELAY", "PROBE"):
                     lladdr_idx = None
                     for i, p in enumerate(parts):
                         if p == "lladdr" and i + 1 < len(parts):
