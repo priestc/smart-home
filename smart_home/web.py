@@ -638,7 +638,7 @@ def presence_history_api():
         return out
 
     result = []
-    for name in sorted(devices):
+    for name in sorted(devices.keys()):
         s = state.get(name, {})
         dev_entries = sorted(by_device.get(name, []), key=lambda e: e["ts"])
         windows = {}
@@ -689,59 +689,34 @@ def presence_delete_away():
 
 @app.post("/api/register-presence-device")
 def register_presence_device():
-    """Register an iPhone as a presence device."""
+    """Register an iPhone as a presence device (name, local_ip, bluetooth_name)."""
     from smart_home import presence as _presence
     data = request.get_json(silent=True) or {}
     name = data.get("name", "").strip()
     if not name:
         return jsonify({"error": "name required"}), 400
     devices = _presence.load_iphone_devices()
-    if name not in devices:
-        devices.append(name)
-        _presence.save_iphone_devices(devices)
+    devices[name] = {
+        "local_ip": data.get("local_ip", "").strip(),
+        "bluetooth_name": data.get("bluetooth_name", "").strip(),
+    }
+    _presence.save_iphone_devices(devices)
     return jsonify({"ok": True})
-
-
-@app.post("/api/presence-heartbeat")
-def presence_heartbeat():
-    """Receive a heartbeat from an iPhone presence device."""
-    from smart_home import presence as _presence
-    data = request.get_json(silent=True) or {}
-    name = data.get("name", "").strip()
-    if not name:
-        return jsonify({"error": "name required"}), 400
-    now = datetime.datetime.now()
-    state = _presence.load_state()
-    entry = state.get(name, {"name": name, "status": "unknown"})
-    entry["last_seen"] = now.isoformat()
-    state[name] = entry
-    _presence.save_state(state)
-    return jsonify({"ok": True})
-
-
-_IPHONE_PRESENCE_TIMEOUT = datetime.timedelta(minutes=15)
 
 
 @app.get("/api/presence")
 def presence():
     """Current presence status for all registered iPhone devices."""
     from smart_home.presence import load_iphone_devices, load_state
-    now = datetime.datetime.now()
     devices = load_iphone_devices()
     state = load_state()
     result = []
     for name in devices:
         s = state.get(name, {})
-        last_seen_str = s.get("last_seen")
-        if last_seen_str:
-            age = now - datetime.datetime.fromisoformat(last_seen_str)
-            status = "home" if age < _IPHONE_PRESENCE_TIMEOUT else "away"
-        else:
-            status = s.get("status", "unknown")
         result.append({
             "name": name,
-            "status": status,
-            "last_seen": last_seen_str,
+            "status": s.get("status", "unknown"),
+            "last_seen": s.get("last_seen"),
         })
     return jsonify(sorted(result, key=lambda x: x["name"]))
 

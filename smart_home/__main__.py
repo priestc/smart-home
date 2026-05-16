@@ -399,16 +399,13 @@ def list_devices():
 
         click.echo("\n  iPhone Presence Devices:")
         click.echo("  " + "-" * 50)
-        for name in sorted(iphone_presence):
+        for name, info in sorted(iphone_presence.items()):
             s = state.get(name, {})
-            last_seen_str = s.get("last_seen")
-            if last_seen_str:
-                age = now - datetime.datetime.fromisoformat(last_seen_str)
-                status = "home" if age < TIMEOUT else "away"
-            else:
-                status = "unknown"
-            last_seen = _since(last_seen_str)
-            click.echo(f"  {name:<32} {status:<10} {last_seen}")
+            status = s.get("status", "unknown")
+            last_seen = _since(s.get("last_seen"))
+            bt = info.get("bluetooth_name", "—")
+            ip = info.get("local_ip", "—")
+            click.echo(f"  {name:<28} {status:<10} {last_seen}  (bt={bt}, ip={ip})")
 
     pool_monitors = _pool.load_config()
     if pool_monitors:
@@ -1205,7 +1202,7 @@ def remove_device(name, purge, db):
 
     iphone_devices = _presence.load_iphone_devices()
     if name_lower in [d.lower() for d in iphone_devices]:
-        iphone_devices = [d for d in iphone_devices if d.lower() != name_lower]
+        iphone_devices = {k: v for k, v in iphone_devices.items() if k.lower() != name_lower}
         _presence.save_iphone_devices(iphone_devices)
         click.echo(f"Removed iPhone presence device '{name}'.")
         removed.append("presence device")
@@ -1337,7 +1334,7 @@ def presence_history(days, label):
     entries = _presence.load_history()
     devices = _presence.load_iphone_devices()
 
-    if not entries and not devices:
+    if not entries and not devices:  # devices is a dict; falsy when empty
         click.echo("No presence devices registered.")
         return
     if not entries:
@@ -1452,7 +1449,24 @@ def monitor(duration, verbose, db, no_db):
     # those doors are re-opened on arrival (not doors the user left open manually).
     _auto_closed_doors: set[str] = set()
 
-    IPHONE_TIMEOUT = datetime.timedelta(minutes=15)
+    # iPhone presence signal timeouts.
+    # Device is "home" if either BLE or network has been seen within its timeout.
+    # Device is "away" only when both signals are absent.
+    IPHONE_BLE_TIMEOUT = datetime.timedelta(seconds=60)
+    IPHONE_NET_TIMEOUT = datetime.timedelta(seconds=30)
+
+    # In-memory last-seen timestamps; keyed by device name.
+    iphone_ble_last_seen: dict[str, datetime.datetime] = {}
+    iphone_net_last_seen: dict[str, datetime.datetime] = {}
+
+    # {bluetooth_name: device_name} — rebuilt whenever devices are reloaded.
+    # Allows on_device() to match BLE advertisements to registered iPhones.
+    _iphone_devices_cache: dict[str, dict] = _presence.load_iphone_devices()
+    _bt_name_map: dict[str, str] = {
+        info.get("bluetooth_name", ""): name
+        for name, info in _iphone_devices_cache.items()
+        if info.get("bluetooth_name")
+    }
 
     async def _auto_open_on_arrival(name: str) -> None:
         loop = asyncio.get_running_loop()
@@ -1493,6 +1507,11 @@ def monitor(duration, verbose, db, no_db):
 
     def on_device(device, adv):
         now = datetime.datetime.now()
+        ble_name = device.name or adv.local_name or ""
+
+        # Match BLE advertisement against registered iPhone bluetooth names.
+        if ble_name and ble_name in _bt_name_map:
+            iphone_ble_last_seen[_bt_name_map[ble_name]] = now
 
         if is_ble_yc01(device, adv):
             curr_upper = device.address.upper()
@@ -1502,7 +1521,6 @@ def monitor(duration, verbose, db, no_db):
                 click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered pool monitor: {pool_config[curr_upper]} ({device.address})")
 
         if verbose:
-            ble_name = device.name or adv.local_name or ""
             if ble_name:
                 click.echo(f"[ble] untracked: {ble_name!r} ({device.address})")
                 if adv.manufacturer_data:
@@ -1518,14 +1536,7 @@ def monitor(duration, verbose, db, no_db):
         while True:
             await asyncio.sleep(30)
             now = datetime.datetime.now()
-            state = _presence.load_state()
-            entry = state.get(device_name, {})
-            last_seen_str = entry.get("last_seen")
-            if last_seen_str:
-                age = now - datetime.datetime.fromisoformat(last_seen_str)
-                is_home = age < IPHONE_TIMEOUT
-            else:
-                is_home = False
+            is_home = _presence.load_state().get(device_name, {}).get("status") == "home"
             if is_home:
                 ts = now.strftime("%H:%M:%S")
                 click.echo(f"[{ts}] Verify-close aborted for '{door_name}' — device returned home")
@@ -1547,27 +1558,61 @@ def monitor(duration, verbose, db, no_db):
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 click.echo(f"[{ts}] Verify-close check failed for '{door_name}': {e}")
 
-    async def check_iphone_presence():
+    async def check_iphone_network():
+        """Ping each registered iPhone's local IP every 10s; update iphone_net_last_seen."""
+        import subprocess as _sp
+        loop = asyncio.get_running_loop()
         while True:
-            await asyncio.sleep(30)
+            # Reload and refresh the BLE name map in case devices changed.
+            _iphone_devices_cache.clear()
+            _iphone_devices_cache.update(_presence.load_iphone_devices())
+            _bt_name_map.clear()
+            _bt_name_map.update({
+                info.get("bluetooth_name", ""): name
+                for name, info in _iphone_devices_cache.items()
+                if info.get("bluetooth_name")
+            })
+            for name, info in list(_iphone_devices_cache.items()):
+                ip = info.get("local_ip", "")
+                if not ip:
+                    continue
+                try:
+                    result = await loop.run_in_executor(
+                        None,
+                        lambda _ip=ip: _sp.run(
+                            ["ping", "-c", "1", "-W", "1", _ip],
+                            capture_output=True,
+                        ),
+                    )
+                    if result.returncode == 0:
+                        iphone_net_last_seen[name] = datetime.datetime.now()
+                except Exception:
+                    pass
+            await asyncio.sleep(10)
+
+    async def check_iphone_presence():
+        """Mark devices home/away based on BLE + network signals; away only when both absent."""
+        while True:
+            await asyncio.sleep(15)
             now = datetime.datetime.now()
-            iphone_devices = _presence.load_iphone_devices()
-            if not iphone_devices:
+            if not _iphone_devices_cache:
                 continue
             state = _presence.load_state()
             changed = False
-            for name in iphone_devices:
+            for name in list(_iphone_devices_cache.keys()):
                 entry = state.get(name, {})
                 old_status = entry.get("status", "unknown")
-                last_seen_str = entry.get("last_seen")
-                if last_seen_str:
-                    age = now - datetime.datetime.fromisoformat(last_seen_str)
-                    new_status = "home" if age < IPHONE_TIMEOUT else "away"
-                else:
-                    new_status = "away"
+
+                ble_last = iphone_ble_last_seen.get(name)
+                net_last = iphone_net_last_seen.get(name)
+                ble_present = ble_last is not None and (now - ble_last) < IPHONE_BLE_TIMEOUT
+                net_present = net_last is not None and (now - net_last) < IPHONE_NET_TIMEOUT
+                new_status = "home" if (ble_present or net_present) else "away"
+
                 if new_status != old_status:
                     ts = now.strftime("%H:%M:%S")
-                    click.echo(f"[{ts}] Presence: {name} is {new_status}")
+                    signals = f"ble={'✓' if ble_present else '✗'} net={'✓' if net_present else '✗'}"
+                    click.echo(f"[{ts}] Presence: {name} is {new_status} ({signals})")
                     if new_status == "away":
                         _auto_open_done.discard(name)
                         _auto_closed_doors.clear()
@@ -1593,9 +1638,11 @@ def monitor(duration, verbose, db, no_db):
                         "label": name,
                         "status": new_status,
                     })
+                    candidates = [t for t in [ble_last, net_last] if t is not None]
                     entry = dict(entry)
                     entry["name"] = name
                     entry["status"] = new_status
+                    entry["last_seen"] = max(candidates).isoformat() if candidates else None
                     state[name] = entry
                     changed = True
             if changed:
@@ -1604,9 +1651,8 @@ def monitor(duration, verbose, db, no_db):
     conn = None if no_db else open_db(db)
     if conn:
         click.echo(f"Logging to {db}")
-    iphone_devices = _presence.load_iphone_devices()
-    if iphone_devices:
-        click.echo(f"Tracking iPhone presence for: {', '.join(iphone_devices)}")
+    if _iphone_devices_cache:
+        click.echo(f"Tracking iPhone presence for: {', '.join(_iphone_devices_cache.keys())}")
 
     # Load hourly records from DB:
     # {label_key: {hour_of_day: {temp_max, temp_min, humi_max, humi_min}}}
@@ -2417,7 +2463,7 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
-        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), check_iphone_presence()]
+        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), check_iphone_network(), check_iphone_presence()]
         if cameras_cfg:
             extra.append(camera_watch_loop())
             extra.append(camera_vitals_loop())

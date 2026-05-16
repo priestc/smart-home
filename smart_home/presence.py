@@ -9,18 +9,21 @@ _STATE_FILE = _CONFIG_DIR / "presence_state.json"
 _HISTORY_FILE = _DATA_DIR / "presence_history.jsonl"
 
 
-def load_iphone_devices() -> list[str]:
-    """Return list of registered iPhone presence device names."""
+def load_iphone_devices() -> dict[str, dict]:
+    """Return {name: {local_ip, bluetooth_name}} of registered iPhone presence devices."""
     if _IPHONE_DEVICES_FILE.exists():
         try:
             with open(_IPHONE_DEVICES_FILE) as f:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, list):
+                    return {name: {} for name in data}
+                return data
         except (json.JSONDecodeError, ValueError):
             pass
-    return []
+    return {}
 
 
-def save_iphone_devices(devices: list[str]) -> None:
+def save_iphone_devices(devices: dict[str, dict]) -> None:
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(_IPHONE_DEVICES_FILE, "w") as f:
         json.dump(devices, f, indent=2)

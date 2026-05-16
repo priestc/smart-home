@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import WidgetKit
+import Darwin
 
 private let appGroupDefaults = UserDefaults(suiteName: "group.io.github.priestc.SmartHomeNotify")!
 
@@ -14,8 +15,6 @@ struct ContentView: View {
     @State private var isRegistering = false
     @State private var presenceStatus: String? = nil
     @State private var isRegisteringPresence = false
-
-    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationView {
@@ -56,7 +55,7 @@ struct ContentView: View {
 
                 Section(
                     header: Text("Presence Detection"),
-                    footer: Text("Heartbeats are sent to the local URL only — the server marks you away after 15 minutes without one.")
+                    footer: Text("The server detects you at home via your local IP and Bluetooth name. Both must be absent to mark you away.")
                 ) {
                     TextField("Device name", text: $presenceName)
                         .textInputAutocapitalization(.never)
@@ -95,11 +94,6 @@ struct ContentView: View {
                 registerForPush()
             }
         }
-        .onChange(of: scenePhase) { phase in
-            if phase == .active {
-                sendHeartbeat()
-            }
-        }
     }
 
     private func normalizeURL(_ raw: String) -> String? {
@@ -108,6 +102,25 @@ struct ContentView: View {
         if !s.hasPrefix("http") { s = "http://" + s }
         if s.hasSuffix("/") { s = String(s.dropLast()) }
         return s
+    }
+
+    private func getLocalIPAddress() -> String? {
+        var addr: String?
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0 else { return nil }
+        defer { freeifaddrs(ifaddr) }
+        var ptr = ifaddr
+        while ptr != nil {
+            defer { ptr = ptr?.pointee.ifa_next }
+            let iface = ptr!.pointee
+            guard iface.ifa_addr.pointee.sa_family == UInt8(AF_INET),
+                  String(cString: iface.ifa_name) == "en0" else { continue }
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            getnameinfo(iface.ifa_addr, socklen_t(iface.ifa_addr.pointee.sa_len),
+                        &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
+            addr = String(cString: hostname)
+        }
+        return addr
     }
 
     private func registerForPush() {
@@ -175,34 +188,28 @@ struct ContentView: View {
         }
         isRegisteringPresence = true
         presenceStatus = nil
-        let body = try? JSONSerialization.data(withJSONObject: ["name": presenceName])
+
+        let localIP = getLocalIPAddress() ?? ""
+        let body = try? JSONSerialization.data(withJSONObject: [
+            "name": presenceName,
+            "local_ip": localIP,
+            "bluetooth_name": presenceName,
+        ])
         var request = URLRequest(url: url, timeoutInterval: 10)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
+
         URLSession.shared.dataTask(with: request) { _, response, error in
             DispatchQueue.main.async {
                 isRegisteringPresence = false
                 if error == nil, let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                    presenceStatus = "✓ Registered. Heartbeats will be sent automatically."
+                    presenceStatus = "✓ Registered. Local IP: \(localIP.isEmpty ? "unknown" : localIP)"
                     presenceRegistered = true
-                    sendHeartbeat()
                 } else {
                     presenceStatus = "Registration failed. Is the local URL reachable?"
                 }
             }
         }.resume()
-    }
-
-    func sendHeartbeat() {
-        guard presenceRegistered, !presenceName.isEmpty,
-              let urlStr = normalizeURL(localURL),
-              let url = URL(string: "\(urlStr)/api/presence-heartbeat") else { return }
-        let body = try? JSONSerialization.data(withJSONObject: ["name": presenceName])
-        var request = URLRequest(url: url, timeoutInterval: 5)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = body
-        URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
     }
 }
