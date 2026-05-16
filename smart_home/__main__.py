@@ -1452,7 +1452,7 @@ def monitor(duration, verbose, db, no_db):
     # iPhone presence signal timeouts.
     # Device is "home" if either BLE or network has been seen within its timeout.
     # Device is "away" only when both signals are absent.
-    IPHONE_BLE_TIMEOUT = datetime.timedelta(seconds=60)
+    IPHONE_BLE_TIMEOUT = datetime.timedelta(seconds=15)
     IPHONE_NET_TIMEOUT = datetime.timedelta(seconds=30)
 
     # In-memory last-seen timestamps; keyed by device name.

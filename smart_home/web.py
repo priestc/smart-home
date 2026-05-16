@@ -1327,7 +1327,7 @@ function timeSince(iso) {
 }
 
 function signalBadgesHtml(d) {
-  const BLE_TIMEOUT = 60, NET_TIMEOUT = 30;
+  const BLE_TIMEOUT = 15, NET_TIMEOUT = 30;
   function badge(label, lastSeenIso, timeout) {
     if (!lastSeenIso) {
       return `<span class="signal-badge sig-unknown"><span class="sig-dot"></span>${label}: Unavailable</span>`;
