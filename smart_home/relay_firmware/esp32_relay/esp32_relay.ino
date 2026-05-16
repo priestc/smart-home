@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.51"
-#define FIRMWARE_REV          58
+#define FIRMWARE_VERSION      "1.7.52"
+#define FIRMWARE_REV          59
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -821,6 +821,9 @@ static void doPoolMonitorCycle() {
     bool pool_offline = true;
     bool pool_seen_now = false;
     bool do_gatt = false;  // set inside pool block; used by pool_skip below
+    // Capture skip state before the read so pool_skip reflects this cycle,
+    // not the counter value written for the NEXT cycle after a successful read.
+    bool was_skip_cycle = (s_pool_skip_counter > 0) && (g_pool_addr.length() > 0);
 
     if (g_pool_addr.length() > 0) {
         // Find YC01 by name first; fall back to configured address.
@@ -971,10 +974,10 @@ static void doPoolMonitorCycle() {
 
     // ── Step 3: Single POST with pool + sensor data ────────────────────────────
     g_current_op = "http-post";
-    // pool_skip: intentionally waiting between scheduled reads (counter > 0).
-    // When counter == 0 the relay is actively trying to read; if it can't
-    // find or connect to the device, that's offline — not a deliberate skip.
-    bool pool_skip = (s_pool_skip_counter > 0) && (g_pool_addr.length() > 0);
+    // pool_skip: this cycle was an intentional wait between reads.
+    // was_skip_cycle was captured before any read so a successful read this
+    // cycle doesn't cause its own POST to be tagged as a skip.
+    bool pool_skip = was_skip_cycle;
     postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now, pool_skip);
     g_current_op = "";
     maybeSendPendingCrash();
