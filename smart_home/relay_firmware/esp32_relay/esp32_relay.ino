@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.43"
-#define FIRMWARE_REV          50
+#define FIRMWARE_VERSION      "1.7.45"
+#define FIRMWARE_REV          52
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -533,7 +533,7 @@ static String buildPayload(bool include_presence, bool pool_offline = false,
     if (buffered_batches && !buffered_batches->empty()) {
         JsonArray ba = doc["buffered_batches"].to<JsonArray>();
         for (const auto& s : *buffered_batches)
-            ba.add(s);  // each stored as a JSON string; server parses with json.loads()
+            ba.add(serialized(s));  // embed as raw JSON object, not an escaped string
     }
 
     JsonArray arr = doc["advertisements"].to<JsonArray>();
@@ -685,7 +685,9 @@ static void doPoolMonitorCycle() {
     // do_gatt is determined after the scan based on whether the device was seen.
     // s_pool_last_read_ok drives pool_skip: suppresses offline events when the pool
     // was recently readable but just isn't visible in the current scan.
+    // s_pool_skip_next: after a successful read, skip one cycle so YC01 can sleep.
     static bool s_pool_last_read_ok = false;
+    static bool s_pool_skip_next    = false;
 
     checkAppWatchdog();
     g_last_cycle_start_ms = millis();  // watchdog measures from here to next cycle start
@@ -742,6 +744,7 @@ static void doPoolMonitorCycle() {
     int8_t pool_rssi = 0;
     bool pool_offline = true;
     bool pool_seen_now = false;
+    bool do_gatt = false;  // set inside pool block; used by pool_skip below
 
     if (g_pool_addr.length() > 0) {
         // Find YC01 by name first; fall back to configured address.
@@ -771,8 +774,14 @@ static void doPoolMonitorCycle() {
         }
         pool_seen_now = (cur_addr.length() > 0);
 
-        // Connect whenever the device is visible — no clock-based skip cycles.
-        bool do_gatt = pool_seen_now;
+        // After a successful read, skip one cycle so the YC01 can idle briefly.
+        // On skip, reset the flag so the next cycle reads normally.
+        // On any failure or when device is not seen, clear skip so we retry immediately.
+        do_gatt = pool_seen_now && !s_pool_skip_next;
+        if (pool_seen_now && s_pool_skip_next) {
+            Serial.println("Pool: skip cycle (read ok last cycle)");
+            s_pool_skip_next = false;
+        }
         if (do_gatt) {
             if (!g_pool_client) {
                 g_pool_client = BLEDevice::createClient();
@@ -797,6 +806,7 @@ static void doPoolMonitorCycle() {
                     g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
                     g_pool_status = connect_ms < 2000 ? "connect_fail_fast" : "connect_timeout";
                     s_pool_last_read_ok = false;
+                    s_pool_skip_next    = false;
                     Serial.printf("Pool: connect failed in %lums (fail #%d) [%s], retry in %lus\n",
                                   connect_ms, g_pool_fails, g_pool_status.c_str(),
                                   POOL_RETRY_INTERVAL_MS / 1000UL);
@@ -853,6 +863,7 @@ static void doPoolMonitorCycle() {
                         g_pool_fails = 0;
                         g_pool_status = "";
                         s_pool_last_read_ok = true;
+                        s_pool_skip_next    = true;  // skip next cycle — read ok
                         Serial.printf("Pool: read %u bytes\n", (unsigned)val.length());
                         // Disconnect immediately after reading — mirrors Python's connect-read-disconnect
                         // pattern. Keeping the connection open risks hanging on the next readValue()
@@ -861,6 +872,7 @@ static void doPoolMonitorCycle() {
                     } else {
                         g_pool_status = "empty_read";
                         s_pool_last_read_ok = false;
+                        s_pool_skip_next    = false;
                         Serial.println("Pool: empty GATT read");
                         poolDisconnect();
                         g_pool_fails++;
@@ -870,6 +882,7 @@ static void doPoolMonitorCycle() {
                 } else {
                     g_pool_status = String("no_char svcs:") + (pSvcs ? String(pSvcs->size()) : "null");
                     s_pool_last_read_ok = false;
+                    s_pool_skip_next    = false;
                     Serial.printf("Pool: characteristic not found across %s\n", svc_uuids.c_str());
                     poolDisconnect();
                     g_pool_fails++;
@@ -882,9 +895,10 @@ static void doPoolMonitorCycle() {
 
     // ── Step 3: Single POST with pool + sensor data ────────────────────────────
     g_current_op = "http-post";
-    // pool_skip: assigned but not visible AND last read was healthy.
-    // Suppresses offline events for transient scan misses after a good read.
-    bool pool_skip = !pool_seen_now && s_pool_last_read_ok && g_pool_addr.length() > 0;
+    // pool_skip: assigned but not readable this cycle (either not visible, or skipping after good read).
+    // Suppresses offline events for transient scan misses and deliberate skip cycles.
+    bool pool_skip = s_pool_last_read_ok && g_pool_addr.length() > 0 &&
+                     (!pool_seen_now || !do_gatt);
     postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now, pool_skip);
     g_current_op = "";
     maybeSendPendingCrash();

@@ -326,11 +326,11 @@ def ble_relay():
         )
 
         # Process buffered batches bundled into this POST.
-        # Each is a JSON string; insert sensor readings and write a relay_log row.
+        # Each is already a dict (Flask parsed the nested JSON via serialized() in firmware).
         now_utc = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         for raw_batch in data.get("buffered_batches", []):
             try:
-                bd = _json.loads(raw_batch)
+                bd = raw_batch if isinstance(raw_batch, dict) else _json.loads(raw_batch)
             except Exception:
                 continue
             bd_adverts = bd.get("advertisements") or []
