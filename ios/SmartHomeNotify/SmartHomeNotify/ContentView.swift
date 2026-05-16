@@ -8,7 +8,7 @@ private let appGroupDefaults = UserDefaults(suiteName: "group.io.github.priestc.
 struct ContentView: View {
     @AppStorage("localURL",     store: appGroupDefaults) private var localURL     = ""
     @AppStorage("tailscaleURL", store: appGroupDefaults) private var tailscaleURL = ""
-    @AppStorage("presenceName") private var presenceName = UIDevice.current.name
+    @AppStorage("presenceName") private var presenceName = ""
     @AppStorage("presenceRegistered") private var presenceRegistered = false
 
     @State private var pushStatus: String? = nil
@@ -88,6 +88,11 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Smart Home")
+        }
+        .onAppear {
+            if presenceName.isEmpty || presenceName == "iPhone" || presenceName == "iPad" {
+                presenceName = resolveDeviceName()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .apnsTokenReceived)) { _ in
             if !localURL.isEmpty || !tailscaleURL.isEmpty {
@@ -180,6 +185,52 @@ struct ContentView: View {
         }
     }
 
+    private func resolveDeviceName() -> String {
+        let name = UIDevice.current.name
+        if name != "iPhone" && name != "iPad" && name != "iPod touch" {
+            return name
+        }
+        // iOS 16+ privacy restriction — derive from mDNS hostname
+        var buf = [CChar](repeating: 0, count: 256)
+        gethostname(&buf, buf.count)
+        return String(cString: buf).replacingOccurrences(of: ".local", with: "")
+    }
+
+    private func deviceModelName() -> String {
+        var sysinfo = utsname()
+        uname(&sysinfo)
+        let machine = withUnsafeBytes(of: &sysinfo.machine) { bytes in
+            String(bytes: bytes.prefix(while: { $0 != 0 }), encoding: .utf8) ?? ""
+        }
+        let models: [String: String] = [
+            "iPhone17,1": "iPhone 16 Pro",
+            "iPhone17,2": "iPhone 16 Pro Max",
+            "iPhone17,3": "iPhone 16",
+            "iPhone17,4": "iPhone 16 Plus",
+            "iPhone16,1": "iPhone 15 Pro",
+            "iPhone16,2": "iPhone 15 Pro Max",
+            "iPhone15,4": "iPhone 15",
+            "iPhone15,5": "iPhone 15 Plus",
+            "iPhone15,2": "iPhone 14 Pro",
+            "iPhone15,3": "iPhone 14 Pro Max",
+            "iPhone14,7": "iPhone 14",
+            "iPhone14,8": "iPhone 14 Plus",
+            "iPhone14,2": "iPhone 13 Pro",
+            "iPhone14,3": "iPhone 13 Pro Max",
+            "iPhone14,4": "iPhone 13 mini",
+            "iPhone14,5": "iPhone 13",
+            "iPhone13,1": "iPhone 12 mini",
+            "iPhone13,2": "iPhone 12",
+            "iPhone13,3": "iPhone 12 Pro",
+            "iPhone13,4": "iPhone 12 Pro Max",
+            "iPhone12,1": "iPhone 11",
+            "iPhone12,3": "iPhone 11 Pro",
+            "iPhone12,5": "iPhone 11 Pro Max",
+            "i386": "Simulator", "x86_64": "Simulator", "arm64": "Simulator",
+        ]
+        return models[machine] ?? machine
+    }
+
     private func registerPresenceDevice() {
         guard let urlStr = normalizeURL(localURL),
               let url = URL(string: "\(urlStr)/api/register-presence-device") else {
@@ -194,6 +245,7 @@ struct ContentView: View {
             "name": presenceName,
             "local_ip": localIP,
             "bluetooth_name": presenceName,
+            "model_name": deviceModelName(),
         ])
         var request = URLRequest(url: url, timeoutInterval: 10)
         request.httpMethod = "POST"

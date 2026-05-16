@@ -640,6 +640,7 @@ def presence_history_api():
     result = []
     for name in sorted(devices.keys()):
         s = state.get(name, {})
+        info = devices[name]
         dev_entries = sorted(by_device.get(name, []), key=lambda e: e["ts"])
         windows = {}
         for days in (7, 30):
@@ -666,6 +667,7 @@ def presence_history_api():
         result.append({
             "name":          name,
             "ble_name":      name,
+            "model_name":    info.get("model_name", ""),
             "status":        s.get("status", "unknown"),
             "last_seen":     s.get("last_seen"),
             "ble_last_seen": s.get("ble_last_seen"),
@@ -701,6 +703,7 @@ def register_presence_device():
     devices[name] = {
         "local_ip": data.get("local_ip", "").strip(),
         "bluetooth_name": data.get("bluetooth_name", "").strip(),
+        "model_name": data.get("model_name", "").strip(),
     }
     _presence.save_iphone_devices(devices)
     return jsonify({"ok": True})
@@ -713,10 +716,11 @@ def presence():
     devices = load_iphone_devices()
     state = load_state()
     result = []
-    for name in devices:
+    for name, info in devices.items():
         s = state.get(name, {})
         result.append({
             "name": name,
+            "model_name": info.get("model_name", ""),
             "status": s.get("status", "unknown"),
             "last_seen": s.get("last_seen"),
         })
@@ -1247,8 +1251,9 @@ def presence_page():
     .device-header { display: flex; align-items: center; gap: .8rem; margin-bottom: 1.2rem; }
     .dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
     .dot.home { background: #2a9d6e; } .dot.away { background: #c0392b; } .dot.unknown { background: #aabbc8; }
-    .device-name { font-size: 1.1rem; font-weight: 700; }
-    .device-sub  { font-size: .78rem; color: #7a90a8; margin-top: .1rem; }
+    .device-name  { font-size: 1.1rem; font-weight: 700; }
+    .device-model { font-size: .8rem; color: #4a6080; margin-top: .1rem; font-weight: 500; }
+    .device-sub   { font-size: .78rem; color: #7a90a8; margin-top: .1rem; }
     .stats { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
     .stat-box { background: #f0f4f8; border-radius: 8px; padding: .7rem 1rem; min-width: 130px; }
     .stat-box .sb-label { font-size: .7rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
@@ -1364,7 +1369,11 @@ function renderDevice(d) {
   return `<div class="device" data-name="${d.name}" data-windows='${JSON.stringify(d.windows)}'>
     <div class="device-header">
       <div class="dot ${d.status}"></div>
-      <div><div class="device-name">${d.name}</div><div class="device-sub">${d.status} &middot; ${sub}</div></div>
+      <div>
+        <div class="device-name">${d.name}</div>
+        ${d.model_name ? `<div class="device-model">${d.model_name}</div>` : ''}
+        <div class="device-sub">${d.status} &middot; ${sub}</div>
+      </div>
     </div>
     ${signalBadgesHtml(d)}
     <div class="win-tabs">${tabs}</div>
@@ -5045,6 +5054,7 @@ async function loadPresence() {
         <div class="presence-dot ${d.status}"></div>
         <div class="presence-info">
           <div class="name">${d.name}</div>
+          ${d.model_name ? `<div class="status" style="color:#4a6080;font-weight:500">${d.model_name}</div>` : ''}
           <div class="status">${d.status} &middot; ${ago}</div>
         </div>
       </a>`;
