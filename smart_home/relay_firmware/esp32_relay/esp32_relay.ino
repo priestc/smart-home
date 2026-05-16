@@ -48,13 +48,13 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.36"
-#define FIRMWARE_REV          43
+#define FIRMWARE_VERSION      "1.7.37"
+#define FIRMWARE_REV          44
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
 #define BOOT_PROBE_MS          3000UL
-#define HTTP_TIMEOUT_MS        10000
+#define HTTP_TIMEOUT_MS        3000
 #define MAX_BUFFER             30
 
 // GATT UUIDs — full 128-bit form matches what Python pool.py uses and avoids
