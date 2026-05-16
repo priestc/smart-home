@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.33"
-#define FIRMWARE_REV          40
+#define FIRMWARE_VERSION      "1.7.34"
+#define FIRMWARE_REV          41
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -583,7 +583,9 @@ static void postBatch(bool pool_offline = false, const String& pool_hex = "", in
             g_batch_queue.erase(g_batch_queue.begin());
             Serial.printf("Buffered batch sent, %u remaining\n", (unsigned)g_batch_queue.size());
         } else {
-            if (!g_seen.empty()) bufferPush(buildPayload(false));
+            // Server still down — preserve current scan + pool data into the buffer.
+            if (!g_seen.empty())
+                bufferPush(buildPayload(false, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip));
             return;
         }
     }
@@ -591,7 +593,7 @@ static void postBatch(bool pool_offline = false, const String& pool_hex = "", in
     if (g_seen.empty() && !pool_offline && pool_hex.length() == 0 && !pool_skip) return;
 
     if (!httpPost(buildPayload(true, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip), true))
-        bufferPush(buildPayload(false));
+        bufferPush(buildPayload(false, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip));
 }
 
 // ── Persistent pool monitor ───────────────────────────────────────────────────
