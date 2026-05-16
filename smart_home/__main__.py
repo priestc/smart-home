@@ -640,9 +640,8 @@ def relay_log(db):
         if labeled.get("_pool_skip"):
             parts.append(click.style("pool: skip", fg="white", dim=True))
         elif labeled.get("_pool_seen"):
-            status = labeled.get("_pool_status", "")
-            label = f"pool: seen [{status}]" if status else "pool: seen"
-            parts.append(click.style(label, fg="blue"))
+            status = labeled.get("_pool_status") or "unknown"
+            parts.append(click.style(f"pool: no reading [{status}]", fg="blue"))
         elif labeled.get("_pool_offline"):
             status = labeled.get("_pool_status", "")
             label = f"pool: {status}" if status else "pool offline"

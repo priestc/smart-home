@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.52"
-#define FIRMWARE_REV          59
+#define FIRMWARE_VERSION      "1.7.53"
+#define FIRMWARE_REV          60
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -970,6 +970,15 @@ static void doPoolMonitorCycle() {
                 }
             }
         }
+    }
+
+    // If the cycle was a do_gatt attempt but pool is still offline with no status,
+    // we were in the retry cooldown and skipped the connect entirely.
+    if (do_gatt && pool_offline && pool_seen_now && g_pool_status.length() == 0) {
+        unsigned long remaining_s = g_pool_retry_after_ms > millis()
+            ? (g_pool_retry_after_ms - millis()) / 1000 : 0;
+        g_pool_status = remaining_s > 0
+            ? String("cooldown ") + remaining_s + "s" : "cooldown";
     }
 
     // ── Step 3: Single POST with pool + sensor data ────────────────────────────
