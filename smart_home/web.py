@@ -7276,13 +7276,6 @@ _POOL_PAGE = """<!DOCTYPE html>
     .metric-btn[data-metric="battery"].active { background: #7a90a8; }
     .chart-wrap { background: #fff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 2rem; }
     .metric-desc { font-size: .82rem; color: #5a6e84; background: #f0f4f8; border-left: 3px solid #d0dce8; border-radius: 0 6px 6px 0; padding: .5rem .85rem; margin-bottom: .75rem; display: none; }
-    .ev-list { list-style: none; display: flex; flex-direction: column; gap: .4rem; }
-    .ev-item { display: flex; align-items: center; gap: .75rem; font-size: .85rem; }
-    .ev-badge { font-size: .7rem; font-weight: 700; padding: .15rem .55rem; border-radius: 20px; white-space: nowrap; }
-    .badge-off { background: #fde8e8; color: #c0392b; }
-    .badge-on  { background: #e6f7f0; color: #2a9d6e; }
-    .ev-ts { color: #aabbc8; font-size: .78rem; white-space: nowrap; }
-    .ev-detail { color: #1a2535; }
     .node-msg { font-size: .8rem; color: #7a90a8; }
     .node-msg.ok  { color: #2a9d6e; }
     .node-msg.err { color: #c0392b; }
@@ -7381,12 +7374,7 @@ _POOL_PAGE = """<!DOCTYPE html>
     <canvas id="pool-chart"></canvas>
   </div>
 
-  <div style="display:flex;align-items:center;gap:1rem;margin-bottom:.75rem">
-    <div class="section" style="margin-bottom:0">Offline events</div>
-  </div>
-  <div id="events-wrap" style="margin-bottom:2rem">
-    <span class="no-data">Loading&hellip;</span>
-  </div>
+
 
   <div class="section" style="margin-bottom:.75rem">Raw data</div>
   <table id="hist-table">
@@ -7792,24 +7780,8 @@ function onLabelChange() {
   loadHistoryForChart();
 }
 
-// ── Events ───────────────────────────────────────────────────────────────────
-async function loadEvents() {
-  try {
-    const events = await fetchJSON('/api/pool/events');
-    const wrap = document.getElementById('events-wrap');
-    if (!events.length) { wrap.innerHTML = '<span class="no-data">No offline events recorded.</span>'; return; }
-    wrap.innerHTML = '<ul class="ev-list">' + events.map(e => {
-      const isOff = e.event_type === 'sensor_offline';
-      const badge = isOff
-        ? '<span class="ev-badge badge-off">Offline</span>'
-        : '<span class="ev-badge badge-on">Online</span>';
-      return `<li class="ev-item">${badge}<span class="ev-ts">${e.ts}</span><span class="ev-detail">${e.details || ''}</span></li>`;
-    }).join('') + '</ul>';
-  } catch(e) { showError('Failed to load events: ' + e.message); }
-}
-
 loadNode();
-loadCurrent().then(() => { loadHistoryForChart(); loadEvents(); });
+loadCurrent().then(() => { loadHistoryForChart(); });
 setInterval(loadCurrent, 30000);
 </script>
 </body>
