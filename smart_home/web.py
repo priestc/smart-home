@@ -6980,9 +6980,9 @@ def api_pool_poll_rate_set():
     data = request.get_json(silent=True) or {}
     label = data.get("label")
     interval_s = data.get("interval_s")
-    valid = {30, 60, 180, 300, 420}
+    valid = {30, 60, 90, 120}
     if not label or interval_s not in valid:
-        return jsonify({"error": "label and valid interval_s (30/60/180/300/420) required"}), 400
+        return jsonify({"error": "label and valid interval_s (30/60/90/120) required"}), 400
     if not _pool.set_poll_interval(label, interval_s):
         return jsonify({"error": f"pool monitor '{label}' not found"}), 404
     return jsonify({"ok": True, "label": label, "interval_s": interval_s})
@@ -7173,10 +7173,9 @@ _POOL_PAGE = """<!DOCTYPE html>
     <div class="section" style="margin-bottom:0;margin-left:.5rem">Poll rate</div>
     <select class="label-select" id="poll-rate-sel" onchange="setPollRate()">
       <option value="30">30 seconds</option>
-      <option value="60">1 minute</option>
-      <option value="180">3 minutes</option>
-      <option value="300">5 minutes</option>
-      <option value="420">7 minutes</option>
+      <option value="60">60 seconds</option>
+      <option value="90">90 seconds</option>
+      <option value="120">120 seconds</option>
     </select>
     <span id="node-msg" class="node-msg"></span>
   </div>
