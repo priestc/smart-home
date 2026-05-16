@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.45"
-#define FIRMWARE_REV          52
+#define FIRMWARE_VERSION      "1.7.46"
+#define FIRMWARE_REV          53
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -530,6 +530,7 @@ static String buildPayload(bool include_presence, bool pool_offline = false,
     doc["rev"] = FIRMWARE_REV;
     if (g_scan_ts.length()) doc["batch_ts"] = g_scan_ts;
     if (buffered) doc["buffered"] = true;
+    doc["buffer_size"] = (int)g_batch_queue.size();
     if (buffered_batches && !buffered_batches->empty()) {
         JsonArray ba = doc["buffered_batches"].to<JsonArray>();
         for (const auto& s : *buffered_batches)

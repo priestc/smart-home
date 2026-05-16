@@ -331,6 +331,8 @@ def ble_relay():
         _bb = data.get("buffered_batches", [])
         if data.get("buffered_batches") is not None:
             print(f"[ble-relay] relay={relay_cfg['id']} buffered_batches count={len(_bb)} body_len={request.content_length}", flush=True)
+        if data.get("buffer_size") is not None and data["buffer_size"] > 0:
+            print(f"[ble-relay] relay={relay_cfg['id']} buffer_size={data['buffer_size']}", flush=True)
         for raw_batch in _bb:
             try:
                 bd = raw_batch if isinstance(raw_batch, dict) else _json.loads(raw_batch)
