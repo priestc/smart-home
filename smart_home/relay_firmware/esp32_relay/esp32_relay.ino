@@ -3,10 +3,10 @@
  *
  * Active BLE scanner + GATT relay on request.
  *
- * Every ~18 s:
+ * Every 30 s (NTP-aligned to :00 or :30; multiple relays stagger their offsets):
  *   1. Active BLE scan for 15 s — collects advertisements + scan responses.
- *   2. POST batch to /api/ble-relay — server returns any pending GATT/pair tasks.
- *   3. For each GATT task: connect to device, read characteristic, POST result.
+ *   2. POST batch to /api/ble-relay — server returns relay_offset + any pending tasks.
+ *   3. On GATT cycle (:30 slot): connect to pool monitor, read characteristic, POST.
  *   4. If pair_mode received: advertise as "SmHome-{id}", wait for iPhone to bond.
  *
  * Offline resilience:
@@ -48,11 +48,10 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.31"
-#define FIRMWARE_REV          38
+#define FIRMWARE_VERSION      "1.7.32"
+#define FIRMWARE_REV          39
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
-#define POST_INTERVAL_MS       18000UL
 #define PROVISION_TIMEOUT_MS   60000UL
 #define BOOT_PROBE_MS          3000UL
 #define HTTP_TIMEOUT_MS        10000
@@ -100,6 +99,7 @@ static int                 g_pool_fails         = 0;
 static volatile bool       g_pool_seen_in_scan  = false;  // set by AdvCallback, cleared by main task
 static unsigned long       g_pool_retry_after_ms = 0;     // millis() after which next connect is allowed
 static String              g_pool_status;                  // last outcome, sent in POST for relay-log
+static int                 g_relay_offset = 0;             // seconds offset within 30-s period (0–29)
 #define POOL_RETRY_INTERVAL_MS 30000UL
 
 // ── App watchdog state ────────────────────────────────────────────────────────
@@ -194,6 +194,7 @@ static void loadConfig() {
     strlcpy(g_url,   p.getString("url",   "").c_str(), sizeof(g_url));
     strlcpy(g_token, p.getString("token", "").c_str(), sizeof(g_token));
     strlcpy(g_id,    p.getString("id", "esp32-relay").c_str(), sizeof(g_id));
+    g_relay_offset = p.getInt("relay_offset", 0);
     p.end();
 }
 
@@ -487,6 +488,17 @@ static bool httpPost(const String& payload, bool parse_gatt) {
                     g_pool_label = "";
                     poolDisconnect();
                 }
+                if (rdoc["relay_offset"].is<int>()) {
+                    int new_offset = rdoc["relay_offset"].as<int>();
+                    if (new_offset >= 0 && new_offset < 30 && new_offset != g_relay_offset) {
+                        g_relay_offset = new_offset;
+                        Preferences p;
+                        p.begin("relay", false);
+                        p.putInt("relay_offset", new_offset);
+                        p.end();
+                        Serial.printf("Relay offset updated to %ds\n", new_offset);
+                    }
+                }
                 Serial.printf("POST 200 (%d inserted)\n", rdoc["inserted"].as<int>());
             }
         }
@@ -613,9 +625,33 @@ static void resetBLEStack() {
     Serial.println("Pool: BLE stack reset complete");
 }
 
+// Sleep until the next 30-second clock boundary for this relay's assigned offset.
+// Returns true when the fire time falls in the [30–59] range of the minute —
+// that is the GATT cycle where we attempt the pool monitor connection.
+// Falls back to a 3-second delay if NTP hasn't synced yet.
+static bool sleepUntilNextSlot() {
+    time_t now;
+    time(&now);
+    if (now < 1000000000L) {
+        // NTP not ready — short fixed delay, no GATT
+        delay(3000);
+        return false;
+    }
+    int pos        = (int)(now % 30);
+    int sleep_secs = ((g_relay_offset - pos) + 30) % 30;
+    time_t fire_at = now + (time_t)sleep_secs;
+    bool is_gatt   = (fire_at % 60) >= 30;
+    Serial.printf("Slot: +%ds  offset=%d  gatt=%s  fire@%lld\n",
+                  sleep_secs, g_relay_offset, is_gatt ? "yes" : "no", (long long)fire_at);
+    if (sleep_secs > 0) delay((uint32_t)sleep_secs * 1000);
+    return is_gatt;
+}
+
 static void doPoolMonitorCycle() {
+    // Sleep at the START of each cycle so the POST lands on a clock boundary.
+    bool is_gatt_cycle = sleepUntilNextSlot();
+
     checkAppWatchdog();
-    unsigned long cycle_start_ms = millis();
     g_pool_status = "";  // clear each cycle so stale statuses don't persist
 
     static int s_pool_wifi_fails = 0;
@@ -670,11 +706,6 @@ static void doPoolMonitorCycle() {
     bool pool_offline = true;
     bool pool_seen_now = false;
 
-    // Only attempt GATT read every other cycle — the YC01 data changes slowly
-    // and back-to-back connects stress the BLE stack unnecessarily.
-    static bool s_pool_read_this_cycle = false;
-    s_pool_read_this_cycle = !s_pool_read_this_cycle;
-
     if (g_pool_addr.length() > 0) {
         // Find YC01 by name first; fall back to configured address.
         // Always do this — even on skipped cycles — so pool_seen_now is accurate.
@@ -703,7 +734,7 @@ static void doPoolMonitorCycle() {
         }
         pool_seen_now = (cur_addr.length() > 0);
 
-        if (s_pool_read_this_cycle) {
+        if (is_gatt_cycle) {
             if (!g_pool_client) {
                 g_pool_client = BLEDevice::createClient();
                 g_pool_client->setMTU(23);
@@ -800,17 +831,9 @@ static void doPoolMonitorCycle() {
 
     // ── Step 3: Single POST with pool + sensor data ────────────────────────────
     g_current_op = "http-post";
-    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now, !s_pool_read_this_cycle && g_pool_addr.length() > 0);
+    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now, !is_gatt_cycle && g_pool_addr.length() > 0);
     g_current_op = "";
     maybeSendPendingCrash();
-
-    // Pace the cycle the same way the regular loop does — prevents rapid BLE cycling
-    // when scans fail to start (BLE stack needs idle time to recover after a failed connect).
-    unsigned long elapsed = millis() - cycle_start_ms;
-    if (POST_INTERVAL_MS > elapsed + 3000UL)
-        delay(POST_INTERVAL_MS - elapsed);
-    else
-        delay(3000UL);
 }
 
 // ── Arduino entry points ──────────────────────────────────────────────────────
@@ -891,9 +914,12 @@ void loop() {
         return;
     }
 
-    checkAppWatchdog();
+    // Sleep until this relay's assigned clock-aligned slot (offset within 30 s).
+    // The return value indicates the GATT cycle (fire_at % 60 >= 30) — unused
+    // in the non-pool-monitor path since there is no GATT work here.
+    sleepUntilNextSlot();
 
-    unsigned long cycle_start = millis();
+    checkAppWatchdog();
 
     static int s_wifi_fail_count = 0;
     if (WiFi.status() != WL_CONNECTED) {
@@ -931,12 +957,5 @@ void loop() {
 
     if (g_pair_mode)
         pairModeStart(g_pair_label);
-
-    unsigned long elapsed = millis() - cycle_start;
-    const unsigned long MIN_DELAY = 3000UL;
-    if (POST_INTERVAL_MS > elapsed + MIN_DELAY)
-        delay(POST_INTERVAL_MS - elapsed);
-    else
-        delay(MIN_DELAY);
 }
 

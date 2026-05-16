@@ -351,6 +351,13 @@ def ble_relay():
         "label": assigned.get("label", assigned["address"]),
     } if assigned else None
 
+    # Compute stagger offset so relays share the 30-second period evenly.
+    # relay_offset is the seconds into the 30-s window when this relay should fire.
+    all_relays = _relay.load_relays()
+    n = max(len(all_relays), 1)
+    idx = next((i for i, r in enumerate(all_relays) if r.get("token") == token), 0)
+    response["relay_offset"] = (idx * 30) // n
+
     return jsonify(response)
 
 
