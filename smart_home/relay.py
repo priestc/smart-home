@@ -91,6 +91,44 @@ def firmware_missing_message() -> str:
     )
 
 
+def _resolve_esptool() -> str:
+    """Return the esptool command name, raising RuntimeError if not found."""
+    import subprocess
+    for candidate in ("esptool", "esptool.py"):
+        try:
+            subprocess.run([candidate, "version"], check=True, capture_output=True)
+            return candidate
+        except FileNotFoundError:
+            continue
+    raise RuntimeError("esptool not found. Install with: pip install esptool")
+
+
+def read_chip_mac(port: str) -> str | None:
+    """Read the ESP32 MAC address from a connected device without flashing.
+
+    Returns the MAC as a lowercase colon-separated string (e.g. '30:76:f5:b9:6f:c0'),
+    or None if it could not be determined.
+    """
+    import re
+    import subprocess
+    try:
+        esptool_cmd = _resolve_esptool()
+    except RuntimeError:
+        return None
+    try:
+        result = subprocess.run(
+            [esptool_cmd, "--chip", "esp32", "--port", port, "chip_id"],
+            capture_output=True, text=True, timeout=15,
+        )
+        output = result.stdout + result.stderr
+        m = re.search(r"MAC:\s*([0-9a-fA-F:]{17})", output)
+        if m:
+            return m.group(1).lower()
+    except Exception:
+        pass
+    return None
+
+
 def flash_firmware(port: str, print_fn=print) -> None:
     """Write firmware binaries to ESP32. NVS config is preserved (no reset)."""
     import subprocess
@@ -106,17 +144,7 @@ def flash_firmware(port: str, print_fn=print) -> None:
         flash_args += ["0x8000", str(_PART_BIN)]
     flash_args += ["0x10000", str(_APP_BIN)]
 
-    # Resolve esptool binary name (newer installs use "esptool", older use "esptool.py")
-    esptool_cmd = None
-    for candidate in ("esptool", "esptool.py"):
-        try:
-            subprocess.run([candidate, "version"], check=True, capture_output=True)
-            esptool_cmd = candidate
-            break
-        except FileNotFoundError:
-            continue
-    if esptool_cmd is None:
-        raise RuntimeError("esptool not found. Install with: pip install esptool")
+    esptool_cmd = _resolve_esptool()
 
     # The chip occasionally fails to respond immediately after a reset (timing issue
     # during boot). Retry the flash up to 3 times with a short delay between attempts.

@@ -805,6 +805,10 @@ def update_relay(relay_name):
         click.echo("No relays registered. Use add-relay to provision one first.")
         return
 
+    # relay_id starts as None; will be resolved by MAC detection or manual selection below.
+    relay_id = None
+    mac = None
+
     if relay_name is not None:
         if relay_name not in {r["id"] for r in unique}:
             click.echo(f"Error: relay '{relay_name}' not found.", err=True)
@@ -812,12 +816,6 @@ def update_relay(relay_name):
             click.echo(f"Known relays: {', '.join(known)}", err=True)
             return
         relay_id = relay_name
-    else:
-        click.echo("Which relay do you want to update?\n")
-        for i, r in enumerate(unique, 1):
-            click.echo(f"  {i}. {r['id']}")
-        choice = click.prompt("\nEnter choice", type=click.IntRange(1, len(unique)))
-        relay_id = unique[choice - 1]["id"]
 
     ports = _relay.detect_serial_ports()
     if not ports:
@@ -833,6 +831,28 @@ def update_relay(relay_name):
             click.echo(f"  {i}. {p}")
         idx = click.prompt("Which port is the relay?", type=click.IntRange(1, len(ports)))
         port = ports[idx - 1]
+
+    # Try to identify the relay automatically by its MAC address.
+    if relay_id is None:
+        click.echo("\nReading chip MAC address to identify relay...")
+        mac = _relay.read_chip_mac(port)
+        if mac:
+            click.echo(f"  MAC: {mac}")
+            matched = next((r for r in unique if r.get("mac", "").lower() == mac), None)
+            if matched:
+                relay_id = matched["id"]
+                click.echo(f"  Identified as relay '{relay_id}'.")
+            else:
+                click.echo("  MAC not recognised — manual selection required.\n")
+        else:
+            click.echo("  Could not read MAC — manual selection required.\n")
+
+    if relay_id is None:
+        click.echo("Which relay do you want to update?\n")
+        for i, r in enumerate(unique, 1):
+            click.echo(f"  {i}. {r['id']}")
+        choice = click.prompt("\nEnter choice", type=click.IntRange(1, len(unique)))
+        relay_id = unique[choice - 1]["id"]
 
     new_ver, new_rev = _relay.firmware_version()
     if new_ver != "?":
@@ -866,6 +886,17 @@ def update_relay(relay_name):
     except Exception as e:
         click.echo(f"\nFlash failed: {e}")
         return
+
+    # Persist the MAC address so future runs can auto-identify this relay.
+    if mac is None:
+        mac = _relay.read_chip_mac(port)
+    if mac:
+        relays = _relay.load_relays()
+        for r in relays:
+            if r["id"] == relay_id and r.get("mac", "").lower() != mac:
+                r["mac"] = mac
+                _relay.save_relays(relays)
+                break
 
     click.echo(f"\nDone. Relay '{relay_id}' flashed with v{new_ver} (rev{new_rev}).")
 
