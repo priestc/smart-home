@@ -6900,14 +6900,18 @@ def api_pool_current():
 
 @app.get("/api/pool/history")
 def api_pool_history():
-    """Pool readings history. Query params: label, start, end, limit."""
+    """Pool readings history. Query params: label, start, end, limit, bucket_minutes."""
     label = request.args.get("label")
     start = (request.args.get("start") or "").replace("T", " ") or None
     end   = (request.args.get("end")   or "").replace("T", " ") or None
     try:
-        limit = min(int(request.args.get("limit", 2000)), 50000)
+        limit = min(int(request.args.get("limit", 2000)), 100000)
     except ValueError:
         return jsonify({"error": "limit must be an integer"}), 400
+    try:
+        bucket = max(1, int(request.args.get("bucket_minutes", 1)))
+    except ValueError:
+        return jsonify({"error": "bucket_minutes must be an integer"}), 400
 
     where, params = [], []
     if label:
@@ -6920,20 +6924,148 @@ def api_pool_history():
         where.append("ts <= ?")
         params.append(end)
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-    params.append(limit)
 
+    if bucket > 1:
+        bucket_secs = bucket * 60
+        params.append(limit)
+        sql = f"""
+            SELECT
+                strftime('%Y-%m-%d %H:%M:%S',
+                    CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs},
+                    'unixepoch') AS ts,
+                label,
+                ROUND(AVG(CASE WHEN temp_c IS NOT NULL THEN temp_c * 9.0/5.0 + 32 END), 2) AS temp_f,
+                ROUND(AVG(ph), 2)       AS ph,
+                ROUND(AVG(ec), 0)       AS ec,
+                ROUND(AVG(tds), 0)      AS tds,
+                ROUND(AVG(orp), 0)      AS orp,
+                ROUND(AVG(chlorine), 2) AS chlorine,
+                ROUND(AVG(battery), 0)  AS battery
+            FROM pool_readings{where_sql}
+            GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, label
+            ORDER BY ts ASC LIMIT ?
+        """
+        with _conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return jsonify([dict(r) for r in rows])
+    else:
+        params.append(limit)
+        with _conn() as conn:
+            rows = conn.execute(
+                f"SELECT ts, label, temp_c, ph, ec, tds, orp, chlorine, battery "
+                f"FROM pool_readings{where_sql} ORDER BY ts DESC LIMIT ?",
+                params,
+            ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
+            result.append(d)
+        return jsonify(list(reversed(result)))
+
+
+@app.get("/api/pool/history/years")
+def api_pool_history_years():
+    """Distinct years present in pool_readings."""
     with _conn() as conn:
         rows = conn.execute(
-            f"SELECT ts, label, temp_c, ph, ec, tds, orp, chlorine, battery "
-            f"FROM pool_readings{where_sql} ORDER BY ts DESC LIMIT ?",
-            params,
+            "SELECT DISTINCT strftime('%Y', ts) AS year FROM pool_readings ORDER BY year DESC"
         ).fetchall()
+    return jsonify([r["year"] for r in rows])
+
+
+@app.get("/api/pool/history/month")
+def api_pool_history_month():
+    """Pool readings for a given calendar month across all years, ts normalised to year 2000.
+    Query params: label, month (1-12), bucket_minutes (default 60).
+    """
+    import datetime as _dt
+    label  = request.args.get("label")
+    month  = max(1, min(12, request.args.get("month", 1, type=int)))
+    bucket_minutes = max(1, request.args.get("bucket_minutes", 60, type=int))
+    bucket_secs    = bucket_minutes * 60
+    month_str = f"{month:02d}"
+
+    where_extra = "AND label = ?" if label else ""
+    params = [bucket_secs, bucket_secs, month_str]
+    if label:
+        params.append(label)
+
+    with _conn() as conn:
+        rows = conn.execute(f"""
+            SELECT
+                strftime('%Y', ts) AS year,
+                CAST(strftime('%s', '2000' || substr(ts, 5)) AS INTEGER) / ? * ? AS bucket,
+                label,
+                ROUND(AVG(CASE WHEN temp_c IS NOT NULL THEN temp_c * 9.0/5.0 + 32 END), 2) AS temp_f,
+                ROUND(AVG(ph), 2)       AS ph,
+                ROUND(AVG(ec), 0)       AS ec,
+                ROUND(AVG(tds), 0)      AS tds,
+                ROUND(AVG(orp), 0)      AS orp,
+                ROUND(AVG(chlorine), 2) AS chlorine,
+                ROUND(AVG(battery), 0)  AS battery
+            FROM pool_readings
+            WHERE strftime('%m', ts) = ? {where_extra}
+            GROUP BY bucket, label, year
+            ORDER BY bucket ASC
+        """, params).fetchall()
+
     result = []
     for r in rows:
         d = dict(r)
-        d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
-        result.append(d)
-    return jsonify(list(reversed(result)))
+        ts = _dt.datetime.utcfromtimestamp(d["bucket"]).strftime("%Y-%m-%d %H:%M:%S")
+        result.append({
+            "year": d["year"], "ts": ts, "label": d["label"],
+            "temp_f": d["temp_f"], "ph": d["ph"], "ec": d["ec"],
+            "tds": d["tds"], "orp": d["orp"], "chlorine": d["chlorine"], "battery": d["battery"],
+        })
+    return jsonify(result)
+
+
+@app.get("/api/pool/history/year")
+def api_pool_history_year():
+    """Pool readings across all months, ts normalised to year 2000 for overlay.
+    Query params: label, bucket_minutes (default 360).
+    """
+    import datetime as _dt
+    label  = request.args.get("label")
+    bucket_minutes = max(1, request.args.get("bucket_minutes", 360, type=int))
+    bucket_secs    = bucket_minutes * 60
+
+    where_extra = "AND label = ?" if label else ""
+    params = [bucket_secs, bucket_secs]
+    if label:
+        params.append(label)
+
+    with _conn() as conn:
+        rows = conn.execute(f"""
+            SELECT
+                strftime('%Y', ts) AS year,
+                CAST(strftime('%s', '2000' || substr(ts, 5)) AS INTEGER) / ? * ? AS bucket,
+                label,
+                ROUND(AVG(CASE WHEN temp_c IS NOT NULL THEN temp_c * 9.0/5.0 + 32 END), 2) AS temp_f,
+                ROUND(AVG(ph), 2)       AS ph,
+                ROUND(AVG(ec), 0)       AS ec,
+                ROUND(AVG(tds), 0)      AS tds,
+                ROUND(AVG(orp), 0)      AS orp,
+                ROUND(AVG(chlorine), 2) AS chlorine,
+                ROUND(AVG(battery), 0)  AS battery
+            FROM pool_readings
+            WHERE 1=1 {where_extra}
+            GROUP BY bucket, label, year
+            ORDER BY bucket ASC
+        """, params).fetchall()
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        ts = _dt.datetime.utcfromtimestamp(d["bucket"]).strftime("%Y-%m-%d %H:%M:%S")
+        result.append({
+            "year": d["year"], "ts": ts, "label": d["label"],
+            "temp_f": d["temp_f"], "ph": d["ph"], "ec": d["ec"],
+            "tds": d["tds"], "orp": d["orp"], "chlorine": d["chlorine"], "battery": d["battery"],
+        })
+    return jsonify(result)
 
 
 @app.get("/api/pool/node")
@@ -7154,9 +7286,17 @@ _POOL_PAGE = """<!DOCTYPE html>
     .node-msg { font-size: .8rem; color: #7a90a8; }
     .node-msg.ok  { color: #2a9d6e; }
     .node-msg.err { color: #c0392b; }
-    .range-btns { display: flex; gap: .4rem; margin-bottom: .75rem; }
-    .range-btns button { font-size: .78rem; font-weight: 600; padding: .3rem .75rem; border-radius: 20px; border: none; background: #e8eef5; color: #5a6e84; cursor: pointer; }
-    .range-btns button.active { background: #2e7dd4; color: #fff; }
+    .btn-group { margin-bottom: 1.2rem; }
+    .btn-group-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .4rem; }
+    .range-btns { display: flex; gap: .4rem; flex-wrap: wrap; }
+    .range-btns button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; transition: all .15s; }
+    .range-btns button:hover { background: #f0f4f8; border-color: #aabbc8; }
+    .range-btns button.active { background: #2e7dd4; color: #fff; border-color: #2e7dd4; }
+    .range-btns button:disabled { opacity: .3; cursor: default; pointer-events: none; }
+    .res-row { display: flex; align-items: center; gap: .6rem; margin-bottom: 1.2rem; }
+    .res-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+    .res-row select { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; cursor: pointer; }
+    #resp-size { font-size: .72rem; color: #4a6080; }
   </style>
 </head>
 <body>
@@ -7186,11 +7326,43 @@ _POOL_PAGE = """<!DOCTYPE html>
     <select class="label-select" id="label-sel" onchange="onLabelChange()"></select>
   </div>
 
-  <div class="range-btns" id="range-btns">
-    <button onclick="setRange(1)" data-days="1" class="active">24h</button>
-    <button onclick="setRange(3)" data-days="3">3d</button>
-    <button onclick="setRange(7)" data-days="7">7d</button>
-    <button onclick="setRange(30)" data-days="30">30d</button>
+  <div class="res-row">
+    <label for="res">Resolution</label>
+    <select id="res" onchange="resolution=this.value; loadHistoryForChart()">
+      <option value="low">Low</option>
+      <option value="medium">Medium</option>
+      <option value="max">Max</option>
+    </select>
+    <span id="resp-size"></span>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">Most Recent</div>
+    <div class="range-btns" id="recent-btns">
+      <button id="btn-prev" onclick="shiftView(-1)">&#8592;</button>
+      <button onclick="setRange(1)" data-days="1" class="active">24h</button>
+      <button onclick="setRange(3)" data-days="3">3d</button>
+      <button onclick="setRange(7)" data-days="7">7d</button>
+      <button onclick="setRange(30)" data-days="30">30d</button>
+      <button id="btn-next" onclick="shiftView(1)" disabled>&#8594;</button>
+    </div>
+  </div>
+  <div class="btn-group">
+    <div class="btn-group-label">By Month</div>
+    <div class="range-btns" id="month-btns">
+      <button onclick="setAllMonths()">All Months</button>
+      <button onclick="setMonth(1)">Jan</button>
+      <button onclick="setMonth(2)">Feb</button>
+      <button onclick="setMonth(3)">Mar</button>
+      <button onclick="setMonth(4)">Apr</button>
+      <button onclick="setMonth(5)">May</button>
+      <button onclick="setMonth(6)">Jun</button>
+      <button onclick="setMonth(7)">Jul</button>
+      <button onclick="setMonth(8)">Aug</button>
+      <button onclick="setMonth(9)">Sep</button>
+      <button onclick="setMonth(10)">Oct</button>
+      <button onclick="setMonth(11)">Nov</button>
+      <button onclick="setMonth(12)">Dec</button>
+    </div>
   </div>
 
   <div class="metric-btns" id="metric-btns">
@@ -7237,23 +7409,35 @@ const METRIC_COLORS = {
   tds:      '#1a6db5',
   battery:  '#7a90a8',
 };
+const YEAR_PALETTE = ['#2e7dd4','#e07820','#2a9d6e','#7b4fb5','#c0392b','#16a085','#d35400'];
 
 let historyRows = [];
-let poolChart = null;
-let activeMetric = 'temp_f';
-let rangeDays = 1;
+let poolChart   = null;
+let chartXMin = null, chartXMax = null, chartXUnit = 'hour';
 
-function setRange(days) {
-  rangeDays = days;
-  document.querySelectorAll('#range-btns button').forEach(b => {
-    b.classList.toggle('active', parseFloat(b.dataset.days) === days);
-  });
-  loadHistory();
+let mode = 'recent', rangeDays = 1, activeMonth = null, offsetMs = 0;
+const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const isLocal  = /^192\\.168\\./.test(location.hostname) || /\\.local$/.test(location.hostname);
+let resolution = isLocal ? 'max' : isMobile ? 'low' : 'medium';
+document.getElementById('res').value = resolution;
+
+const BUCKETS = {
+  recent: {
+    low:    {1: 30,  3: 60,  7: 120, 30: 360},
+    medium: {1: 5,   3: 20,  7: 30,  30: 60},
+    max:    {1: 1,   3: 5,   7: 10,  30: 20},
+  },
+  month:  { low: 240, medium: 60, max: 10 },
+  year:   { low: 1440, medium: 360, max: 60 },
+};
+function getBucket() {
+  if (mode === 'recent') return BUCKETS.recent[resolution][rangeDays] ?? 60;
+  return BUCKETS[mode][resolution];
 }
 
 function showError(msg) {
   const el = document.getElementById('error-bar');
-  el.textContent = '⚠ ' + msg;
+  el.textContent = '\\u26a0 ' + msg;
   el.style.display = 'block';
 }
 async function fetchJSON(url) {
@@ -7262,111 +7446,156 @@ async function fetchJSON(url) {
   return r.json();
 }
 
-function agо(ts) {
-  const secs = Math.floor((Date.now() - new Date(ts.replace(' ', 'T')).getTime()) / 1000);
-  if (secs < 0) return 'just now';
-  if (secs < 60) return secs + 's ago';
-  if (secs < 3600) return Math.floor(secs/60) + 'm ago';
+function ago(ts) {
+  const secs = Math.floor((Date.now() - new Date(ts.replace(' ','T')).getTime()) / 1000);
+  if (secs < 0)     return 'just now';
+  if (secs < 60)    return secs + 's ago';
+  if (secs < 3600)  return Math.floor(secs/60) + 'm ago';
   if (secs < 86400) return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm ago';
   return Math.floor(secs/86400) + 'd ago';
 }
-
+function localISO(d) {
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
 function phColor(ph) {
-  if (ph < 7.0) return '#c0392b';
-  if (ph > 7.8) return '#c0392b';
+  if (ph < 7.0 || ph > 7.8) return '#c0392b';
   if (ph >= 7.2 && ph <= 7.6) return '#2a9d6e';
   return '#e07820';
 }
 function orpColor(orp) {
   if (orp >= 650 && orp <= 750) return '#2a9d6e';
-  if (orp < 400 || orp > 900) return '#c0392b';
+  if (orp < 400 || orp > 900)  return '#c0392b';
   return '#e07820';
 }
 function clColor(cl) {
   if (cl >= 1.0 && cl <= 3.0) return '#2a9d6e';
-  if (cl < 0.5 || cl > 5.0) return '#c0392b';
+  if (cl < 0.5  || cl > 5.0)  return '#c0392b';
   return '#e07820';
 }
 
-function buildChartPoints(rows, metric) {
+// ── Range selectors ──────────────────────────────────────────────────────────
+function setRange(days) {
+  mode = 'recent'; rangeDays = days; offsetMs = 0;
+  document.querySelectorAll('#recent-btns button[data-days]').forEach(b =>
+    b.classList.toggle('active', parseFloat(b.dataset.days) === days));
+  document.querySelectorAll('#month-btns button').forEach(b => b.classList.remove('active'));
+  loadHistoryForChart();
+}
+function shiftView(dir) {
+  offsetMs += dir * rangeDays * 86400000;
+  if (offsetMs > 0) offsetMs = 0;
+  loadHistoryForChart();
+}
+function setAllMonths() {
+  mode = 'year';
+  document.querySelectorAll('#recent-btns button[data-days]').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('#month-btns button').forEach((b,i) => b.classList.toggle('active', i === 0));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
+  loadHistoryForChart();
+}
+function setMonth(m) {
+  mode = 'month'; activeMonth = m;
+  document.querySelectorAll('#recent-btns button[data-days]').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('#month-btns button').forEach((b,i) => b.classList.toggle('active', i === m));
+  document.getElementById('btn-prev').disabled = true;
+  document.getElementById('btn-next').disabled = true;
+  loadHistoryForChart();
+}
+
+// ── Chart ────────────────────────────────────────────────────────────────────
+function buildPoolDatasets(rows) {
+  const btn    = document.querySelector('.metric-btn.active');
+  const metric = btn?.dataset.metric || 'temp_f';
+  const lbl    = btn?.dataset.label  || metric;
+  const unit   = btn?.dataset.unit   || '';
+  const color  = METRIC_COLORS[metric] || '#2e7dd4';
+  const isGrouped = mode === 'month' || mode === 'year';
+
+  if (isGrouped) {
+    const byYear = {};
+    for (const r of rows) (byYear[r.year] ??= []).push({ x: new Date(r.ts.replace(' ','T')), y: r[metric] });
+    return Object.keys(byYear).sort().map((year, i) => ({
+      label: `${lbl} ${year}`,
+      data: byYear[year],
+      borderColor: YEAR_PALETTE[i % YEAR_PALETTE.length],
+      backgroundColor: 'transparent',
+      borderWidth: i === 0 ? 2 : 1.5,
+      borderDash: i > 0 ? [4,3] : [],
+      pointRadius: 0, tension: 0, spanGaps: false,
+    }));
+  }
+
   const GAP_MS = 15 * 60 * 1000;
   const points = [];
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     if (i > 0) {
-      const prevTime = new Date(rows[i - 1].ts.replace(' ', 'T')).getTime();
-      const currTime = new Date(r.ts.replace(' ', 'T')).getTime();
-      if (currTime - prevTime > GAP_MS) {
-        points.push({ x: new Date(prevTime + (currTime - prevTime) / 2), y: null });
-      }
+      const prev = new Date(rows[i-1].ts.replace(' ','T')).getTime();
+      const curr = new Date(r.ts.replace(' ','T')).getTime();
+      if (curr - prev > GAP_MS) points.push({ x: new Date(prev + (curr-prev)/2), y: null });
     }
-    if (r[metric] != null) {
-      points.push({ x: new Date(r.ts.replace(' ', 'T')), y: r[metric] });
-    }
+    if (r[metric] != null) points.push({ x: new Date(r.ts.replace(' ','T')), y: r[metric] });
   }
-  return points;
+  return [{
+    label: lbl + (unit ? ` (${unit})` : ''),
+    data: points,
+    borderColor: color,
+    backgroundColor: color + '22',
+    borderWidth: 2, pointRadius: 2, pointHoverRadius: 4,
+    fill: true, tension: 0, spanGaps: false,
+  }];
 }
 
 function renderChart() {
-  const btn = document.querySelector('.metric-btn.active');
-  if (!btn || !historyRows.length) return;
-  const metric = btn.dataset.metric;
-  const label  = btn.dataset.label;
-  const unit   = btn.dataset.unit;
-  const color  = METRIC_COLORS[metric] || '#2e7dd4';
+  const btn  = document.querySelector('.metric-btn.active');
+  const unit = btn?.dataset.unit || '';
+  const datasets = buildPoolDatasets(historyRows);
 
-  const points = buildChartPoints(historyRows, metric);
-
-  if (poolChart) {
-    poolChart.data.datasets[0].data   = points;
-    poolChart.data.datasets[0].label  = label + (unit ? ' (' + unit + ')' : '');
-    poolChart.data.datasets[0].borderColor      = color;
-    poolChart.data.datasets[0].backgroundColor  = color + '22';
-    poolChart.update();
-  } else {
+  if (!poolChart) {
     const ctx = document.getElementById('pool-chart').getContext('2d');
     poolChart = new Chart(ctx, {
       type: 'line',
-      data: {
-        datasets: [{
-          label: label + (unit ? ' (' + unit + ')' : ''),
-          data: points,
-          borderColor: color,
-          backgroundColor: color + '22',
-          borderWidth: 2,
-          pointRadius: 2,
-          pointHoverRadius: 4,
-          fill: true,
-          tension: 0.3,
-          spanGaps: false,
-        }]
-      },
+      data: { datasets },
       options: {
-        responsive: true,
+        animation: false, parsing: false, responsive: true,
         interaction: { mode: 'index', intersect: false },
         scales: {
           x: {
             type: 'time',
-            time: { tooltipFormat: 'MMM d, h:mm a' },
+            time: { tooltipFormat: 'MMM d, h:mm a', unit: chartXUnit },
+            min: chartXMin, max: chartXMax,
             grid: { color: '#f0f4f8' },
-            ticks: { color: '#7a90a8', maxTicksLimit: 8 },
+            ticks: { color: '#7a90a8', maxTicksLimit: 10 },
           },
           y: {
             grid: { color: '#f0f4f8' },
             ticks: { color: '#7a90a8' },
             title: { display: !!unit, text: unit, color: '#7a90a8', font: { size: 11 } },
-          }
+          },
         },
         plugins: {
-          legend: { display: false },
+          legend: { labels: { color: '#4a6080', boxWidth: 12 } },
           tooltip: {
             callbacks: {
-              label: ctx => ctx.parsed.y + (unit ? ' ' + unit : ''),
+              label: ctx => {
+                const u = document.querySelector('.metric-btn.active')?.dataset.unit || '';
+                return (ctx.dataset.label || '') + ': ' + ctx.parsed.y + (u ? ' ' + u : '');
+              }
             }
           }
         }
       }
     });
+  } else {
+    poolChart.data.datasets = datasets;
+    poolChart.options.scales.x.min  = chartXMin;
+    poolChart.options.scales.x.max  = chartXMax;
+    poolChart.options.scales.x.time.unit = chartXUnit;
+    poolChart.options.scales.y.title.display = !!unit;
+    poolChart.options.scales.y.title.text    = unit;
+    poolChart.update();
   }
 }
 
@@ -7382,77 +7611,64 @@ document.getElementById('metric-btns').addEventListener('click', e => {
   if (!btn) return;
   document.querySelectorAll('.metric-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
-  activeMetric = btn.dataset.metric;
   updateDesc(btn);
   renderChart();
 });
-
-// Show description for the initially active button
 updateDesc(document.querySelector('.metric-btn.active'));
 
+// ── Node / poll rate ─────────────────────────────────────────────────────────
 let _nodeLabel = null;
 
 async function loadNode() {
   try {
     const data = await fetchJSON('/api/pool/node');
     const labels = Object.keys(data);
-    if (!labels.length) {
-      document.getElementById('node-wrap').style.display = 'none';
-      return;
-    }
+    if (!labels.length) { document.getElementById('node-wrap').style.display = 'none'; return; }
     _nodeLabel = labels[0];
     const info = data[_nodeLabel];
-    const sel = document.getElementById('node-sel');
+    const sel  = document.getElementById('node-sel');
     sel.innerHTML = info.relay_options.map(opt => {
-      const name = opt.id === 'server' ? 'Server (tank2)' : opt.id;
+      const name     = opt.id === 'server' ? 'Server (tank2)' : opt.id;
       const selected = opt.id === info.node ? ' selected' : '';
       return `<option value="${opt.id}"${selected}>${name}</option>`;
     }).join('');
-    const pollSel = document.getElementById('poll-rate-sel');
+    const pollSel  = document.getElementById('poll-rate-sel');
     const interval = info.poll_interval_s ?? 60;
     for (const opt of pollSel.options) {
       if (parseInt(opt.value) === interval) { opt.selected = true; break; }
     }
-  } catch(e) {
-    showError('Failed to load node config: ' + e.message);
-  }
+  } catch(e) { showError('Failed to load node config: ' + e.message); }
 }
 
 async function setPollRate() {
   if (!_nodeLabel) return;
   const interval_s = parseInt(document.getElementById('poll-rate-sel').value);
   const msg = document.getElementById('node-msg');
-  msg.className = 'node-msg';
-  msg.textContent = 'Saving…';
+  msg.className = 'node-msg'; msg.textContent = 'Saving\\u2026';
   try {
     const r = await fetch('/api/pool/poll-rate', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({label: _nodeLabel, interval_s}),
     });
     const body = await r.json();
     if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
     msg.className = 'node-msg ok';
-    msg.textContent = 'Poll rate saved — relay will apply on next check-in';
+    msg.textContent = 'Poll rate saved \\u2014 relay will apply on next check-in';
     setTimeout(() => { msg.textContent = ''; }, 5000);
   } catch(e) {
-    msg.className = 'node-msg err';
-    msg.textContent = 'Error: ' + e.message;
+    msg.className = 'node-msg err'; msg.textContent = 'Error: ' + e.message;
     showError('Failed to set poll rate: ' + e.message);
   }
 }
 
 async function setNode() {
   if (!_nodeLabel) return;
-  const sel = document.getElementById('node-sel');
-  const node = sel.value;
-  const msg = document.getElementById('node-msg');
-  msg.className = 'node-msg';
-  msg.textContent = 'Saving…';
+  const node = document.getElementById('node-sel').value;
+  const msg  = document.getElementById('node-msg');
+  msg.className = 'node-msg'; msg.textContent = 'Saving\\u2026';
   try {
     const r = await fetch('/api/pool/node', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({label: _nodeLabel, node}),
     });
     const body = await r.json();
@@ -7463,33 +7679,26 @@ async function setNode() {
       : `Relay '${node}' will activate on its next check-in (~18s)`;
     setTimeout(() => { msg.textContent = ''; }, 5000);
   } catch(e) {
-    msg.className = 'node-msg err';
-    msg.textContent = 'Error: ' + e.message;
+    msg.className = 'node-msg err'; msg.textContent = 'Error: ' + e.message;
     showError('Failed to set node: ' + e.message);
   }
 }
 
+// ── Current readings ─────────────────────────────────────────────────────────
 async function loadCurrent() {
   try {
     const rows = await fetchJSON('/api/pool/current');
     const container = document.getElementById('cards');
-    if (!rows.length) {
-      container.innerHTML = '<span class="no-data">No pool monitor readings yet.</span>';
-      return;
-    }
+    if (!rows.length) { container.innerHTML = '<span class="no-data">No pool monitor readings yet.</span>'; return; }
     const bar = document.getElementById('status-bar');
-    const anyOffline = rows.some(r => r.offline);
     const allOffline = rows.every(r => r.offline);
+    const anyOffline = rows.some(r => r.offline);
     if (allOffline) {
-      bar.style.display = '';
-      bar.style.background = '#fde8e8';
-      bar.style.color = '#c0392b';
-      bar.textContent = '● Pool monitor offline — last reading ' + agо(rows[0].ts);
+      bar.style.cssText = 'display:;background:#fde8e8;color:#c0392b;';
+      bar.textContent = '\\u25cf Pool monitor offline \\u2014 last reading ' + ago(rows[0].ts);
     } else if (anyOffline) {
-      bar.style.display = '';
-      bar.style.background = '#fde8e8';
-      bar.style.color = '#c0392b';
-      bar.textContent = '● One or more pool monitors offline';
+      bar.style.cssText = 'display:;background:#fde8e8;color:#c0392b;';
+      bar.textContent = '\\u25cf One or more pool monitors offline';
     } else {
       bar.style.display = 'none';
     }
@@ -7506,66 +7715,89 @@ async function loadCurrent() {
       <div style="min-width:220px">
         <div class="card metric-label" style="margin-bottom:.5rem;font-size:.8rem;color:#7a90a8;font-weight:600">${r.label}</div>
         <div class="cards" style="margin-bottom:0;gap:.75rem">
-          <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '—'}<span class="metric-unit">°F</span></div><div class="metric-ts">${agо(r.ts)}</div></div>
-          <div class="card"><div class="metric-label">pH</div><div class="metric-value" style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '—'}</div></div>
-          <div class="card"><div class="metric-label">ORP</div><div class="metric-value" style="color:${orpColor(r.orp)}">${r.orp != null ? r.orp : '—'}<span class="metric-unit">mV</span></div></div>
-          <div class="card"><div class="metric-label">Free Cl</div><div class="metric-value" style="color:${clColor(r.chlorine)}">${r.chlorine != null ? r.chlorine.toFixed(1) : '—'}<span class="metric-unit">mg/L</span></div></div>
-          <div class="card"><div class="metric-label">EC</div><div class="metric-value ec">${r.ec != null ? r.ec : '—'}<span class="metric-unit">µS/cm</span></div></div>
-          <div class="card"><div class="metric-label">TDS</div><div class="metric-value tds">${r.tds != null ? r.tds : '—'}<span class="metric-unit">ppm</span></div></div>
-          <div class="card"><div class="metric-label">Battery</div><div class="metric-value bat">${r.battery != null ? r.battery : '—'}<span class="metric-unit">%</span></div></div>
+          <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '\\u2014'}<span class="metric-unit">\\u00b0F</span></div><div class="metric-ts">${ago(r.ts)}</div></div>
+          <div class="card"><div class="metric-label">pH</div><div class="metric-value" style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '\\u2014'}</div></div>
+          <div class="card"><div class="metric-label">ORP</div><div class="metric-value" style="color:${orpColor(r.orp)}">${r.orp != null ? r.orp : '\\u2014'}<span class="metric-unit">mV</span></div></div>
+          <div class="card"><div class="metric-label">Free Cl</div><div class="metric-value" style="color:${clColor(r.chlorine)}">${r.chlorine != null ? r.chlorine.toFixed(1) : '\\u2014'}<span class="metric-unit">mg/L</span></div></div>
+          <div class="card"><div class="metric-label">EC</div><div class="metric-value ec">${r.ec != null ? r.ec : '\\u2014'}<span class="metric-unit">\\u00b5S/cm</span></div></div>
+          <div class="card"><div class="metric-label">TDS</div><div class="metric-value tds">${r.tds != null ? r.tds : '\\u2014'}<span class="metric-unit">ppm</span></div></div>
+          <div class="card"><div class="metric-label">Battery</div><div class="metric-value bat">${r.battery != null ? r.battery : '\\u2014'}<span class="metric-unit">%</span></div></div>
         </div>
       </div>
     `).join('');
-  } catch(e) {
-    showError('Failed to load current readings: ' + e.message);
-  }
+  } catch(e) { showError('Failed to load current readings: ' + e.message); }
 }
 
-async function loadHistory() {
+// ── History ──────────────────────────────────────────────────────────────────
+function updateHistoryTable(rows) {
+  const tbody = document.getElementById('hist-body');
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" class="no-data">No history yet.</td></tr>'; return; }
+  tbody.innerHTML = [...rows].reverse().slice(0, 10).map(r => `<tr>
+    <td>${r.ts}</td>
+    <td>${r.temp_f != null ? r.temp_f.toFixed(1) + '\\u00b0F' : '\\u2014'}</td>
+    <td style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '\\u2014'}</td>
+    <td style="color:${orpColor(r.orp)}">${r.orp != null ? r.orp : '\\u2014'}</td>
+    <td style="color:${clColor(r.chlorine)}">${r.chlorine != null ? r.chlorine.toFixed(1) : '\\u2014'}</td>
+    <td>${r.ec != null ? r.ec : '\\u2014'}</td>
+    <td>${r.tds != null ? r.tds : '\\u2014'}</td>
+    <td>${r.battery != null ? r.battery + '%' : '\\u2014'}</td>
+  </tr>`).join('');
+}
+
+async function loadHistoryForChart() {
   const label = document.getElementById('label-sel').value;
   if (!label) return;
   try {
-    const start = new Date(Date.now() - rangeDays * 86400000).toISOString().slice(0, 19).replace('T', ' ');
-    const limit = rangeDays <= 1 ? 2000 : rangeDays <= 7 ? 10000 : 50000;
-    const rows = await fetchJSON('/api/pool/history?label=' + encodeURIComponent(label)
-      + '&start=' + encodeURIComponent(start) + '&limit=' + limit);
-    historyRows = rows;
-    renderChart();
-
-    const tbody = document.getElementById('hist-body');
-    if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="8" class="no-data">No history yet.</td></tr>';
-      return;
+    let rows;
+    if (mode === 'recent') {
+      const xMax = new Date(Date.now() + offsetMs);
+      const xMin = new Date(xMax.getTime() - rangeDays * 86400000);
+      chartXMin = xMin; chartXMax = xMax;
+      chartXUnit = rangeDays <= 1 ? 'hour' : 'day';
+      rows = await fetchJSON('/api/pool/history?label=' + encodeURIComponent(label)
+        + '&start=' + encodeURIComponent(localISO(xMin))
+        + '&end='   + encodeURIComponent(localISO(xMax))
+        + '&limit=100000&bucket_minutes=' + getBucket());
+      historyRows = rows;
+      renderChart();
+      updateHistoryTable(rows);
+      const peek = await fetchJSON('/api/pool/history?label=' + encodeURIComponent(label)
+        + '&end=' + encodeURIComponent(localISO(xMin)) + '&limit=1');
+      document.getElementById('btn-prev').disabled = peek.length === 0;
+      document.getElementById('btn-next').disabled = offsetMs >= 0;
+    } else if (mode === 'month') {
+      chartXMin = new Date(2000, activeMonth - 1, 1);
+      chartXMax = new Date(2000, activeMonth, 0, 23, 59, 59);
+      chartXUnit = 'day';
+      rows = await fetchJSON('/api/pool/history/month?label=' + encodeURIComponent(label)
+        + '&month=' + activeMonth + '&bucket_minutes=' + getBucket());
+      historyRows = rows;
+      renderChart();
+    } else {
+      chartXMin = new Date(2000, 0, 1);
+      chartXMax = new Date(2000, 11, 31, 23, 59, 59);
+      chartXUnit = 'month';
+      rows = await fetchJSON('/api/pool/history/year?label=' + encodeURIComponent(label)
+        + '&bucket_minutes=' + getBucket());
+      historyRows = rows;
+      renderChart();
     }
-    tbody.innerHTML = [...rows].reverse().slice(0, 10).map(r => `<tr>
-      <td>${r.ts}</td>
-      <td>${r.temp_f != null ? r.temp_f.toFixed(1) + '°F' : '—'}</td>
-      <td style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '—'}</td>
-      <td style="color:${orpColor(r.orp)}">${r.orp != null ? r.orp : '—'}</td>
-      <td style="color:${clColor(r.chlorine)}">${r.chlorine != null ? r.chlorine.toFixed(1) : '—'}</td>
-      <td>${r.ec != null ? r.ec : '—'}</td>
-      <td>${r.tds != null ? r.tds : '—'}</td>
-      <td>${r.battery != null ? r.battery + '%' : '—'}</td>
-    </tr>`).join('');
-  } catch(e) {
-    showError('Failed to load history: ' + e.message);
-  }
+    document.getElementById('resp-size').textContent = rows.length + ' pts';
+  } catch(e) { showError('Failed to load history: ' + e.message); }
 }
 
 function onLabelChange() {
   historyRows = [];
   if (poolChart) { poolChart.destroy(); poolChart = null; }
-  loadHistory();
+  loadHistoryForChart();
 }
 
+// ── Events ───────────────────────────────────────────────────────────────────
 async function loadEvents() {
   try {
     const events = await fetchJSON('/api/pool/events');
     const wrap = document.getElementById('events-wrap');
-    if (!events.length) {
-      wrap.innerHTML = '<span class="no-data">No offline events recorded.</span>';
-      return;
-    }
+    if (!events.length) { wrap.innerHTML = '<span class="no-data">No offline events recorded.</span>'; return; }
     wrap.innerHTML = '<ul class="ev-list">' + events.map(e => {
       const isOff = e.event_type === 'sensor_offline';
       const badge = isOff
@@ -7573,13 +7805,11 @@ async function loadEvents() {
         : '<span class="ev-badge badge-on">Online</span>';
       return `<li class="ev-item">${badge}<span class="ev-ts">${e.ts}</span><span class="ev-detail">${e.details || ''}</span></li>`;
     }).join('') + '</ul>';
-  } catch(e) {
-    showError('Failed to load events: ' + e.message);
-  }
+  } catch(e) { showError('Failed to load events: ' + e.message); }
 }
 
 loadNode();
-loadCurrent().then(() => { loadHistory(); loadEvents(); });
+loadCurrent().then(() => { loadHistoryForChart(); loadEvents(); });
 setInterval(loadCurrent, 30000);
 </script>
 </body>
