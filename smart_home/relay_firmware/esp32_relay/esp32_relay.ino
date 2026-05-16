@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.40"
-#define FIRMWARE_REV          47
+#define FIRMWARE_VERSION      "1.7.41"
+#define FIRMWARE_REV          48
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -781,7 +781,7 @@ static void doPoolMonitorCycle() {
                 bool ok = g_pool_client->connect(
                     BLEAddress(cur_addr.c_str(), cur_type),
                     cur_type,
-                    20000  // 20 s — matches Python BleakClient timeout
+                    8000  // 8 s — fits within the 30 s cycle slot
                 );
                 unsigned long connect_ms = millis() - connect_start;
                 if (!ok) {
@@ -792,10 +792,16 @@ static void doPoolMonitorCycle() {
                     Serial.printf("Pool: connect failed in %lums (fail #%d) [%s], retry in %lus\n",
                                   connect_ms, g_pool_fails, g_pool_status.c_str(),
                                   POOL_RETRY_INTERVAL_MS / 1000UL);
-                    if (connect_ms >= 18000) {
-                        // Timeout: BLE controller is stuck in connection-initiation mode
-                        // and can no longer scan. Reset the stack to recover.
+                    if (connect_ms >= 2000) {
+                        // Any real timeout leaves the BLE controller stuck in connection-initiation
+                        // mode and unable to scan. Reset the stack to recover.
+                        // BLEDevice::deinit() can briefly disrupt WiFi coexistence; reconnect if needed.
                         resetBLEStack();
+                        if (WiFi.status() != WL_CONNECTED) {
+                            Serial.println("Pool: WiFi dropped after BLE reset — reconnecting");
+                            WiFi.reconnect();
+                            delay(3000);
+                        }
                     } else {
                         poolDisconnect();
                     }
