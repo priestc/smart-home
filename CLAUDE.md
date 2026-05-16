@@ -16,7 +16,7 @@ Also, the project is re-deployed after almost every commit. The standard deploy 
 pipx install git+https://github.com/priestc/smart-home.git@master --force; sudo -n systemctl restart smart-home-api.service
 ```
 
-**Do NOT restart `smart-home.service` (the monitor) on every deploy.** Restarting it drops the BLE connection to the pool monitor (YC01), which causes the device to power off and requires a manual button press to bring it back online. Only restart `smart-home.service` when changes to the BLE monitor code (`__main__.py`, `pool.py`, etc.) actually require it:
+When changes to the monitor code (`__main__.py`, `pool.py`, etc.) require it, restart the monitor service:
 
 ```
 ssh tank2 'sudo -n systemctl restart smart-home.service'
