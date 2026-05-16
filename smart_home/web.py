@@ -7314,7 +7314,7 @@ _POOL_PAGE = """<!DOCTYPE html>
     <span id="node-msg" class="node-msg"></span>
   </div>
 
-  <div style="display:flex;align-items:center;gap:1rem;margin-bottom:.75rem">
+  <div id="label-row" style="display:none;align-items:center;gap:1rem;margin-bottom:.75rem">
     <div class="section" style="margin-bottom:0">History</div>
     <select class="label-select" id="label-sel" onchange="onLabelChange()"></select>
   </div>
@@ -7699,6 +7699,7 @@ async function loadCurrent() {
         sel.appendChild(o);
       }
     });
+    document.getElementById('label-row').style.display = sel.options.length > 1 ? 'flex' : 'none';
     container.innerHTML = rows.map(r => `
       <div style="min-width:220px">
         <div class="card metric-label" style="margin-bottom:.5rem;font-size:.8rem;color:#7a90a8;font-weight:600">${r.label}</div>
