@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.39"
-#define FIRMWARE_REV          46
+#define FIRMWARE_VERSION      "1.7.40"
+#define FIRMWARE_REV          47
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -705,7 +705,6 @@ static void doPoolMonitorCycle() {
     // The v3.3.x library auto-stops the scanner before any connect attempt, so
     // there is no SCAN_REQ interference when we connect right after the scan.
     g_seen.clear();
-    g_scan_ts = getTimestamp();
     BLEScan* scan = BLEDevice::getScan();
     scan->setAdvertisedDeviceCallbacks(&g_cb, false);
     scan->setActiveScan(true);
@@ -725,6 +724,7 @@ static void doPoolMonitorCycle() {
     }
     if (scan->isScanning()) scan->stop();
     scan->clearResults();
+    g_scan_ts = getTimestamp();  // stamp after scan so batch_ts reflects POST time
 
     // ── Step 2: Pool monitor connect + read ───────────────────────────────────
     // Mirror the Python _yc01_persistent_loop approach: find the device by name
@@ -981,7 +981,6 @@ void loop() {
 
     g_current_op = "ble-scan";
     g_seen.clear();
-    g_scan_ts = getTimestamp();
 
     BLEScan* scan = BLEDevice::getScan();
     scan->setAdvertisedDeviceCallbacks(&g_cb, false);
@@ -990,6 +989,7 @@ void loop() {
     scan->setWindow(80);     // 50 ms active per interval (50% duty cycle)
     scan->start(SCAN_SECONDS, false);
     scan->clearResults();
+    g_scan_ts = getTimestamp();  // stamp after scan so batch_ts reflects POST time
 
     g_current_op = "http-post";
     postBatch();
