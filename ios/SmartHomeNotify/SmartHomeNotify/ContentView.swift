@@ -1,14 +1,21 @@
 import SwiftUI
+import UIKit
 import WidgetKit
 
 private let appGroupDefaults = UserDefaults(suiteName: "group.io.github.priestc.SmartHomeNotify")!
 
 struct ContentView: View {
-    // Store URLs in the shared App Group so the widget extension can read them
     @AppStorage("localURL",     store: appGroupDefaults) private var localURL     = ""
     @AppStorage("tailscaleURL", store: appGroupDefaults) private var tailscaleURL = ""
-    @State private var status: String? = nil
+    @AppStorage("presenceName") private var presenceName = UIDevice.current.name
+    @AppStorage("presenceRegistered") private var presenceRegistered = false
+
+    @State private var pushStatus: String? = nil
     @State private var isRegistering = false
+    @State private var presenceStatus: String? = nil
+    @State private var isRegisteringPresence = false
+
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationView {
@@ -26,7 +33,7 @@ struct ContentView: View {
                 }
 
                 Section {
-                    Button(action: registerDevice) {
+                    Button(action: registerForPush) {
                         if isRegistering {
                             HStack {
                                 ProgressView()
@@ -39,11 +46,39 @@ struct ContentView: View {
                     .disabled((localURL.isEmpty && tailscaleURL.isEmpty) || isRegistering)
                 }
 
-                if let status {
+                if let pushStatus {
                     Section {
-                        Text(status)
+                        Text(pushStatus)
                             .font(.footnote)
-                            .foregroundColor(status.hasPrefix("✓") ? .green : .red)
+                            .foregroundColor(pushStatus.hasPrefix("✓") ? .green : .red)
+                    }
+                }
+
+                Section(
+                    header: Text("Presence Detection"),
+                    footer: Text("Heartbeats are sent to the local URL only — the server marks you away after 15 minutes without one.")
+                ) {
+                    TextField("Device name", text: $presenceName)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button(action: registerPresenceDevice) {
+                        if isRegisteringPresence {
+                            HStack {
+                                ProgressView()
+                                Text("Registering…").padding(.leading, 8)
+                            }
+                        } else {
+                            Text(presenceRegistered ? "Re-register as Presence Device" : "Register as Presence Device")
+                        }
+                    }
+                    .disabled(localURL.isEmpty || presenceName.isEmpty || isRegisteringPresence)
+                }
+
+                if let presenceStatus {
+                    Section {
+                        Text(presenceStatus)
+                            .font(.footnote)
+                            .foregroundColor(presenceStatus.hasPrefix("✓") ? .green : .red)
                     }
                 }
 
@@ -57,7 +92,12 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .apnsTokenReceived)) { _ in
             if !localURL.isEmpty || !tailscaleURL.isEmpty {
-                registerDevice()
+                registerForPush()
+            }
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                sendHeartbeat()
             }
         }
     }
@@ -70,20 +110,20 @@ struct ContentView: View {
         return s
     }
 
-    private func registerDevice() {
+    private func registerForPush() {
         guard let token = UserDefaults.standard.string(forKey: "apnsDeviceToken"), !token.isEmpty else {
-            status = "No device token yet — make sure notifications are allowed in Settings."
+            pushStatus = "No device token yet — make sure notifications are allowed in Settings."
             return
         }
 
         let candidates = [localURL, tailscaleURL].compactMap { normalizeURL($0) }
         guard !candidates.isEmpty else {
-            status = "Enter at least one server URL."
+            pushStatus = "Enter at least one server URL."
             return
         }
 
         isRegistering = true
-        status = nil
+        pushStatus = nil
 
         let body = try? JSONSerialization.data(withJSONObject: ["token": token])
         let group = DispatchGroup()
@@ -117,13 +157,52 @@ struct ContentView: View {
         group.notify(queue: .main) {
             isRegistering = false
             if successes.isEmpty {
-                status = "Could not reach any server. Check URLs and try again."
+                pushStatus = "Could not reach any server. Check URLs and try again."
             } else if successes.count == candidates.count {
-                status = "✓ Registered on all \(successes.count) server URL(s)."
+                pushStatus = "✓ Registered on all \(successes.count) server URL(s)."
             } else {
-                status = "✓ Registered on \(successes.count) of \(candidates.count) URLs (local may be unreachable when away)."
+                pushStatus = "✓ Registered on \(successes.count) of \(candidates.count) URLs (local may be unreachable when away)."
             }
             WidgetCenter.shared.reloadAllTimelines()
         }
+    }
+
+    private func registerPresenceDevice() {
+        guard let urlStr = normalizeURL(localURL),
+              let url = URL(string: "\(urlStr)/api/register-presence-device") else {
+            presenceStatus = "Enter a local server URL first."
+            return
+        }
+        isRegisteringPresence = true
+        presenceStatus = nil
+        let body = try? JSONSerialization.data(withJSONObject: ["name": presenceName])
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            DispatchQueue.main.async {
+                isRegisteringPresence = false
+                if error == nil, let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                    presenceStatus = "✓ Registered. Heartbeats will be sent automatically."
+                    presenceRegistered = true
+                    sendHeartbeat()
+                } else {
+                    presenceStatus = "Registration failed. Is the local URL reachable?"
+                }
+            }
+        }.resume()
+    }
+
+    func sendHeartbeat() {
+        guard presenceRegistered, !presenceName.isEmpty,
+              let urlStr = normalizeURL(localURL),
+              let url = URL(string: "\(urlStr)/api/presence-heartbeat") else { return }
+        let body = try? JSONSerialization.data(withJSONObject: ["name": presenceName])
+        var request = URLRequest(url: url, timeoutInterval: 5)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
     }
 }

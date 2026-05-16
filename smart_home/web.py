@@ -83,9 +83,6 @@ def ble_relay():
         except (ValueError, TypeError):
             pass
 
-    # presence_last_seen: {ble_name: utc_ts} — relay's local record of last sightings
-    relay_presence_last_seen = data.get("presence_last_seen") or {}
-
     # Minimal stand-ins for bleak's BLEDevice / AdvertisementData so we can
     # reuse the existing is_* detection functions without modification.
     class _Dev:
@@ -101,28 +98,9 @@ def ble_relay():
             return f"{s}-0000-1000-8000-00805f9b34fb"
         return s
 
-    from smart_home import presence as _presence
-    from smart_home.db import upsert_ble_rssi
-
-    # {ble_name: label} — keys are BLE advertised names, values are human labels
-    presence_name_map = _presence.load_devices()
-    presence_labels = set(presence_name_map.values())
-
     inserted = 0
     labeled_seen: dict = {}  # {label: rssi} for all labeled devices seen this batch
     with _conn() as conn:
-        # MAC-address cache: {mac: label} for presence devices whose current address
-        # the main scanner has observed (stored in ble_rssi). Lets the relay recognise
-        # a device (e.g. iPhone) even when it doesn't broadcast its name.
-        presence_mac_map = {
-            row[0].upper(): row[1]
-            for row in conn.execute(
-                "SELECT address, label FROM ble_rssi WHERE label IN (%s) AND address IS NOT NULL"
-                % ",".join("?" * len(presence_labels)),
-                tuple(presence_labels),
-            )
-        } if presence_labels else {}
-        # Record this relay's check-in so check_presence() knows it's active
         conn.execute(
             "INSERT OR REPLACE INTO relay_checkin (relay_id, ts) "
             "VALUES (?, strftime('%Y-%m-%d %H:%M:%S','now'))",
@@ -173,42 +151,6 @@ def ble_relay():
                     inserted += 1
                     if rssi is not None:
                         labeled_seen[reading.label] = rssi
-
-            # Presence: match by BLE name first, then fall back to cached MAC address.
-            # The MAC cache (ble_rssi) is kept current by the main scanner; this lets
-            # the relay recognise devices (e.g. iPhone) that don't broadcast their name.
-            presence_label = (presence_name_map.get(name) if name else None) \
-                          or presence_mac_map.get(address)
-            if presence_label:
-                if rssi is not None:
-                    upsert_ble_rssi(conn, presence_label, address, rssi)
-                    labeled_seen[presence_label] = rssi
-                conn.execute(
-                    "INSERT OR REPLACE INTO relay_presence_sighting (relay_id, label, ts) "
-                    "VALUES (?, ?, strftime('%Y-%m-%d %H:%M:%S','now'))",
-                    (relay_cfg["id"], presence_label)
-                )
-
-        # Update last_seen_ts for presence devices the relay tracked while offline.
-        # Only advances the stored value — never overwrites a newer timestamp.
-        for ble_name, utc_ts in relay_presence_last_seen.items():
-            label = presence_name_map.get(ble_name)
-            if not label:
-                continue
-            try:
-                dt_utc = datetime.datetime.strptime(utc_ts, "%Y-%m-%d %H:%M:%S").replace(
-                    tzinfo=datetime.timezone.utc
-                )
-                local_ts = dt_utc.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-            except (ValueError, TypeError):
-                continue
-            conn.execute(
-                "UPDATE relay_presence_sighting "
-                "SET last_seen_ts = ? "
-                "WHERE relay_id = ? AND label = ? "
-                "AND (last_seen_ts IS NULL OR last_seen_ts < ?)",
-                (local_ts, relay_cfg["id"], label, local_ts),
-            )
 
         # Handle pool reading if included in the batch (pool-monitor relays only).
         pool_reading = data.get("pool_reading") or {}
@@ -316,7 +258,7 @@ def ble_relay():
                 raw_batch_ts,
                 len(advertisements),
                 inserted,
-                _json.dumps(relay_presence_last_seen) if relay_presence_last_seen else None,
+                None,
                 _json.dumps(labeled_seen) if labeled_seen else None,
                 data.get("rev"),
             ),
@@ -389,10 +331,6 @@ def ble_relay():
                         bd_inserted += 1
                         if rssi is not None:
                             bd_labeled[reading.label] = rssi
-                presence_label = (presence_name_map.get(name) if name else None) \
-                              or presence_mac_map.get(address)
-                if presence_label and rssi is not None:
-                    bd_labeled[presence_label] = rssi
             conn.execute(
                 "INSERT INTO relay_log (ts, relay_id, batch_ts, n_adverts, n_inserted, labeled_json, rev) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -487,7 +425,6 @@ def relay_startup():
     """Return the list of tracked BLE devices so the relay can filter its scan output."""
     from smart_home import relay as _relay
     from smart_home import labels as _labels
-    from smart_home import presence as _presence
 
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
@@ -496,12 +433,10 @@ def relay_startup():
     if _relay.find_relay_by_token(token) is None:
         return jsonify({"error": "unknown token"}), 401
 
-    label_map = _labels.load()           # {MAC: label} — sensor devices
-    presence_devices = _presence.load_devices()  # {ble_name: label} — presence devices
+    label_map = _labels.load()
 
     return jsonify({
         "tracked_macs": list(label_map.keys()),
-        "tracked_names": list(presence_devices.keys()),
     })
 
 
@@ -674,17 +609,14 @@ def bandwidth_history_year():
 @app.get("/api/presence/history")
 def presence_history_api():
     """Per-device presence stats (7d / 30d) and recent away periods."""
-    import datetime
-    from smart_home.presence import load_history, load_devices, load_state, load_network_devices
+    import datetime as _datetime
+    from smart_home.presence import load_history, load_iphone_devices, load_state
     entries = load_history()
-    devices = load_devices()
-    network_devices = load_network_devices()
+    devices = load_iphone_devices()
     state   = load_state()
-    # Build unified list: (ble_name_or_label, label) — network devices use label as key
-    all_devices = list(devices.items()) + [(label, label) for label in network_devices.values()]
-    if not all_devices:
+    if not devices:
         return jsonify([])
-    now = datetime.datetime.now()
+    now = _datetime.datetime.now()
     by_device: dict = {}
     for e in entries:
         by_device.setdefault(e["ble_name"], []).append(e)
@@ -695,7 +627,7 @@ def presence_history_api():
         initial = pre[-1]["status"] if pre else "unknown"
         trans = [(window_start, initial)]
         for e in in_win:
-            trans.append((datetime.datetime.fromisoformat(e["ts"]), e["status"]))
+            trans.append((_datetime.datetime.fromisoformat(e["ts"]), e["status"]))
         trans.append((now, None))
         out = []
         for i in range(len(trans) - 1):
@@ -706,12 +638,12 @@ def presence_history_api():
         return out
 
     result = []
-    for ble_name, label in sorted(all_devices, key=lambda x: x[1]):
-        s = state.get(ble_name, {})
-        dev_entries = sorted(by_device.get(ble_name, []), key=lambda e: e["ts"])
+    for name in sorted(devices):
+        s = state.get(name, {})
+        dev_entries = sorted(by_device.get(name, []), key=lambda e: e["ts"])
         windows = {}
         for days in (7, 30):
-            periods = _periods(dev_entries, now - datetime.timedelta(days=days))
+            periods = _periods(dev_entries, now - _datetime.timedelta(days=days))
             home_secs = sum((e - s).total_seconds() for s, e, st in periods if st == "home")
             away_secs = sum((e - s).total_seconds() for s, e, st in periods if st == "away")
             total = home_secs + away_secs
@@ -722,19 +654,18 @@ def presence_history_api():
                 "home_pct":   round(100 * home_secs / total) if total else None,
                 "away_pct":   round(100 * away_secs / total) if total else None,
             }
-        # recent away periods from last 90 days
         away_list = [
             {
                 "start": s.isoformat(timespec="seconds"),
                 "end":   e.isoformat(timespec="seconds"),
                 "duration_secs": round((e - s).total_seconds()),
             }
-            for s, e, st in _periods(dev_entries, now - datetime.timedelta(days=90))
+            for s, e, st in _periods(dev_entries, now - _datetime.timedelta(days=90))
             if st == "away"
         ]
         result.append({
-            "name":        label,
-            "ble_name":    ble_name,
+            "name":        name,
+            "ble_name":    name,
             "status":      s.get("status", "unknown"),
             "last_seen":   s.get("last_seen"),
             "windows":     windows,
@@ -756,29 +687,61 @@ def presence_delete_away():
     return jsonify({"removed": removed})
 
 
+@app.post("/api/register-presence-device")
+def register_presence_device():
+    """Register an iPhone as a presence device."""
+    from smart_home import presence as _presence
+    data = request.get_json(silent=True) or {}
+    name = data.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    devices = _presence.load_iphone_devices()
+    if name not in devices:
+        devices.append(name)
+        _presence.save_iphone_devices(devices)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/presence-heartbeat")
+def presence_heartbeat():
+    """Receive a heartbeat from an iPhone presence device."""
+    from smart_home import presence as _presence
+    data = request.get_json(silent=True) or {}
+    name = data.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    now = datetime.datetime.now()
+    state = _presence.load_state()
+    entry = state.get(name, {"name": name, "status": "unknown"})
+    entry["last_seen"] = now.isoformat()
+    state[name] = entry
+    _presence.save_state(state)
+    return jsonify({"ok": True})
+
+
+_IPHONE_PRESENCE_TIMEOUT = datetime.timedelta(minutes=15)
+
+
 @app.get("/api/presence")
 def presence():
-    """Current presence status for all registered devices."""
-    from smart_home.presence import load_state, load_devices, load_network_devices
-    devices = load_devices()
-    network_devices = load_network_devices()
+    """Current presence status for all registered iPhone devices."""
+    from smart_home.presence import load_iphone_devices, load_state
+    now = datetime.datetime.now()
+    devices = load_iphone_devices()
     state = load_state()
     result = []
-    for ble_name, label in devices.items():
-        s = state.get(ble_name, {})
+    for name in devices:
+        s = state.get(name, {})
+        last_seen_str = s.get("last_seen")
+        if last_seen_str:
+            age = now - datetime.datetime.fromisoformat(last_seen_str)
+            status = "home" if age < _IPHONE_PRESENCE_TIMEOUT else "away"
+        else:
+            status = s.get("status", "unknown")
         result.append({
-            "ble_name": ble_name,
-            "name": label,
-            "status": s.get("status", "unknown"),
-            "last_seen": s.get("last_seen"),
-        })
-    for mac, label in network_devices.items():
-        s = state.get(label, {})
-        result.append({
-            "ble_name": label,
-            "name": label,
-            "status": s.get("status", "unknown"),
-            "last_seen": s.get("last_seen"),
+            "name": name,
+            "status": status,
+            "last_seen": last_seen_str,
         })
     return jsonify(sorted(result, key=lambda x: x["name"]))
 

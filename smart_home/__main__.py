@@ -21,7 +21,7 @@ from smart_home import smart_plug as _smart_plug
 from smart_home import pool as _pool
 from smart_home import relay as _relay_mod
 from smart_home.battery import dump_gatt
-from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading, insert_plug_reading, insert_pool_reading, upsert_ble_rssi
+from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading, insert_plug_reading, insert_pool_reading
 
 DEFAULT_DB = os.path.expanduser("~/.local/share/smart-home/readings.db")
 
@@ -95,8 +95,7 @@ DEVICE_CATEGORIES = {
     "1": "BLE Sensor (temperature/humidity)",
     "2": "Thermostat",
     "3": "Smart Plug",
-    "4": "Presence Device",
-    "5": "Bandwidth Monitoring",
+    "4": "Bandwidth Monitoring",
 }
 
 DEVICE_TYPES = {
@@ -378,11 +377,12 @@ def list_devices():
         for p in plugs:
             click.echo(f"  {p.get('name', ''):<24} {p.get('type', '')} → {p.get('device', '')} ({p.get('ip', '')})")
 
-    presence = _presence.load_devices()
-    if presence:
+    iphone_presence = _presence.load_iphone_devices()
+    if iphone_presence:
         any_found = True
         state = _presence.load_state()
         now = datetime.datetime.now()
+        TIMEOUT = datetime.timedelta(minutes=15)
 
         def _since(ts_str):
             if not ts_str:
@@ -397,16 +397,18 @@ def list_devices():
             except ValueError:
                 return ts_str
 
-        click.echo("\n  Presence Devices:")
+        click.echo("\n  iPhone Presence Devices:")
         click.echo("  " + "-" * 50)
-        for ble_name, lbl in sorted(presence.items(), key=lambda x: x[1]):
-            s = state.get(ble_name, {})
-            status = s.get("status", "unknown")
-            last_seen = _since(s.get("last_seen"))
-            stale = (status == "home" and s.get("last_seen") and
-                     (now - datetime.datetime.fromisoformat(s["last_seen"])).total_seconds() > 300)
-            flag = "  (stale?)" if stale else ""
-            click.echo(f"  {lbl:<24} {ble_name:<24} {status:<10} {last_seen}{flag}")
+        for name in sorted(iphone_presence):
+            s = state.get(name, {})
+            last_seen_str = s.get("last_seen")
+            if last_seen_str:
+                age = now - datetime.datetime.fromisoformat(last_seen_str)
+                status = "home" if age < TIMEOUT else "away"
+            else:
+                status = "unknown"
+            last_seen = _since(last_seen_str)
+            click.echo(f"  {name:<32} {status:<10} {last_seen}")
 
     pool_monitors = _pool.load_config()
     if pool_monitors:
@@ -505,8 +507,6 @@ def add_device(timeout):
     elif choice == "3":
         _add_smart_plug()
     elif choice == "4":
-        _add_presence_device(timeout)
-    elif choice == "5":
         _add_bandwidth_monitor()
 
 
@@ -902,52 +902,6 @@ def update_relay(relay_name):
     click.echo(f"\nDone. Relay '{relay_id}' flashed with v{new_ver} (rev{new_rev}).")
 
 
-@main.command("pair-relay")
-@click.argument("relay_name")
-@click.argument("label")
-def pair_relay(relay_name, label):
-    """Bond a BLE device (e.g. iPhone) with a relay for presence detection.
-
-    On the next scan cycle (~18 s) the relay will start advertising as
-    'SmHome-<relay_name>'.  Open nRF Connect on the iPhone, connect to that
-    device, and bonding completes automatically (Just Works / no PIN).
-
-    iOS Bluetooth Settings does not show custom BLE peripherals — use nRF
-    Connect (Nordic Semiconductor, free on the App Store) instead.
-
-    RELAY_NAME is the relay id (e.g. garage).
-    LABEL is the presence device label (should match the iPhone's display
-    name, e.g. "Chris's iPhone").  The device is auto-registered as a
-    presence entry so it shows up in relay-log once detected.
-    """
-    from smart_home import relay as _relay
-
-    relays = _relay.load_relays()
-    matches = [r for r in relays if r["id"] == relay_name]
-    if not matches:
-        click.echo(f"Error: relay '{relay_name}' not found.", err=True)
-        known = sorted({r["id"] for r in relays})
-        if known:
-            click.echo(f"Known relays: {', '.join(known)}", err=True)
-        return
-
-    for r in matches:
-        r["pair_mode"] = label
-    _relay.save_relays(relays)
-
-    # Auto-register as a presence device. iPhone BLE name == iPhone display name.
-    devices = _presence.load_devices()
-    devices = {k: v for k, v in devices.items() if v != label}  # remove stale entry
-    devices[label] = label
-    _presence.save_devices(devices)
-
-    click.echo(f"Pair mode scheduled for relay '{relay_name}'.")
-    click.echo(f"Within ~18 s it will advertise as 'SmHome-{relay_name}'.")
-    click.echo(f"Open nRF Connect on iPhone, connect to 'SmHome-{relay_name}' — bonding happens automatically.")
-    click.echo(f"'{label}' registered as a presence device.")
-    click.echo("The relay has a 60-second window to complete bonding.")
-
-
 @main.command("import")
 @click.argument("zipfile_path", metavar="ZIPFILE")
 @click.option("--label", required=True, help="Label to assign to all imported readings.")
@@ -987,65 +941,6 @@ def import_zip(zipfile_path, label, db):
     conn = open_db(db)
     inserted = bulk_insert(conn, rows)
     click.echo(f"Imported {inserted} new rows ({len(rows)} total, {len(rows)-inserted} duplicates skipped).")
-
-
-def _add_presence_device(timeout):
-    found = {}  # ble_name -> rssi (only devices with a name)
-
-    def callback(device, adv):
-        name = device.name or adv.local_name or ""
-        if name:
-            found[name] = adv.rssi
-
-    async def _run():
-        async with BleakScanner(detection_callback=callback):
-            await asyncio.sleep(timeout)
-
-    click.echo(f"\nScanning for BLE devices ({int(timeout)}s)...")
-    try:
-        asyncio.run(_run())
-    except KeyboardInterrupt:
-        pass
-
-    if not found:
-        click.echo("No named devices found.")
-        return
-
-    devices_list = sorted(found.items(), key=lambda x: x[1], reverse=True)
-    click.echo(f"\nFound {len(devices_list)} named device(s):\n")
-    for i, (name, rssi) in enumerate(devices_list, 1):
-        click.echo(f"  {i}. {name!r}  rssi={rssi}")
-
-    choice = click.prompt("\nEnter number to register as presence device", type=int)
-    if not 1 <= choice <= len(devices_list):
-        click.echo("Invalid choice.")
-        return
-
-    ble_name, _ = devices_list[choice - 1]
-    lbl = click.prompt("Display name for this device", default=ble_name).strip()
-
-    devices = _presence.load_devices()
-    devices[ble_name] = lbl
-    _presence.save_devices(devices)
-    click.echo(f"\nRegistered '{lbl}' (BLE name: {ble_name!r}) as a presence device.")
-
-
-@main.command("add-network-device")
-def add_network_device():
-    """Register a device for WiFi/network-based presence detection.
-
-    Uses the ARP/neighbor table (ip neigh show) to detect whether the device
-    is on the local network. The MAC address shown in iPhone Settings → Wi-Fi
-    → (i) → Private Wi-Fi Address is stable per network and should be used here.
-    """
-    mac = click.prompt("MAC address (e.g. aa:bb:cc:dd:ee:ff)").strip().lower()
-    label = click.prompt("Display name for this device").strip()
-
-    devices = _presence.load_network_devices()
-    devices[mac] = label
-    _presence.save_network_devices(devices)
-    click.echo(f"\nRegistered '{label}' (MAC: {mac}) for network presence detection.")
-    click.echo("The monitor will check for this device every 10 seconds via the ARP table.")
 
 
 @main.command("configure-push")
@@ -1308,16 +1203,11 @@ def remove_device(name, purge, db):
         click.echo(f"Removed garage '{name}'.")
         removed.append("garage")
 
-    presence = _presence.load_devices()
-    match = next(
-        (ble for ble, lbl in presence.items()
-         if ble.lower() == name_lower or lbl.lower() == name_lower),
-        None,
-    )
-    if match is not None:
-        lbl = presence.pop(match)
-        _presence.save_devices(presence)
-        click.echo(f"Removed presence device '{lbl}' ({match}).")
+    iphone_devices = _presence.load_iphone_devices()
+    if name_lower in [d.lower() for d in iphone_devices]:
+        iphone_devices = [d for d in iphone_devices if d.lower() != name_lower]
+        _presence.save_iphone_devices(iphone_devices)
+        click.echo(f"Removed iPhone presence device '{name}'.")
         removed.append("presence device")
 
     pool_monitors = _pool.load_config()
@@ -1445,7 +1335,7 @@ def presence_history(days, label):
     Example: smart-home presence-history --days 30
     """
     entries = _presence.load_history()
-    devices = _presence.load_devices()
+    devices = _presence.load_iphone_devices()
 
     if not entries and not devices:
         click.echo("No presence devices registered.")
@@ -1554,16 +1444,6 @@ def monitor(duration, verbose, db, no_db):
 
     scanner_ref: list = []
 
-    # presence tracking
-    presence_devices = _presence.load_devices()
-    network_devices = _presence.load_network_devices()  # {mac: label}
-    presence_last_seen: dict[str, datetime.datetime] = {}
-    presence_state = _presence.load_state()
-    presence_addr_map: dict[str, str] = {}  # MAC address -> ble_name (for nameless adverts)
-    PRESENCE_TIMEOUT = datetime.timedelta(seconds=30)  # main scanner is continuous
-    presence_rssi_last_write: dict[str, datetime.datetime] = {}
-    PRESENCE_RSSI_THROTTLE = datetime.timedelta(seconds=10)
-
     # Tracks which presence devices have already had their auto-open fired this
     # "home" episode. Reset to empty when the device goes "away" again.
     _auto_open_done: set[str] = set()
@@ -1572,81 +1452,47 @@ def monitor(duration, verbose, db, no_db):
     # those doors are re-opened on arrival (not doors the user left open manually).
     _auto_closed_doors: set[str] = set()
 
-    async def _auto_open_on_arrival(ble_name: str, label: str) -> None:
-        """Triggered immediately when a presence device is first seen after being away."""
+    IPHONE_TIMEOUT = datetime.timedelta(minutes=15)
+
+    async def _auto_open_on_arrival(name: str) -> None:
         loop = asyncio.get_running_loop()
         log_ts = datetime.datetime.now().strftime("%H:%M:%S")
-        click.echo(f"[{log_ts}] Presence: {label} first seen — checking auto-open garages")
+        click.echo(f"[{log_ts}] Presence: {name} arrived — checking auto-open garages")
         for g in _garage.load_config():
             if not g.get("auto"):
                 continue
             configured = g.get("presence_device")
-            if configured and configured != ble_name:
+            if configured and configured != name:
                 continue
-            name, ip, pulse = g["name"], g["ip"], g.get("pulse_seconds", 0.5)
-            if name not in _auto_closed_doors:
-                click.echo(f"[{log_ts}] Skipping '{name}' — not auto-closed on departure")
+            gname, ip, pulse = g["name"], g["ip"], g.get("pulse_seconds", 0.5)
+            if gname not in _auto_closed_doors:
+                click.echo(f"[{log_ts}] Skipping '{gname}' — not auto-closed on departure")
                 continue
             try:
                 status = await loop.run_in_executor(None, _garage.get_status, ip)
                 if status.get("door_closed") is True:
                     await loop.run_in_executor(None, _garage.trigger, ip, pulse)
-                    _auto_closed_doors.discard(name)
+                    _auto_closed_doors.discard(gname)
                     log_ts = datetime.datetime.now().strftime("%H:%M:%S")
-                    click.echo(f"[{log_ts}] Auto-opened garage '{name}' ({label} arrived)")
+                    click.echo(f"[{log_ts}] Auto-opened garage '{gname}' ({name} arrived)")
                     _push.send_notification(
                         title="Garage opening",
-                        body=f"Auto-opening '{name}' — {label} arrived",
+                        body=f"Auto-opening '{gname}' — {name} arrived",
                     )
             except Exception as e:
-                click.echo(f"[{log_ts}] Auto-open failed for '{name}': {e}")
+                click.echo(f"[{log_ts}] Auto-open failed for '{gname}': {e}")
 
-    def _fire_auto_open(ble_name: str) -> None:
-        """Fire the auto-open task once per arrival episode."""
-        if presence_state.get(ble_name, {}).get("status") != "away":
+    def _fire_auto_open(name: str) -> None:
+        if name in _auto_open_done:
             return
-        if ble_name in _auto_open_done:
-            return
-        _auto_open_done.add(ble_name)
-        label = presence_devices.get(ble_name, ble_name)
+        _auto_open_done.add(name)
         try:
-            asyncio.get_running_loop().create_task(_auto_open_on_arrival(ble_name, label))
+            asyncio.get_running_loop().create_task(_auto_open_on_arrival(name))
         except RuntimeError:
-            _auto_open_done.discard(ble_name)
+            _auto_open_done.discard(name)
 
     def on_device(device, adv):
-        ble_name = device.name or adv.local_name or ""
         now = datetime.datetime.now()
-
-        # Match by name first; if matched, remember this MAC address
-        if ble_name and ble_name in presence_devices:
-            presence_addr_map[device.address] = ble_name
-            presence_last_seen[ble_name] = now
-            _fire_auto_open(ble_name)
-            if verbose:
-                click.echo(f"[presence] {ble_name!r} seen (by name, addr={device.address})")
-            if conn and adv.rssi is not None:
-                last_write = presence_rssi_last_write.get(ble_name)
-                if last_write is None or (now - last_write) >= PRESENCE_RSSI_THROTTLE:
-                    presence_rssi_last_write[ble_name] = now
-                    label = presence_devices[ble_name]
-                    upsert_ble_rssi(conn, label, device.address, adv.rssi)
-            return
-
-        # Match by previously-seen MAC address (handles nameless advertisements)
-        matched_name = presence_addr_map.get(device.address)
-        if matched_name:
-            presence_last_seen[matched_name] = now
-            _fire_auto_open(matched_name)
-            if verbose:
-                click.echo(f"[presence] {matched_name!r} seen (by addr={device.address})")
-            if conn and adv.rssi is not None:
-                last_write = presence_rssi_last_write.get(matched_name)
-                if last_write is None or (now - last_write) >= PRESENCE_RSSI_THROTTLE:
-                    presence_rssi_last_write[matched_name] = now
-                    label = presence_devices[matched_name]
-                    upsert_ble_rssi(conn, label, device.address, adv.rssi)
-            return
 
         if is_ble_yc01(device, adv):
             curr_upper = device.address.upper()
@@ -1655,213 +1501,112 @@ def monitor(duration, verbose, db, no_db):
             if is_new and curr_upper in pool_config:
                 click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered pool monitor: {pool_config[curr_upper]} ({device.address})")
 
-        if verbose and ble_name:
-            click.echo(f"[presence] untracked: {ble_name!r} ({device.address})")
-            if adv.manufacturer_data:
-                for cid, data in adv.manufacturer_data.items():
-                    click.echo(f"  manufacturer_data[0x{cid:04X}] = {data.hex()}")
-            if adv.service_data:
-                for uuid, data in adv.service_data.items():
-                    click.echo(f"  service_data[{uuid}] = {data.hex()}")
+        if verbose:
+            ble_name = device.name or adv.local_name or ""
+            if ble_name:
+                click.echo(f"[ble] untracked: {ble_name!r} ({device.address})")
+                if adv.manufacturer_data:
+                    for cid, mfr_data in adv.manufacturer_data.items():
+                        click.echo(f"  manufacturer_data[0x{cid:04X}] = {mfr_data.hex()}")
+                if adv.service_data:
+                    for uuid, svc_data in adv.service_data.items():
+                        click.echo(f"  service_data[{uuid}] = {svc_data.hex()}")
 
-    async def _verify_and_retry_close(name: str, ip: str, pulse: float, ble_name: str) -> None:
+    async def _verify_and_retry_close(door_name: str, ip: str, pulse: float, device_name: str) -> None:
         """Poll every 30s after auto-close; re-trigger if still open. Notifies when confirmed closed."""
         loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(30)
             now = datetime.datetime.now()
-            last_seen = presence_last_seen.get(ble_name)
-            is_home = (
-                presence_state.get(ble_name, {}).get("status") == "home"
-                or (last_seen and (now - last_seen) < datetime.timedelta(seconds=60))
-            )
+            state = _presence.load_state()
+            entry = state.get(device_name, {})
+            last_seen_str = entry.get("last_seen")
+            if last_seen_str:
+                age = now - datetime.datetime.fromisoformat(last_seen_str)
+                is_home = age < IPHONE_TIMEOUT
+            else:
+                is_home = False
             if is_home:
                 ts = now.strftime("%H:%M:%S")
-                click.echo(f"[{ts}] Verify-close aborted for '{name}' — device returned home")
+                click.echo(f"[{ts}] Verify-close aborted for '{door_name}' — device returned home")
                 break
             try:
                 status = await loop.run_in_executor(None, _garage.get_status, ip)
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 if status.get("door_closed") is True:
-                    click.echo(f"[{ts}] Verified closed: garage '{name}'")
+                    click.echo(f"[{ts}] Verified closed: garage '{door_name}'")
                     _push.send_notification(
                         title="Garage door closed",
-                        body=f"'{name}' is now closed",
+                        body=f"'{door_name}' is now closed",
                     )
                     break
                 else:
-                    click.echo(f"[{ts}] Garage '{name}' still open — retrying close")
+                    click.echo(f"[{ts}] Garage '{door_name}' still open — retrying close")
                     await loop.run_in_executor(None, _garage.trigger, ip, pulse)
             except Exception as e:
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
-                click.echo(f"[{ts}] Verify-close check failed for '{name}': {e}")
+                click.echo(f"[{ts}] Verify-close check failed for '{door_name}': {e}")
 
-    async def check_presence():
+    async def check_iphone_presence():
         while True:
             await asyncio.sleep(30)
             now = datetime.datetime.now()
+            iphone_devices = _presence.load_iphone_devices()
+            if not iphone_devices:
+                continue
+            state = _presence.load_state()
             changed = False
-            for ble_name, label in presence_devices.items():
-                last = presence_last_seen.get(ble_name)
-                main_seeing = last and (now - last) < PRESENCE_TIMEOUT
-
-                # Any active relay saw the device in its most recent scan batch?
-                relay_seeing = False
-                relay_last = None
-                if conn:
-                    try:
-                        # Active = checked in within 60s; "seeing" = sighting within 25s of check-in
-                        row = conn.execute(
-                            "SELECT 1 FROM relay_presence_sighting s "
-                            "JOIN relay_checkin c ON s.relay_id = c.relay_id "
-                            "WHERE s.label = ? "
-                            "AND datetime(s.ts) > datetime(c.ts, '-25 seconds') "
-                            "AND datetime(c.ts) > datetime('now', '-60 seconds') "
-                            "LIMIT 1",
-                            (label,)
-                        ).fetchone()
-                        relay_seeing = row is not None
-                        # Best known last-seen across all relays (includes offline sightings)
-                        row2 = conn.execute(
-                            "SELECT MAX(COALESCE(last_seen_ts, ts)) "
-                            "FROM relay_presence_sighting WHERE label=?",
-                            (label,)
-                        ).fetchone()
-                        if row2 and row2[0]:
-                            relay_last = datetime.datetime.strptime(row2[0], "%Y-%m-%d %H:%M:%S")
-                    except Exception:
-                        pass
-
-                new_status = "home" if (main_seeing or relay_seeing) else "away"
-                old_status = presence_state.get(ble_name, {}).get("status")
-                old_last_seen = presence_state.get(ble_name, {}).get("last_seen")
-                candidates = [t for t in [last, relay_last] if t is not None]
-                combined_last = max(candidates) if candidates else None
-                new_last_seen = combined_last.isoformat() if combined_last else None
+            for name in iphone_devices:
+                entry = state.get(name, {})
+                old_status = entry.get("status", "unknown")
+                last_seen_str = entry.get("last_seen")
+                if last_seen_str:
+                    age = now - datetime.datetime.fromisoformat(last_seen_str)
+                    new_status = "home" if age < IPHONE_TIMEOUT else "away"
+                else:
+                    new_status = "away"
                 if new_status != old_status:
                     ts = now.strftime("%H:%M:%S")
-                    click.echo(f"[{ts}] Presence: {label} is {new_status}")
+                    click.echo(f"[{ts}] Presence: {name} is {new_status}")
                     if new_status == "away":
-                        _auto_open_done.discard(ble_name)
+                        _auto_open_done.discard(name)
                         _auto_closed_doors.clear()
                         for g in _garage.load_config():
                             configured = g.get("presence_device")
-                            if g.get("auto") and (not configured or configured == ble_name):
+                            if g.get("auto") and (not configured or configured == name):
                                 try:
                                     door_status = _garage.get_status(g["ip"])
                                     if door_status.get("door_closed") is False:
                                         _garage.trigger(g["ip"], g.get("pulse_seconds", 0.5))
                                         _auto_closed_doors.add(g["name"])
-                                        click.echo(f"[{ts}] Auto-closing garage '{g['name']}' ({label} left)")
+                                        click.echo(f"[{ts}] Auto-closing garage '{g['name']}' ({name} left)")
                                         asyncio.get_running_loop().create_task(
-                                            _verify_and_retry_close(g["name"], g["ip"], g.get("pulse_seconds", 0.5), ble_name)
+                                            _verify_and_retry_close(g["name"], g["ip"], g.get("pulse_seconds", 0.5), name)
                                         )
                                 except Exception as e:
                                     click.echo(f"[{ts}] Auto-close failed for '{g['name']}': {e}")
+                    else:
+                        _fire_auto_open(name)
                     _presence.append_history({
                         "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
-                        "ble_name": ble_name,
-                        "label": label,
+                        "ble_name": name,
+                        "label": name,
                         "status": new_status,
                     })
-                if new_status != old_status or new_last_seen != old_last_seen:
-                    presence_state[ble_name] = {
-                        "name": label,
-                        "status": new_status,
-                        "last_seen": new_last_seen,
-                    }
+                    entry = dict(entry)
+                    entry["name"] = name
+                    entry["status"] = new_status
+                    state[name] = entry
                     changed = True
             if changed:
-                _presence.save_state(presence_state)
-
-    async def check_network_presence():
-        import subprocess as _sp
-        loop = asyncio.get_running_loop()
-        while True:
-            await asyncio.sleep(10)
-            now = datetime.datetime.now()
-            # Reload from disk so add-network-device takes effect without a restart
-            current_network_devices = _presence.load_network_devices()
-            if not current_network_devices:
-                continue
-            try:
-                result = await loop.run_in_executor(
-                    None,
-                    lambda: _sp.run(["ip", "neigh", "show"], capture_output=True, text=True)
-                )
-                neigh_output = result.stdout
-            except Exception as e:
-                click.echo(f"[{now.strftime('%H:%M:%S')}] Network presence: ip neigh error: {e}")
-                continue
-
-            # Build set of MACs currently reachable.
-            # Only count REACHABLE/DELAY/PROBE — not STALE. STALE entries linger for
-            # up to ~25 min after a device leaves, causing false "home" detections.
-            reachable: set[str] = set()
-            for line in neigh_output.splitlines():
-                parts = line.split()
-                if len(parts) >= 5 and parts[-1] in ("REACHABLE", "DELAY", "PROBE"):
-                    lladdr_idx = None
-                    for i, p in enumerate(parts):
-                        if p == "lladdr" and i + 1 < len(parts):
-                            lladdr_idx = i + 1
-                            break
-                    if lladdr_idx is not None:
-                        reachable.add(parts[lladdr_idx].lower())
-
-            changed = False
-            for mac, label in current_network_devices.items():
-                mac_lower = mac.lower()
-                new_status = "home" if mac_lower in reachable else "away"
-                old_status = presence_state.get(label, {}).get("status")
-                ts = now.strftime("%H:%M:%S")
-                if new_status != old_status:
-                    click.echo(f"[{ts}] Presence (network): {label} is {new_status}")
-                    if new_status == "home":
-                        _fire_auto_open(label)
-                    else:
-                        _auto_open_done.discard(label)
-                        _auto_closed_doors.clear()
-                        for g in _garage.load_config():
-                            configured = g.get("presence_device")
-                            if g.get("auto") and (not configured or configured == label):
-                                try:
-                                    door_status = _garage.get_status(g["ip"])
-                                    if door_status.get("door_closed") is False:
-                                        _garage.trigger(g["ip"], g.get("pulse_seconds", 0.5))
-                                        _auto_closed_doors.add(g["name"])
-                                        click.echo(f"[{ts}] Auto-closing garage '{g['name']}' ({label} left)")
-                                        asyncio.get_running_loop().create_task(
-                                            _verify_and_retry_close(g["name"], g["ip"], g.get("pulse_seconds", 0.5), label)
-                                        )
-                                except Exception as e:
-                                    click.echo(f"[{ts}] Auto-close failed for '{g['name']}': {e}")
-                    _presence.append_history({
-                        "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
-                        "ble_name": label,
-                        "label": label,
-                        "status": new_status,
-                    })
-                # Always update state entry (keeps last_seen current and picks up status changes)
-                presence_state[label] = {
-                    "name": label,
-                    "status": new_status,
-                    "last_seen": now.isoformat() if new_status == "home" else presence_state.get(label, {}).get("last_seen"),
-                }
-                changed = True
-            if changed:
-                _presence.save_state(presence_state)
+                _presence.save_state(state)
 
     conn = None if no_db else open_db(db)
     if conn:
         click.echo(f"Logging to {db}")
-    if presence_devices:
-        click.echo(f"Tracking presence for {len(presence_devices)} device(s).")
-    if network_devices:
-        click.echo(f"Tracking network presence for {len(network_devices)} device(s):")
-        for mac, label in network_devices.items():
-            init_status = presence_state.get(label, {}).get("status", "unknown")
-            click.echo(f"  {label} ({mac}): {init_status}")
+    iphone_devices = _presence.load_iphone_devices()
+    if iphone_devices:
+        click.echo(f"Tracking iPhone presence for: {', '.join(iphone_devices)}")
 
     # Load hourly records from DB:
     # {label_key: {hour_of_day: {temp_max, temp_min, humi_max, humi_min}}}
@@ -2672,13 +2417,10 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
-        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop()]
+        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), check_iphone_presence()]
         if cameras_cfg:
             extra.append(camera_watch_loop())
             extra.append(camera_vitals_loop())
-        if presence_devices:
-            extra.append(check_presence())
-        extra.append(check_network_presence())
         if ecobee_cfg:
             extra.append(poll_ecobee_loop())
         if ha_cfg:
