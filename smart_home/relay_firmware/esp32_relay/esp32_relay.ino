@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.38"
-#define FIRMWARE_REV          45
+#define FIRMWARE_VERSION      "1.7.39"
+#define FIRMWARE_REV          46
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -672,12 +672,12 @@ static bool sleepUntilNextSlot() {
 
 static void doPoolMonitorCycle() {
     // Sleep at the START of each cycle so the POST lands on a clock boundary.
-    bool is_gatt_cycle = sleepUntilNextSlot();
+    sleepUntilNextSlot();
 
-    // If the previous GATT attempt failed to produce a reading, retry immediately
-    // on the next cycle rather than waiting for the next scheduled :30 slot.
+    // do_gatt is determined after the scan based on whether the device was seen.
+    // s_pool_last_read_ok drives pool_skip: suppresses offline events when the pool
+    // was recently readable but just isn't visible in the current scan.
     static bool s_pool_last_read_ok = false;
-    bool do_gatt = is_gatt_cycle || !s_pool_last_read_ok;
 
     checkAppWatchdog();
     g_last_cycle_start_ms = millis();  // watchdog measures from here to next cycle start
@@ -763,6 +763,8 @@ static void doPoolMonitorCycle() {
         }
         pool_seen_now = (cur_addr.length() > 0);
 
+        // Connect whenever the device is visible — no clock-based skip cycles.
+        bool do_gatt = pool_seen_now;
         if (do_gatt) {
             if (!g_pool_client) {
                 g_pool_client = BLEDevice::createClient();
@@ -866,7 +868,10 @@ static void doPoolMonitorCycle() {
 
     // ── Step 3: Single POST with pool + sensor data ────────────────────────────
     g_current_op = "http-post";
-    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now, !do_gatt && g_pool_addr.length() > 0);
+    // pool_skip: assigned but not visible AND last read was healthy.
+    // Suppresses offline events for transient scan misses after a good read.
+    bool pool_skip = !pool_seen_now && s_pool_last_read_ok && g_pool_addr.length() > 0;
+    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now, pool_skip);
     g_current_op = "";
     maybeSendPendingCrash();
 }
