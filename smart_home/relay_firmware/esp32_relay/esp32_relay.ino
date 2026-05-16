@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.50"
-#define FIRMWARE_REV          57
+#define FIRMWARE_VERSION      "1.7.51"
+#define FIRMWARE_REV          58
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -971,10 +971,10 @@ static void doPoolMonitorCycle() {
 
     // ── Step 3: Single POST with pool + sensor data ────────────────────────────
     g_current_op = "http-post";
-    // pool_skip: assigned but not readable this cycle (either not visible, or skipping after good read).
-    // Suppresses offline events for transient scan misses and deliberate skip cycles.
-    bool pool_skip = s_pool_last_read_ok && g_pool_addr.length() > 0 &&
-                     (!pool_seen_now || !do_gatt);
+    // pool_skip: intentionally waiting between scheduled reads (counter > 0).
+    // When counter == 0 the relay is actively trying to read; if it can't
+    // find or connect to the device, that's offline — not a deliberate skip.
+    bool pool_skip = (s_pool_skip_counter > 0) && (g_pool_addr.length() > 0);
     postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now, pool_skip);
     g_current_op = "";
     maybeSendPendingCrash();
