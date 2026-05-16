@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.49"
-#define FIRMWARE_REV          56
+#define FIRMWARE_VERSION      "1.7.50"
+#define FIRMWARE_REV          57
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -854,7 +854,7 @@ static void doPoolMonitorCycle() {
         // attempting another GATT read. Counter is cleared on any failure so we
         // retry immediately rather than waiting out the configured interval.
         do_gatt = pool_seen_now && (s_pool_skip_counter == 0);
-        if (pool_seen_now && s_pool_skip_counter > 0) {
+        if (s_pool_skip_counter > 0) {
             Serial.printf("Pool: skip cycle (%d remaining)\n", s_pool_skip_counter);
             s_pool_skip_counter--;
         }
