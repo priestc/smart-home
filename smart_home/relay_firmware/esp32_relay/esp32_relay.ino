@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.47"
-#define FIRMWARE_REV          54
+#define FIRMWARE_VERSION      "1.7.48"
+#define FIRMWARE_REV          55
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -67,6 +67,23 @@ static char g_pass[64];
 static char g_url[128];
 static char g_token[64];
 static char g_id[32];
+
+// ── Tracked-device filter (populated from /api/relay-startup on boot) ─────────
+
+static std::vector<std::string> g_tracked_macs;   // lowercase colon-separated
+static std::vector<std::string> g_tracked_names;  // exact BLE advertised names
+
+// Returns true if this device should be included in POST payloads.
+// When both lists are empty (startup call not yet made / failed), pass everything.
+static bool isTracked(const std::string& addr_lower, const String& name) {
+    if (g_tracked_macs.empty() && g_tracked_names.empty()) return true;
+    for (const auto& m : g_tracked_macs)
+        if (m == addr_lower) return true;
+    if (name.length() > 0)
+        for (const auto& n : g_tracked_names)
+            if (name == n.c_str()) return true;
+    return false;
+}
 
 // ── Advertisement buffer ──────────────────────────────────────────────────────
 
@@ -399,6 +416,38 @@ static void connectWiFi() {
 
 static void poolDisconnect();  // forward declaration
 
+// ── Startup: fetch tracked-device list from server ───────────────────────────
+
+static void fetchTrackedDevices() {
+    if (WiFi.status() != WL_CONNECTED || strlen(g_url) == 0) return;
+    HTTPClient http;
+    http.begin(String(g_url) + "/api/relay-startup");
+    http.addHeader("Authorization", String("Bearer ") + g_token);
+    http.setTimeout(10000);
+    int code = http.GET();
+    if (code == 200) {
+        String resp = http.getString();
+        JsonDocument doc;
+        if (deserializeJson(doc, resp) == DeserializationError::Ok) {
+            g_tracked_macs.clear();
+            g_tracked_names.clear();
+            for (JsonVariant v : doc["tracked_macs"].as<JsonArray>()) {
+                std::string mac = v.as<String>().c_str();
+                for (char& c : mac) c = tolower((unsigned char)c);
+                g_tracked_macs.push_back(mac);
+            }
+            for (JsonVariant v : doc["tracked_names"].as<JsonArray>())
+                g_tracked_names.push_back(v.as<String>().c_str());
+            Serial.printf("Startup: tracking %u MACs, %u BLE names\n",
+                          (unsigned)g_tracked_macs.size(),
+                          (unsigned)g_tracked_names.size());
+        }
+    } else {
+        Serial.printf("Startup: relay-startup returned %d — sending all devices\n", code);
+    }
+    http.end();
+}
+
 // ── Crash reporting ───────────────────────────────────────────────────────────
 
 static void sendCrashReport(const String& reason) {
@@ -539,6 +588,7 @@ static String buildPayload(bool include_presence, bool pool_offline = false,
 
     JsonArray arr = doc["advertisements"].to<JsonArray>();
     for (auto& kv : g_seen) {
+        if (!isTracked(kv.first, kv.second.name)) continue;
         JsonObject obj = arr.add<JsonObject>();
         obj["address"] = kv.first.c_str();
         if (kv.second.name.length()) obj["name"] = kv.second.name;
@@ -555,8 +605,15 @@ static String buildPayload(bool include_presence, bool pool_offline = false,
 
     if (include_presence && !g_presence_last_seen.empty()) {
         JsonObject pls = doc["presence_last_seen"].to<JsonObject>();
-        for (auto& kv : g_presence_last_seen)
+        for (auto& kv : g_presence_last_seen) {
+            if (!g_tracked_names.empty()) {
+                bool found = false;
+                for (const auto& n : g_tracked_names)
+                    if (kv.first == n) { found = true; break; }
+                if (!found) continue;
+            }
             pls[kv.first.c_str()] = kv.second;
+        }
     }
 
     if (pool_skip) doc["pool_skip"] = true;
@@ -939,6 +996,7 @@ void setup() {
     }
 
     connectWiFi();
+    fetchTrackedDevices();
     g_startup_ms = millis();
     {
         // Check NVS for crash reason saved by app watchdog on previous boot

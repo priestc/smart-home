@@ -481,6 +481,29 @@ def ble_relay_crash():
     return jsonify({"ok": True})
 
 
+@app.get("/api/relay-startup")
+def relay_startup():
+    """Return the list of tracked BLE devices so the relay can filter its scan output."""
+    from smart_home import relay as _relay
+    from smart_home import labels as _labels
+    from smart_home import presence as _presence
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return jsonify({"error": "missing or invalid Authorization header"}), 401
+    token = auth[len("Bearer "):]
+    if _relay.find_relay_by_token(token) is None:
+        return jsonify({"error": "unknown token"}), 401
+
+    label_map = _labels.load()           # {MAC: label} — sensor devices
+    presence_devices = _presence.load_devices()  # {ble_name: label} — presence devices
+
+    return jsonify({
+        "tracked_macs": list(label_map.keys()),
+        "tracked_names": list(presence_devices.keys()),
+    })
+
+
 @app.post("/api/register-push-token")
 def register_push_token():
     """Register an iOS device token for push notifications."""
