@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.42"
-#define FIRMWARE_REV          49
+#define FIRMWARE_VERSION      "1.7.43"
+#define FIRMWARE_REV          50
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -523,12 +523,18 @@ static bool httpPost(const String& payload, bool parse_gatt) {
 static String buildPayload(bool include_presence, bool pool_offline = false,
                             const String& pool_hex = "", int8_t pool_rssi = 0,
                             bool pool_seen = false, bool pool_skip = false,
-                            bool buffered = false) {
+                            bool buffered = false,
+                            const std::vector<String>* buffered_batches = nullptr) {
     JsonDocument doc;
     doc["relay_id"] = g_id;
     doc["rev"] = FIRMWARE_REV;
     if (g_scan_ts.length()) doc["batch_ts"] = g_scan_ts;
     if (buffered) doc["buffered"] = true;
+    if (buffered_batches && !buffered_batches->empty()) {
+        JsonArray ba = doc["buffered_batches"].to<JsonArray>();
+        for (const auto& s : *buffered_batches)
+            ba.add(s);  // each stored as a JSON string; server parses with json.loads()
+    }
 
     JsonArray arr = doc["advertisements"].to<JsonArray>();
     for (auto& kv : g_seen) {
@@ -590,21 +596,21 @@ static void postBatch(bool pool_offline = false, const String& pool_hex = "", in
                   (unsigned)g_seen.size(), (unsigned)g_batch_queue.size(),
                   FIRMWARE_VERSION, FIRMWARE_REV);
 
-    // Drain cycle: flush every buffered entry before sending the current batch.
+    // Drain cycle: bundle all buffered entries into this POST alongside the current batch.
     if (s_drain_next_cycle) {
         s_drain_next_cycle = false;
-        Serial.printf("Draining %u buffered batches...\n", (unsigned)g_batch_queue.size());
-        while (!g_batch_queue.empty()) {
-            if (!httpPost(g_batch_queue.front(), false)) {
-                // Connection dropped mid-drain — leave remainder in buffer.
-                // The next successful current-batch POST will reschedule the drain.
-                Serial.println("Drain interrupted — will retry on next reconnect.");
-                bufferPush(buildPayload(false, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip, true));
-                return;
-            }
-            g_batch_queue.erase(g_batch_queue.begin());
+        Serial.printf("Sending current batch bundled with %u buffered entries...\n",
+                      (unsigned)g_batch_queue.size());
+        if (httpPost(buildPayload(true, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip,
+                                  false, &g_batch_queue), true)) {
+            Serial.printf("Drain complete — %u buffered entries delivered.\n",
+                          (unsigned)g_batch_queue.size());
+            g_batch_queue.clear();
+        } else {
+            Serial.println("Drain POST failed — buffering current batch, will retry next reconnect.");
+            bufferPush(buildPayload(false, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip, true));
         }
-        Serial.println("Buffer fully drained.");
+        return;
     }
 
     if (g_seen.empty() && !pool_offline && pool_hex.length() == 0 && !pool_skip) return;

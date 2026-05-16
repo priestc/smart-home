@@ -325,6 +325,73 @@ def ble_relay():
             "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"
         )
 
+        # Process buffered batches bundled into this POST.
+        # Each is a JSON string; insert sensor readings and write a relay_log row.
+        now_utc = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        for raw_batch in data.get("buffered_batches", []):
+            try:
+                bd = _json.loads(raw_batch)
+            except Exception:
+                continue
+            bd_adverts = bd.get("advertisements") or []
+            bd_raw_ts = bd.get("batch_ts")
+            bd_ts_local = None
+            if bd_raw_ts:
+                try:
+                    bd_dt_utc = datetime.datetime.strptime(bd_raw_ts, "%Y-%m-%d %H:%M:%S").replace(
+                        tzinfo=datetime.timezone.utc
+                    )
+                    bd_dt_local = bd_dt_utc.astimezone().replace(second=0, microsecond=0)
+                    bd_ts_local = bd_dt_local.strftime("%Y-%m-%d %H:%M:%S")
+                except (ValueError, TypeError):
+                    pass
+            bd_inserted = 0
+            bd_labeled: dict = {"_buffered": True}
+            for adv_json in bd_adverts:
+                address = (adv_json.get("address") or "").upper()
+                name = adv_json.get("name") or ""
+                raw_mfr = adv_json.get("manufacturer_data") or {}
+                manufacturer_data = {}
+                for k, v in raw_mfr.items():
+                    try:
+                        manufacturer_data[int(k)] = bytes.fromhex(v)
+                    except (ValueError, TypeError):
+                        pass
+                raw_svc = adv_json.get("service_data") or {}
+                service_data = {}
+                for k, v in raw_svc.items():
+                    try:
+                        service_data[_normalize_uuid(k)] = bytes.fromhex(v)
+                    except (ValueError, TypeError):
+                        pass
+                rssi = adv_json.get("rssi")
+                dev = _Dev(); dev.name = name; dev.address = address
+                adv = _Adv(); adv.local_name = name
+                adv.manufacturer_data = manufacturer_data
+                adv.service_data = service_data; adv.rssi = rssi
+                reading = None
+                if is_govee_h5074(dev, adv):
+                    reading = decode_advertisement(address, name, manufacturer_data, rssi)
+                elif is_pvvx_lywsd03mmc(dev, adv):
+                    reading = decode_pvvx_advertisement(address, name, service_data, rssi)
+                if reading is not None:
+                    reading.label = label_map.get(address)
+                    if reading.label:
+                        insert_reading(conn, reading, bd_ts_local)
+                        bd_inserted += 1
+                        if rssi is not None:
+                            bd_labeled[reading.label] = rssi
+                presence_label = (presence_name_map.get(name) if name else None) \
+                              or presence_mac_map.get(address)
+                if presence_label and rssi is not None:
+                    bd_labeled[presence_label] = rssi
+            conn.execute(
+                "INSERT INTO relay_log (ts, relay_id, batch_ts, n_adverts, n_inserted, labeled_json, rev) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (now_utc, relay_cfg["id"], bd_raw_ts, len(bd_adverts), bd_inserted,
+                 _json.dumps(bd_labeled), bd.get("rev")),
+            )
+
 
     response: dict = {
         "ok": True,
