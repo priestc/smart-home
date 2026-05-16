@@ -322,7 +322,10 @@ def ble_relay():
             ),
         )
         conn.execute(
-            "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"
+            "DELETE FROM relay_log WHERE n_adverts >= 0 AND ("
+            "  (labeled_json NOT LIKE '%\"_buffered\": true%' AND datetime(ts) < datetime('now', '-10 minutes'))"
+            "  OR (labeled_json LIKE '%\"_buffered\": true%' AND datetime(ts) < datetime('now', '-60 minutes'))"
+            ")"
         )
 
         # Process buffered batches bundled into this POST.
@@ -469,7 +472,10 @@ def ble_relay_crash():
             (relay_cfg["id"], _json.dumps(crash_info)),
         )
         conn.execute(
-            "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"
+            "DELETE FROM relay_log WHERE n_adverts >= 0 AND ("
+            "  (labeled_json NOT LIKE '%\"_buffered\": true%' AND datetime(ts) < datetime('now', '-10 minutes'))"
+            "  OR (labeled_json LIKE '%\"_buffered\": true%' AND datetime(ts) < datetime('now', '-60 minutes'))"
+            ")"
         )
 
     return jsonify({"ok": True})
@@ -6979,7 +6985,10 @@ def api_pool_relay_reading():
                 (relay_cfg["id"],),
             )
             conn.execute(
-                "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"
+                "DELETE FROM relay_log WHERE n_adverts >= 0 AND ("
+                "  (labeled_json NOT LIKE '%\"_buffered\": true%' AND datetime(ts) < datetime('now', '-10 minutes'))"
+                "  OR (labeled_json LIKE '%\"_buffered\": true%' AND datetime(ts) < datetime('now', '-60 minutes'))"
+                ")"
             )
         monitors = _pool.load_config()
         assigned = next(
@@ -7022,7 +7031,10 @@ def api_pool_relay_reading():
                 (relay_cfg["id"], labeled_json),
             )
             conn.execute(
-                "DELETE FROM relay_log WHERE datetime(ts) < datetime('now', '-10 minutes') AND n_adverts >= 0"
+                "DELETE FROM relay_log WHERE n_adverts >= 0 AND ("
+                "  (labeled_json NOT LIKE '%\"_buffered\": true%' AND datetime(ts) < datetime('now', '-10 minutes'))"
+                "  OR (labeled_json LIKE '%\"_buffered\": true%' AND datetime(ts) < datetime('now', '-60 minutes'))"
+                ")"
             )
 
     # Return current pool_monitor assignment so the relay knows if it should stop.

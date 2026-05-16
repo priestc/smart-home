@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.46"
-#define FIRMWARE_REV          53
+#define FIRMWARE_VERSION      "1.7.47"
+#define FIRMWARE_REV          54
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -534,7 +534,7 @@ static String buildPayload(bool include_presence, bool pool_offline = false,
     if (buffered_batches && !buffered_batches->empty()) {
         JsonArray ba = doc["buffered_batches"].to<JsonArray>();
         for (const auto& s : *buffered_batches)
-            ba.add(serialized(s));  // embed as raw JSON object, not an escaped string
+            ba.add(s.c_str());  // stored as escaped JSON string; server parses with json.loads()
     }
 
     JsonArray arr = doc["advertisements"].to<JsonArray>();
