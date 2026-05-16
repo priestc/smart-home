@@ -22,6 +22,10 @@ pipx install git+https://github.com/priestc/smart-home.git@master --force; sudo 
 ssh tank2 'sudo -n systemctl restart smart-home.service'
 ```
 
+## Testing workflow
+
+When the user mentions doing a test or says they want to test something, automatically commit all pending changes, push to GitHub, and deploy to tank2 (using the standard deploy command above) before they begin the test. Do not wait to be asked separately to commit/deploy.
+
 ## Git hooks
 
 A pre-commit hook in `hooks/pre-commit` automatically rebuilds the ESP32 firmware binaries whenever `esp32_relay.ino` is staged. After a fresh clone, install it with:
