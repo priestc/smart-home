@@ -6980,9 +6980,9 @@ def api_pool_poll_rate_set():
     data = request.get_json(silent=True) or {}
     label = data.get("label")
     interval_s = data.get("interval_s")
-    valid = {30, 60, 90, 120}
+    valid = {30, 60}
     if not label or interval_s not in valid:
-        return jsonify({"error": "label and valid interval_s (30/60/90/120) required"}), 400
+        return jsonify({"error": "label and valid interval_s (30/60) required"}), 400
     if not _pool.set_poll_interval(label, interval_s):
         return jsonify({"error": f"pool monitor '{label}' not found"}), 404
     return jsonify({"ok": True, "label": label, "interval_s": interval_s})
@@ -7154,6 +7154,9 @@ _POOL_PAGE = """<!DOCTYPE html>
     .node-msg { font-size: .8rem; color: #7a90a8; }
     .node-msg.ok  { color: #2a9d6e; }
     .node-msg.err { color: #c0392b; }
+    .range-btns { display: flex; gap: .4rem; margin-bottom: .75rem; }
+    .range-btns button { font-size: .78rem; font-weight: 600; padding: .3rem .75rem; border-radius: 20px; border: none; background: #e8eef5; color: #5a6e84; cursor: pointer; }
+    .range-btns button.active { background: #2e7dd4; color: #fff; }
   </style>
 </head>
 <body>
@@ -7174,8 +7177,6 @@ _POOL_PAGE = """<!DOCTYPE html>
     <select class="label-select" id="poll-rate-sel" onchange="setPollRate()">
       <option value="30">30 seconds</option>
       <option value="60">60 seconds</option>
-      <option value="90">90 seconds</option>
-      <option value="120">120 seconds</option>
     </select>
     <span id="node-msg" class="node-msg"></span>
   </div>
@@ -7183,6 +7184,13 @@ _POOL_PAGE = """<!DOCTYPE html>
   <div style="display:flex;align-items:center;gap:1rem;margin-bottom:.75rem">
     <div class="section" style="margin-bottom:0">History</div>
     <select class="label-select" id="label-sel" onchange="onLabelChange()"></select>
+  </div>
+
+  <div class="range-btns" id="range-btns">
+    <button onclick="setRange(1)" data-days="1" class="active">24h</button>
+    <button onclick="setRange(3)" data-days="3">3d</button>
+    <button onclick="setRange(7)" data-days="7">7d</button>
+    <button onclick="setRange(30)" data-days="30">30d</button>
   </div>
 
   <div class="metric-btns" id="metric-btns">
@@ -7233,6 +7241,15 @@ const METRIC_COLORS = {
 let historyRows = [];
 let poolChart = null;
 let activeMetric = 'temp_f';
+let rangeDays = 1;
+
+function setRange(days) {
+  rangeDays = days;
+  document.querySelectorAll('#range-btns button').forEach(b => {
+    b.classList.toggle('active', parseFloat(b.dataset.days) === days);
+  });
+  loadHistory();
+}
 
 function showError(msg) {
   const el = document.getElementById('error-bar');
@@ -7508,7 +7525,10 @@ async function loadHistory() {
   const label = document.getElementById('label-sel').value;
   if (!label) return;
   try {
-    const rows = await fetchJSON('/api/pool/history?label=' + encodeURIComponent(label) + '&limit=500');
+    const start = new Date(Date.now() - rangeDays * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+    const limit = rangeDays <= 1 ? 2000 : rangeDays <= 7 ? 10000 : 50000;
+    const rows = await fetchJSON('/api/pool/history?label=' + encodeURIComponent(label)
+      + '&start=' + encodeURIComponent(start) + '&limit=' + limit);
     historyRows = rows;
     renderChart();
 
