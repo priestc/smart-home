@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.32"
-#define FIRMWARE_REV          39
+#define FIRMWARE_VERSION      "1.7.33"
+#define FIRMWARE_REV          40
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -651,6 +651,11 @@ static void doPoolMonitorCycle() {
     // Sleep at the START of each cycle so the POST lands on a clock boundary.
     bool is_gatt_cycle = sleepUntilNextSlot();
 
+    // If the previous GATT attempt failed to produce a reading, retry immediately
+    // on the next cycle rather than waiting for the next scheduled :30 slot.
+    static bool s_pool_last_read_ok = false;
+    bool do_gatt = is_gatt_cycle || !s_pool_last_read_ok;
+
     checkAppWatchdog();
     g_pool_status = "";  // clear each cycle so stale statuses don't persist
 
@@ -734,7 +739,7 @@ static void doPoolMonitorCycle() {
         }
         pool_seen_now = (cur_addr.length() > 0);
 
-        if (is_gatt_cycle) {
+        if (do_gatt) {
             if (!g_pool_client) {
                 g_pool_client = BLEDevice::createClient();
                 g_pool_client->setMTU(23);
@@ -757,6 +762,7 @@ static void doPoolMonitorCycle() {
                     g_pool_fails++;
                     g_pool_retry_after_ms = millis() + POOL_RETRY_INTERVAL_MS;
                     g_pool_status = connect_ms < 2000 ? "connect_fail_fast" : "connect_timeout";
+                    s_pool_last_read_ok = false;
                     Serial.printf("Pool: connect failed in %lums (fail #%d) [%s], retry in %lus\n",
                                   connect_ms, g_pool_fails, g_pool_status.c_str(),
                                   POOL_RETRY_INTERVAL_MS / 1000UL);
@@ -806,6 +812,7 @@ static void doPoolMonitorCycle() {
                         pool_offline = false;
                         g_pool_fails = 0;
                         g_pool_status = "";
+                        s_pool_last_read_ok = true;
                         Serial.printf("Pool: read %u bytes\n", (unsigned)val.length());
                         // Disconnect immediately after reading — mirrors Python's connect-read-disconnect
                         // pattern. Keeping the connection open risks hanging on the next readValue()
@@ -813,6 +820,7 @@ static void doPoolMonitorCycle() {
                         poolDisconnect();
                     } else {
                         g_pool_status = "empty_read";
+                        s_pool_last_read_ok = false;
                         Serial.println("Pool: empty GATT read");
                         poolDisconnect();
                         g_pool_fails++;
@@ -820,6 +828,7 @@ static void doPoolMonitorCycle() {
                     }
                 } else {
                     g_pool_status = String("no_char svcs:") + (pSvcs ? String(pSvcs->size()) : "null");
+                    s_pool_last_read_ok = false;
                     Serial.printf("Pool: characteristic not found across %s\n", svc_uuids.c_str());
                     poolDisconnect();
                     g_pool_fails++;
@@ -831,7 +840,7 @@ static void doPoolMonitorCycle() {
 
     // ── Step 3: Single POST with pool + sensor data ────────────────────────────
     g_current_op = "http-post";
-    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now, !is_gatt_cycle && g_pool_addr.length() > 0);
+    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now, !do_gatt && g_pool_addr.length() > 0);
     g_current_op = "";
     maybeSendPendingCrash();
 }
