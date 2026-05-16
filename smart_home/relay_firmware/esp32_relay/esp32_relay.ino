@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.34"
-#define FIRMWARE_REV          41
+#define FIRMWARE_VERSION      "1.7.35"
+#define FIRMWARE_REV          42
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -573,27 +573,44 @@ static void bufferPush(const String& payload) {
     g_batch_queue.push_back(payload);
 }
 
+// Set true after the first successful POST when the buffer is non-empty.
+// The following cycle drains the entire buffer in one go before resuming
+// normal operation. The one-cycle gap guarantees we only attempt the bulk
+// drain once we know the connection is stable.
+static bool s_drain_next_cycle = false;
+
 static void postBatch(bool pool_offline = false, const String& pool_hex = "", int8_t pool_rssi = 0, bool pool_seen = false, bool pool_skip = false) {
     Serial.printf("Scan: %u devices  buffer: %u  fw=%s  rev=%d\n",
                   (unsigned)g_seen.size(), (unsigned)g_batch_queue.size(),
                   FIRMWARE_VERSION, FIRMWARE_REV);
 
-    if (!g_batch_queue.empty()) {
-        if (httpPost(g_batch_queue.front(), false)) {
-            g_batch_queue.erase(g_batch_queue.begin());
-            Serial.printf("Buffered batch sent, %u remaining\n", (unsigned)g_batch_queue.size());
-        } else {
-            // Server still down — preserve current scan + pool data into the buffer.
-            if (!g_seen.empty())
+    // Drain cycle: flush every buffered entry before sending the current batch.
+    if (s_drain_next_cycle) {
+        s_drain_next_cycle = false;
+        Serial.printf("Draining %u buffered batches...\n", (unsigned)g_batch_queue.size());
+        while (!g_batch_queue.empty()) {
+            if (!httpPost(g_batch_queue.front(), false)) {
+                // Connection dropped mid-drain — leave remainder in buffer.
+                // The next successful current-batch POST will reschedule the drain.
+                Serial.println("Drain interrupted — will retry on next reconnect.");
                 bufferPush(buildPayload(false, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip));
-            return;
+                return;
+            }
+            g_batch_queue.erase(g_batch_queue.begin());
         }
+        Serial.println("Buffer fully drained.");
     }
 
     if (g_seen.empty() && !pool_offline && pool_hex.length() == 0 && !pool_skip) return;
 
-    if (!httpPost(buildPayload(true, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip), true))
+    if (!httpPost(buildPayload(true, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip), true)) {
         bufferPush(buildPayload(false, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip));
+    } else if (!g_batch_queue.empty()) {
+        // First successful POST with a non-empty buffer — drain on the next cycle.
+        s_drain_next_cycle = true;
+        Serial.printf("Server reachable — will drain %u buffered batches next cycle.\n",
+                      (unsigned)g_batch_queue.size());
+    }
 }
 
 // ── Persistent pool monitor ───────────────────────────────────────────────────
