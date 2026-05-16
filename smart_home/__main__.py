@@ -1590,6 +1590,60 @@ def monitor(duration, verbose, db, no_db):
                     pass
             await asyncio.sleep(10)
 
+    async def check_iphone_bluetooth():
+        """Detect iPhones in BT Classic range via hcitool name (no root needed)."""
+        import subprocess as _sp
+        import re as _re
+        loop = asyncio.get_running_loop()
+
+        def _normalize(s: str) -> str:
+            return _re.sub(r"[^a-z0-9]", "", s.lower())
+
+        def _get_paired_macs() -> dict[str, str]:
+            r = _sp.run(["bluetoothctl", "devices"], capture_output=True, text=True, timeout=5)
+            result = {}
+            for line in r.stdout.splitlines():
+                parts = line.strip().split(" ", 2)
+                if len(parts) == 3 and parts[0] == "Device":
+                    result[parts[2]] = parts[1]
+            return result
+
+        def _find_mac(bt_name: str, paired: dict[str, str]) -> str | None:
+            if not bt_name:
+                return None
+            if bt_name in paired:
+                return paired[bt_name]
+            norm = _normalize(bt_name)
+            # normalized exact (handles apostrophes, hyphens: "Chriss-iPhone" == "chris's iPhone")
+            for name, mac in paired.items():
+                if _normalize(name) == norm:
+                    return mac
+            # normalized substring fallback ("iPhone" inside "chris's iPhone")
+            for name, mac in paired.items():
+                if norm and norm in _normalize(name):
+                    return mac
+            return None
+
+        while True:
+            try:
+                paired = await loop.run_in_executor(None, _get_paired_macs)
+                for dev_name, info in list(_iphone_devices_cache.items()):
+                    mac = _find_mac(info.get("bluetooth_name", ""), paired)
+                    if not mac:
+                        continue
+                    r = await loop.run_in_executor(
+                        None,
+                        lambda _m=mac: _sp.run(
+                            ["timeout", "3", "hcitool", "name", _m],
+                            capture_output=True, text=True,
+                        ),
+                    )
+                    if r.returncode == 0 and r.stdout.strip():
+                        iphone_ble_last_seen[dev_name] = datetime.datetime.now()
+            except Exception as e:
+                click.echo(f"[BT] check_iphone_bluetooth error: {e}")
+            await asyncio.sleep(15)
+
     async def check_iphone_presence():
         """Mark devices home/away based on BLE + network signals; away only when both absent."""
         while True:
@@ -2472,7 +2526,7 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
-        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), check_iphone_network(), check_iphone_presence()]
+        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), check_iphone_network(), check_iphone_bluetooth(), check_iphone_presence()]
         if cameras_cfg:
             extra.append(camera_watch_loop())
             extra.append(camera_vitals_loop())
