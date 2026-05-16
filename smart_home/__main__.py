@@ -1638,11 +1638,20 @@ def monitor(duration, verbose, db, no_db):
                         "label": name,
                         "status": new_status,
                     })
-                    candidates = [t for t in [ble_last, net_last] if t is not None]
+
+                # Always persist signal timestamps so the web UI can show them.
+                candidates = [t for t in [ble_last, net_last] if t is not None]
+                new_ble_last = ble_last.isoformat() if ble_last else None
+                new_net_last = net_last.isoformat() if net_last else None
+                if (new_status != old_status
+                        or entry.get("ble_last_seen") != new_ble_last
+                        or entry.get("net_last_seen") != new_net_last):
                     entry = dict(entry)
                     entry["name"] = name
                     entry["status"] = new_status
                     entry["last_seen"] = max(candidates).isoformat() if candidates else None
+                    entry["ble_last_seen"] = new_ble_last
+                    entry["net_last_seen"] = new_net_last
                     state[name] = entry
                     changed = True
             if changed:

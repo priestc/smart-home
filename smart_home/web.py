@@ -664,12 +664,14 @@ def presence_history_api():
             if st == "away"
         ]
         result.append({
-            "name":        name,
-            "ble_name":    name,
-            "status":      s.get("status", "unknown"),
-            "last_seen":   s.get("last_seen"),
-            "windows":     windows,
-            "recent_away": list(reversed(away_list))[:25],
+            "name":          name,
+            "ble_name":      name,
+            "status":        s.get("status", "unknown"),
+            "last_seen":     s.get("last_seen"),
+            "ble_last_seen": s.get("ble_last_seen"),
+            "net_last_seen": s.get("net_last_seen"),
+            "windows":       windows,
+            "recent_away":   list(reversed(away_list))[:25],
         })
     return jsonify(result)
 
@@ -1263,6 +1265,15 @@ def presence_page():
     .win-tabs { display: flex; gap: .4rem; margin-bottom: .9rem; }
     .win-tab { background: #f0f4f8; color: #4a6080; border: none; border-radius: 6px; padding: .3rem .9rem; cursor: pointer; font-size: .8rem; font-weight: 600; transition: all .15s; }
     .win-tab.active { background: #2e7dd4; color: #fff; }
+    .signal-badges { display: flex; gap: .6rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
+    .signal-badge { display: inline-flex; align-items: center; gap: .35rem; font-size: .75rem; font-weight: 600; padding: .25rem .65rem; border-radius: 20px; }
+    .signal-badge .sig-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .signal-badge.sig-home { background: #e8f5ef; color: #1e7a50; }
+    .signal-badge.sig-home .sig-dot { background: #2a9d6e; }
+    .signal-badge.sig-away { background: #fdecea; color: #a93226; }
+    .signal-badge.sig-away .sig-dot { background: #c0392b; }
+    .signal-badge.sig-unknown { background: #f0f4f8; color: #7a90a8; }
+    .signal-badge.sig-unknown .sig-dot { background: #aabbc8; }
   </style>
 </head>
 <body>
@@ -1310,6 +1321,24 @@ function timeSince(iso) {
   return `${Math.floor(s/86400)}d ago`;
 }
 
+function signalBadgesHtml(d) {
+  const BLE_TIMEOUT = 60, NET_TIMEOUT = 30;
+  function badge(label, lastSeenIso, timeout) {
+    if (!lastSeenIso) {
+      return `<span class="signal-badge sig-unknown"><span class="sig-dot"></span>${label}: Unavailable</span>`;
+    }
+    const age = (Date.now() - new Date(lastSeenIso)) / 1000;
+    const present = age < timeout;
+    const cls = present ? "sig-home" : "sig-away";
+    const state = present ? "Home" : "Away";
+    return `<span class="signal-badge ${cls}"><span class="sig-dot"></span>${label}: ${state} &middot; ${timeSince(lastSeenIso)}</span>`;
+  }
+  return `<div class="signal-badges">
+    ${badge("Bluetooth", d.ble_last_seen, BLE_TIMEOUT)}
+    ${badge("Network", d.net_last_seen, NET_TIMEOUT)}
+  </div>`;
+}
+
 function renderDevice(d) {
   const sub = d.last_seen ? `Last seen ${timeSince(d.last_seen)}` : "Never seen";
   const tabs = [7, 30].map(n => `<button class="win-tab${n===7?' active':''}" onclick="switchWin(this,'${d.name}',${n})">${n}d</button>`).join("");
@@ -1337,6 +1366,7 @@ function renderDevice(d) {
       <div class="dot ${d.status}"></div>
       <div><div class="device-name">${d.name}</div><div class="device-sub">${d.status} &middot; ${sub}</div></div>
     </div>
+    ${signalBadgesHtml(d)}
     <div class="win-tabs">${tabs}</div>
     <div class="win-stats">${statsHtml(d.windows["7"])}</div>
     <div class="away-title">Recent away periods (last 90 days)</div>
