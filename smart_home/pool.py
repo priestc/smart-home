@@ -69,6 +69,28 @@ def set_node(label: str, node: str) -> bool:
     return False
 
 
+def get_device_zone(label: str) -> str | None:
+    """Return the current zone name for a monitor, or None if unset."""
+    for m in load_config():
+        if m.get("label") == label:
+            return m.get("current_zone")
+    return None
+
+
+def set_device_zone(label: str, zone_name: str | None) -> bool:
+    """Set or clear the current zone for a monitor. Returns False if not found."""
+    monitors = load_config()
+    for m in monitors:
+        if m.get("label") == label:
+            if zone_name is None:
+                m.pop("current_zone", None)
+            else:
+                m["current_zone"] = zone_name
+            save_config(monitors)
+            return True
+    return False
+
+
 def set_poll_interval(label: str, interval_s: int) -> bool:
     """Set the poll interval in seconds for a pool monitor.
 

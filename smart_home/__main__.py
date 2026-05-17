@@ -1943,7 +1943,8 @@ def monitor(duration, verbose, db, no_db):
                             reading.rssi = last_rssi
                             click.echo(f"[{ts}] Pool: {reading}")
                             if conn:
-                                insert_pool_reading(conn, reading)
+                                zone = _pool.get_device_zone(label)
+                                insert_pool_reading(conn, reading, zone=zone)
                                 pool_last_reading[label] = datetime.datetime.now()
                         else:
                             click.echo(f"[{ts}] Pool: GATT data too short from {label}")

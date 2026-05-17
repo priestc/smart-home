@@ -172,7 +172,7 @@ def ble_relay():
                     reading.address = pool_address
                     reading.label = pool_label
                     reading.rssi = pool_rssi
-                    insert_pool_reading(conn, reading)
+                    insert_pool_reading(conn, reading, zone=_pool.get_device_zone(pool_label))
                     _pool_reading_stored = True
                     if pool_rssi is not None:
                         labeled_seen[pool_label] = pool_rssi
@@ -4993,7 +4993,7 @@ def index():
     <a href="/chart/db-sizes"   class="chart-link"><span class="cl-title">Database Growth</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/camera"            class="chart-link"><span class="cl-title">Cameras</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
-    <a href="/pool"              class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Pool Monitor</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/water-chemistry"   class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Water Chemistry</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/rssi"              class="chart-link"><span class="cl-title">Bluetooth Signal</span><span class="cl-arrow">&#8594;</span></a>
   </div>
 
@@ -5169,7 +5169,7 @@ async function loadPool() {
       const tsText = offline
         ? 'Last reading ' + timeSince(new Date(r.ts.replace(' ', 'T')))
         : r.ts.slice(11, 16);
-      return `<a href="/pool" class="pool-card">
+      return `<a href="/water-chemistry" class="pool-card">
         <div class="pc-label">${r.label}</div>
         <div class="pc-status ${statusClass}">${statusDot} ${statusText}</div>
         ${metrics ? `<div class="pc-metrics">${metrics}</div>` : ''}
@@ -7167,7 +7167,7 @@ def api_pool_relay_reading():
         reading.label = label
         reading.rssi = rssi
         with _conn() as conn:
-            insert_pool_reading(conn, reading)
+            insert_pool_reading(conn, reading, zone=_pool.get_device_zone(label))
             conn.execute(
                 "INSERT OR REPLACE INTO relay_checkin (relay_id, ts) "
                 "VALUES (?, strftime('%Y-%m-%d %H:%M:%S','now'))",
@@ -7202,12 +7202,274 @@ def api_pool_relay_reading():
     })
 
 
-_POOL_PAGE = """<!DOCTYPE html>
+@app.get("/api/water-chemistry/zones")
+def api_wc_zones_get():
+    """List all water chemistry zones."""
+    with _conn() as conn:
+        rows = conn.execute("SELECT id, name, created_at FROM wc_zones ORDER BY id ASC").fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.post("/api/water-chemistry/zones")
+def api_wc_zones_create():
+    """Create a new water chemistry zone."""
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    try:
+        with _conn() as conn:
+            conn.execute("INSERT INTO wc_zones (name) VALUES (?)", (name,))
+            conn.commit()
+            row = conn.execute("SELECT id, name, created_at FROM wc_zones WHERE name=?", (name,)).fetchone()
+        return jsonify(dict(row)), 201
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            return jsonify({"error": f"zone '{name}' already exists"}), 409
+        return jsonify({"error": str(e)}), 500
+
+
+@app.delete("/api/water-chemistry/zones/<int:zone_id>")
+def api_wc_zones_delete(zone_id):
+    """Delete a water chemistry zone by ID."""
+    with _conn() as conn:
+        row = conn.execute("SELECT name FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
+        if row is None:
+            return jsonify({"error": "zone not found"}), 404
+        conn.execute("DELETE FROM wc_zones WHERE id=?", (zone_id,))
+        conn.commit()
+    return jsonify({"ok": True, "id": zone_id})
+
+
+@app.post("/api/water-chemistry/move")
+def api_wc_move():
+    """Assign a device to a zone (or clear zone assignment)."""
+    from smart_home import pool as _pool
+    data = request.get_json(silent=True) or {}
+    label = data.get("label")
+    zone_name = data.get("zone")  # None/null to clear
+    if not label:
+        return jsonify({"error": "label required"}), 400
+    if not _pool.set_device_zone(label, zone_name):
+        return jsonify({"error": f"device '{label}' not found"}), 404
+    return jsonify({"ok": True, "label": label, "zone": zone_name})
+
+
+@app.get("/api/water-chemistry/current")
+def api_wc_current():
+    """Latest reading for each water chemistry device, with current zone from config."""
+    from smart_home import pool as _pool
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT label, address, temp_c, ph, ec, tds, orp, chlorine, battery, rssi, ts
+            FROM pool_readings
+            WHERE id IN (
+                SELECT MAX(id) FROM pool_readings GROUP BY label
+            )
+            ORDER BY label
+        """).fetchall()
+    now = datetime.datetime.now()
+    monitors = _pool.load_config()
+    zone_map = {m.get("label", ""): m.get("current_zone") for m in monitors}
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
+        try:
+            age = (now - datetime.datetime.strptime(d["ts"], "%Y-%m-%d %H:%M:%S")).total_seconds()
+            d["offline"] = age > 600
+        except (ValueError, TypeError):
+            d["offline"] = True
+        d["current_zone"] = zone_map.get(d["label"])
+        result.append(d)
+    return jsonify(result)
+
+
+@app.get("/api/water-chemistry/history")
+def api_wc_history():
+    """Water chemistry history. Params: zone, label, start, end, limit, bucket_minutes.
+    zone='__unzoned__' filters to rows where zone IS NULL."""
+    zone_filter = request.args.get("zone")
+    label = request.args.get("label")
+    start = (request.args.get("start") or "").replace("T", " ") or None
+    end   = (request.args.get("end")   or "").replace("T", " ") or None
+    try:
+        limit = min(int(request.args.get("limit", 2000)), 100000)
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+    try:
+        bucket = max(1, int(request.args.get("bucket_minutes", 1)))
+    except ValueError:
+        return jsonify({"error": "bucket_minutes must be an integer"}), 400
+
+    where, params = [], []
+    if zone_filter == "__unzoned__":
+        where.append("zone IS NULL")
+    elif zone_filter is not None:
+        where.append("zone = ?")
+        params.append(zone_filter)
+    if label:
+        where.append("label = ?")
+        params.append(label)
+    if start:
+        where.append("ts >= ?")
+        params.append(start)
+    if end:
+        where.append("ts <= ?")
+        params.append(end)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    if bucket > 1:
+        bucket_secs = bucket * 60
+        params.append(limit)
+        sql = f"""
+            SELECT
+                strftime('%Y-%m-%d %H:%M:%S',
+                    CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs} * {bucket_secs},
+                    'unixepoch') AS ts,
+                zone, label,
+                ROUND(AVG(CASE WHEN temp_c IS NOT NULL THEN temp_c * 9.0/5.0 + 32 END), 2) AS temp_f,
+                ROUND(AVG(ph), 2)       AS ph,
+                ROUND(AVG(ec), 0)       AS ec,
+                ROUND(AVG(tds), 0)      AS tds,
+                ROUND(AVG(orp), 0)      AS orp,
+                ROUND(AVG(chlorine), 2) AS chlorine,
+                ROUND(AVG(battery), 0)  AS battery
+            FROM pool_readings{where_sql}
+            GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, zone, label
+            ORDER BY ts ASC LIMIT ?
+        """
+        with _conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return jsonify([dict(r) for r in rows])
+    else:
+        params.append(limit)
+        with _conn() as conn:
+            rows = conn.execute(
+                f"SELECT ts, zone, label, temp_c, ph, ec, tds, orp, chlorine, battery "
+                f"FROM pool_readings{where_sql} ORDER BY ts DESC LIMIT ?",
+                params,
+            ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
+            result.append(d)
+        return jsonify(list(reversed(result)))
+
+
+@app.get("/api/water-chemistry/history/month")
+def api_wc_history_month():
+    """Water chemistry readings for a given calendar month across all years, ts normalised to year 2000."""
+    import datetime as _dt
+    zone_filter = request.args.get("zone")
+    label  = request.args.get("label")
+    month  = max(1, min(12, request.args.get("month", 1, type=int)))
+    bucket_minutes = max(1, request.args.get("bucket_minutes", 60, type=int))
+    bucket_secs    = bucket_minutes * 60
+    month_str = f"{month:02d}"
+
+    where_extra_parts = [f"strftime('%m', ts) = ?"]
+    params = [bucket_secs, bucket_secs, month_str]
+    if zone_filter == "__unzoned__":
+        where_extra_parts.append("zone IS NULL")
+    elif zone_filter is not None:
+        where_extra_parts.append("zone = ?")
+        params.append(zone_filter)
+    if label:
+        where_extra_parts.append("label = ?")
+        params.append(label)
+    where_extra = "AND " + " AND ".join(where_extra_parts[1:]) if len(where_extra_parts) > 1 else ""
+
+    with _conn() as conn:
+        rows = conn.execute(f"""
+            SELECT
+                strftime('%Y', ts) AS year,
+                CAST(strftime('%s', '2000' || substr(ts, 5)) AS INTEGER) / ? * ? AS bucket,
+                zone, label,
+                ROUND(AVG(CASE WHEN temp_c IS NOT NULL THEN temp_c * 9.0/5.0 + 32 END), 2) AS temp_f,
+                ROUND(AVG(ph), 2)       AS ph,
+                ROUND(AVG(ec), 0)       AS ec,
+                ROUND(AVG(tds), 0)      AS tds,
+                ROUND(AVG(orp), 0)      AS orp,
+                ROUND(AVG(chlorine), 2) AS chlorine,
+                ROUND(AVG(battery), 0)  AS battery
+            FROM pool_readings
+            WHERE strftime('%m', ts) = ? {where_extra}
+            GROUP BY bucket, zone, label, year
+            ORDER BY bucket ASC
+        """, params).fetchall()
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        ts = _dt.datetime.utcfromtimestamp(d["bucket"]).strftime("%Y-%m-%d %H:%M:%S")
+        result.append({
+            "year": d["year"], "ts": ts, "zone": d["zone"], "label": d["label"],
+            "temp_f": d["temp_f"], "ph": d["ph"], "ec": d["ec"],
+            "tds": d["tds"], "orp": d["orp"], "chlorine": d["chlorine"], "battery": d["battery"],
+        })
+    return jsonify(result)
+
+
+@app.get("/api/water-chemistry/history/year")
+def api_wc_history_year():
+    """Water chemistry readings across all months, ts normalised to year 2000 for overlay."""
+    import datetime as _dt
+    zone_filter = request.args.get("zone")
+    label  = request.args.get("label")
+    bucket_minutes = max(1, request.args.get("bucket_minutes", 360, type=int))
+    bucket_secs    = bucket_minutes * 60
+
+    where_parts = []
+    params = [bucket_secs, bucket_secs]
+    if zone_filter == "__unzoned__":
+        where_parts.append("zone IS NULL")
+    elif zone_filter is not None:
+        where_parts.append("zone = ?")
+        params.append(zone_filter)
+    if label:
+        where_parts.append("label = ?")
+        params.append(label)
+    where_extra = ("AND " + " AND ".join(where_parts)) if where_parts else ""
+
+    with _conn() as conn:
+        rows = conn.execute(f"""
+            SELECT
+                strftime('%Y', ts) AS year,
+                CAST(strftime('%s', '2000' || substr(ts, 5)) AS INTEGER) / ? * ? AS bucket,
+                zone, label,
+                ROUND(AVG(CASE WHEN temp_c IS NOT NULL THEN temp_c * 9.0/5.0 + 32 END), 2) AS temp_f,
+                ROUND(AVG(ph), 2)       AS ph,
+                ROUND(AVG(ec), 0)       AS ec,
+                ROUND(AVG(tds), 0)      AS tds,
+                ROUND(AVG(orp), 0)      AS orp,
+                ROUND(AVG(chlorine), 2) AS chlorine,
+                ROUND(AVG(battery), 0)  AS battery
+            FROM pool_readings
+            WHERE 1=1 {where_extra}
+            GROUP BY bucket, zone, label, year
+            ORDER BY bucket ASC
+        """, params).fetchall()
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        ts = _dt.datetime.utcfromtimestamp(d["bucket"]).strftime("%Y-%m-%d %H:%M:%S")
+        result.append({
+            "year": d["year"], "ts": ts, "zone": d["zone"], "label": d["label"],
+            "temp_f": d["temp_f"], "ph": d["ph"], "ec": d["ec"],
+            "tds": d["tds"], "orp": d["orp"], "chlorine": d["chlorine"], "battery": d["battery"],
+        })
+    return jsonify(result)
+
+
+_WATER_CHEM_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pool Monitor</title>
+  <title>Water Chemistry</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
   <style>
@@ -7268,17 +7530,57 @@ _POOL_PAGE = """<!DOCTYPE html>
     .res-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
     .res-row select { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; cursor: pointer; }
     #resp-size { font-size: .72rem; color: #4a6080; }
+    .device-card { background:#fff; border-radius:12px; padding:1.2rem 1.5rem; margin-bottom:.75rem; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+    .device-header { display:flex; align-items:center; gap:1rem; flex-wrap:wrap; margin-bottom:.75rem; }
+    .device-name { font-size:1rem; font-weight:700; color:#1a2535; }
+    .device-status { font-size:.78rem; font-weight:600; padding:.2rem .6rem; border-radius:20px; }
+    .device-status.online { background:#eafaf1; color:#2a9d6e; }
+    .device-status.offline { background:#fde8e8; color:#c0392b; }
+    .device-zone-row { display:flex; align-items:center; gap:.5rem; margin-bottom:.75rem; }
+    .device-zone-label { font-size:.72rem; color:#7a90a8; text-transform:uppercase; letter-spacing:.07em; font-weight:600; }
+    .zone-select { font-size:.85rem; padding:.3rem .6rem; border:1px solid #d0dce8; border-radius:8px; background:#fff; color:#1a2535; cursor:pointer; }
+    .zone-move-msg { font-size:.78rem; }
+    .zone-move-msg.ok  { color:#2a9d6e; }
+    .zone-move-msg.err { color:#c0392b; }
+    .zone-section { margin-bottom:1.5rem; }
+    .zone-btns { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; margin-bottom:.75rem; }
+    .zone-btn {
+      font-size:.82rem; font-weight:600; padding:.4rem .9rem; border-radius:20px;
+      border:2px solid var(--zc,#aabbc8); cursor:pointer; background:#fff; color:#4a6080;
+      transition:all .15s; box-shadow:0 1px 3px rgba(0,0,0,.08);
+      display:flex; align-items:center; gap:.35rem;
+    }
+    .zone-btn:hover { background:#f0f4f8; }
+    .zone-btn.active { background:var(--zc,#aabbc8); color:#fff; border-color:transparent; }
+    .zone-del { font-size:.9rem; line-height:1; opacity:.65; }
+    .zone-del:hover { opacity:1; }
+    .add-zone-row { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
+    .add-zone-btn { font-size:.82rem; font-weight:600; padding:.4rem .9rem; border-radius:20px; border:2px dashed #d0dce8; cursor:pointer; background:#fff; color:#7a90a8; transition:all .15s; }
+    .add-zone-btn:hover { border-color:#aabbc8; color:#4a6080; }
+    .add-zone-input { font-size:.85rem; padding:.35rem .7rem; border:1px solid #d0dce8; border-radius:8px; background:#fff; color:#1a2535; outline:none; }
+    .add-zone-input:focus { border-color:#2e7dd4; }
+    .add-zone-confirm { font-size:.82rem; font-weight:600; padding:.35rem .8rem; border-radius:8px; border:none; background:#2e7dd4; color:#fff; cursor:pointer; }
+    .add-zone-confirm:hover { background:#2569b5; }
   </style>
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>Pool Monitor <a class="back" href="/">&larr; Home</a></h1>
+  <h1>Water Chemistry <a class="back" href="/">&larr; Home</a></h1>
 
   <div id="status-bar" style="display:none;margin-bottom:1.25rem;padding:.6rem 1.1rem;border-radius:10px;font-size:.85rem;font-weight:600"></div>
 
-  <div id="current-wrap">
-    <div class="section" style="margin-bottom:.75rem">Current readings</div>
-    <div class="cards" id="cards"><span class="no-data">Loading&hellip;</span></div>
+  <div class="section" style="margin-bottom:.75rem">Devices</div>
+  <div id="devices-wrap"><span class="no-data">Loading&hellip;</span></div>
+
+  <div class="zone-section">
+    <div class="section" style="margin-bottom:.75rem">Zones</div>
+    <div class="zone-btns" id="zone-btns"></div>
+    <div class="add-zone-row">
+      <button class="add-zone-btn" id="add-zone-open" onclick="openAddZone()">+ Add Zone</button>
+      <input class="add-zone-input" id="add-zone-input" type="text" placeholder="Zone name&hellip;" style="display:none"
+             onkeydown="if(event.key==='Enter')addZone();if(event.key==='Escape')closeAddZone()">
+      <button class="add-zone-confirm" id="add-zone-confirm" style="display:none" onclick="addZone()">Add</button>
+    </div>
   </div>
 
   <div id="node-wrap" style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem">
@@ -7292,14 +7594,9 @@ _POOL_PAGE = """<!DOCTYPE html>
     <span id="node-msg" class="node-msg"></span>
   </div>
 
-  <div id="label-row" style="display:none;align-items:center;gap:1rem;margin-bottom:.75rem">
-    <div class="section" style="margin-bottom:0">History</div>
-    <select class="label-select" id="label-sel" onchange="onLabelChange()"></select>
-  </div>
-
   <div class="res-row">
     <label for="res">Resolution</label>
-    <select id="res" onchange="resolution=this.value; loadHistoryForChart()">
+    <select id="res" onchange="resolution=this.value; invalidateHistoryCache(); loadHistoryForChart()">
       <option value="low">Low</option>
       <option value="medium">Medium</option>
       <option value="max">Max</option>
@@ -7352,36 +7649,29 @@ _POOL_PAGE = """<!DOCTYPE html>
     <canvas id="pool-chart"></canvas>
   </div>
 
-
-
   <div class="section" style="margin-bottom:.75rem">Raw data</div>
   <table id="hist-table">
     <thead>
       <tr>
-        <th>Time</th><th>Temp</th><th>pH</th><th>ORP (mV)</th><th>Cl (mg/L)</th>
+        <th>Time</th><th>Zone</th><th>Temp</th><th>pH</th><th>ORP (mV)</th><th>Cl (mg/L)</th>
         <th>EC (µS/cm)</th><th>TDS (ppm)</th><th>Battery</th>
       </tr>
     </thead>
-    <tbody id="hist-body"><tr><td colspan="8" class="no-data">Loading&hellip;</td></tr></tbody>
+    <tbody id="hist-body"><tr><td colspan="9" class="no-data">Loading&hellip;</td></tr></tbody>
   </table>
 
 <script>
-const METRIC_COLORS = {
-  temp_f:   '#e07820',
-  ph:       '#2e7dd4',
-  orp:      '#7b4fb5',
-  chlorine: '#2a9d6e',
-  ec:       '#c0662b',
-  tds:      '#1a6db5',
-  battery:  '#7a90a8',
-};
+const ZONE_COLORS = ['#2e7dd4','#e07820','#2a9d6e','#7b4fb5','#c0392b','#16a085','#d35400'];
 const YEAR_PALETTE = ['#2e7dd4','#e07820','#2a9d6e','#7b4fb5','#c0392b','#16a085','#d35400'];
+const UNZONED_COLOR = '#aabbc8';
 
-let historyRows = [];
+let zones = [];           // [{id, name}] from API
+let activeZones = new Set(); // zone keys currently on
+let historyCache = {};    // zoneKey -> rows
 let poolChart   = null;
 let chartXMin = null, chartXMax = null, chartXUnit = 'hour';
-
 let mode = 'recent', rangeDays = 1, activeMonth = null, offsetMs = 0;
+
 const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 const isLocal  = /^192\\.168\\./.test(location.hostname) || /\\.local$/.test(location.hostname);
 let resolution = isLocal ? 'max' : isMobile ? 'low' : 'medium';
@@ -7411,6 +7701,7 @@ async function fetchJSON(url) {
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return r.json();
 }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 function ago(ts) {
   const secs = Math.floor((Date.now() - new Date(ts.replace(' ','T')).getTime()) / 1000);
@@ -7440,17 +7731,150 @@ function clColor(cl) {
   return '#e07820';
 }
 
+// Zone color by index
+function zoneColor(zoneKey) {
+  if (zoneKey === '__unzoned__') return UNZONED_COLOR;
+  const idx = zones.findIndex(z => z.name === zoneKey);
+  return ZONE_COLORS[idx >= 0 ? idx % ZONE_COLORS.length : 0];
+}
+function zoneLabel(zoneKey) {
+  return zoneKey === '__unzoned__' ? 'Unzoned' : zoneKey;
+}
+
+// ── Zones ─────────────────────────────────────────────────────────────────────
+let _hasUnzoned = false;
+
+function renderZoneButtons() {
+  const container = document.getElementById('zone-btns');
+  const btns = zones.map((z, i) => {
+    const color = ZONE_COLORS[i % ZONE_COLORS.length];
+    const active = activeZones.has(z.name) ? 'active' : '';
+    return `<button class="zone-btn ${active}" data-zone="${esc(z.name)}" style="--zc:${color}"
+              onclick="toggleZone('${z.name.replace(/'/g,\"\\\\'\")}')">
+              ${esc(z.name)}
+              <span class="zone-del" onclick="event.stopPropagation();deleteZone(${z.id},'${z.name.replace(/'/g,\"\\\\'\")}')">&#215;</span>
+            </button>`;
+  });
+  if (_hasUnzoned) {
+    const active = activeZones.has('__unzoned__') ? 'active' : '';
+    btns.push(`<button class="zone-btn ${active}" data-zone="__unzoned__" style="--zc:${UNZONED_COLOR}"
+                 onclick="toggleZone('__unzoned__')">Unzoned</button>`);
+  }
+  container.innerHTML = btns.join('');
+}
+
+async function loadZones() {
+  try {
+    const data = await fetchJSON('/api/water-chemistry/zones');
+    zones = data;
+    // Check if any null-zone data exists
+    const peek = await fetchJSON('/api/water-chemistry/history?zone=__unzoned__&limit=1');
+    _hasUnzoned = peek.length > 0;
+    // Default: all zones active
+    activeZones = new Set(zones.map(z => z.name));
+    if (_hasUnzoned) activeZones.add('__unzoned__');
+    renderZoneButtons();
+    invalidateHistoryCache();
+    loadHistoryForChart();
+  } catch(e) { showError('Failed to load zones: ' + e.message); }
+}
+
+function toggleZone(zoneKey) {
+  if (activeZones.has(zoneKey)) {
+    activeZones.delete(zoneKey);
+  } else {
+    activeZones.add(zoneKey);
+    if (!historyCache[zoneKey]) {
+      loadHistoryForChart();
+      return;
+    }
+  }
+  document.querySelectorAll('.zone-btn').forEach(b => {
+    b.classList.toggle('active', activeZones.has(b.dataset.zone));
+  });
+  renderChart();
+}
+
+async function addZone() {
+  const inp = document.getElementById('add-zone-input');
+  const name = inp.value.trim();
+  if (!name) return;
+  try {
+    const r = await fetch('/api/water-chemistry/zones', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({name}),
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+    zones.push(body);
+    activeZones.add(body.name);
+    renderZoneButtons();
+    closeAddZone();
+    invalidateHistoryCache();
+    loadHistoryForChart();
+  } catch(e) { showError('Failed to add zone: ' + e.message); }
+}
+
+async function deleteZone(id, name) {
+  if (!confirm(`Delete zone "${name}"? Historical data tagged with this zone is kept.`)) return;
+  try {
+    const r = await fetch('/api/water-chemistry/zones/' + id, {method:'DELETE'});
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+    zones = zones.filter(z => z.id !== id);
+    activeZones.delete(name);
+    delete historyCache[name];
+    _hasUnzoned = true; // orphaned readings now become "unzoned"
+    if (!activeZones.has('__unzoned__')) activeZones.add('__unzoned__');
+    renderZoneButtons();
+    renderChart();
+  } catch(e) { showError('Failed to delete zone: ' + e.message); }
+}
+
+function openAddZone() {
+  document.getElementById('add-zone-open').style.display = 'none';
+  document.getElementById('add-zone-input').style.display = '';
+  document.getElementById('add-zone-confirm').style.display = '';
+  document.getElementById('add-zone-input').focus();
+}
+function closeAddZone() {
+  document.getElementById('add-zone-input').value = '';
+  document.getElementById('add-zone-open').style.display = '';
+  document.getElementById('add-zone-input').style.display = 'none';
+  document.getElementById('add-zone-confirm').style.display = 'none';
+}
+
+// ── Move device to zone ───────────────────────────────────────────────────────
+async function moveDevice(label, zoneName, msgEl) {
+  msgEl.className = 'zone-move-msg'; msgEl.textContent = 'Saving\\u2026';
+  try {
+    const r = await fetch('/api/water-chemistry/move', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({label, zone: zoneName || null}),
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+    msgEl.className = 'zone-move-msg ok'; msgEl.textContent = 'Moved!';
+    setTimeout(() => { msgEl.textContent = ''; }, 3000);
+  } catch(e) {
+    msgEl.className = 'zone-move-msg err'; msgEl.textContent = 'Error: ' + e.message;
+    showError('Failed to move device: ' + e.message);
+  }
+}
+
 // ── Range selectors ──────────────────────────────────────────────────────────
 function setRange(days) {
   mode = 'recent'; rangeDays = days; offsetMs = 0;
   document.querySelectorAll('#recent-btns button[data-days]').forEach(b =>
     b.classList.toggle('active', parseFloat(b.dataset.days) === days));
   document.querySelectorAll('#month-btns button').forEach(b => b.classList.remove('active'));
+  invalidateHistoryCache();
   loadHistoryForChart();
 }
 function shiftView(dir) {
   offsetMs += dir * rangeDays * 86400000;
   if (offsetMs > 0) offsetMs = 0;
+  invalidateHistoryCache();
   loadHistoryForChart();
 }
 function setAllMonths() {
@@ -7459,6 +7883,7 @@ function setAllMonths() {
   document.querySelectorAll('#month-btns button').forEach((b,i) => b.classList.toggle('active', i === 0));
   document.getElementById('btn-prev').disabled = true;
   document.getElementById('btn-next').disabled = true;
+  invalidateHistoryCache();
   loadHistoryForChart();
 }
 function setMonth(m) {
@@ -7467,32 +7892,13 @@ function setMonth(m) {
   document.querySelectorAll('#month-btns button').forEach((b,i) => b.classList.toggle('active', i === m));
   document.getElementById('btn-prev').disabled = true;
   document.getElementById('btn-next').disabled = true;
+  invalidateHistoryCache();
   loadHistoryForChart();
 }
+function invalidateHistoryCache() { historyCache = {}; }
 
-// ── Chart ────────────────────────────────────────────────────────────────────
-function buildPoolDatasets(rows) {
-  const btn    = document.querySelector('.metric-btn.active');
-  const metric = btn?.dataset.metric || 'temp_f';
-  const lbl    = btn?.dataset.label  || metric;
-  const unit   = btn?.dataset.unit   || '';
-  const color  = METRIC_COLORS[metric] || '#2e7dd4';
-  const isGrouped = mode === 'month' || mode === 'year';
-
-  if (isGrouped) {
-    const byYear = {};
-    for (const r of rows) (byYear[r.year] ??= []).push({ x: new Date(r.ts.replace(' ','T')), y: r[metric] });
-    return Object.keys(byYear).sort().map((year, i) => ({
-      label: `${lbl} ${year}`,
-      data: byYear[year],
-      borderColor: YEAR_PALETTE[i % YEAR_PALETTE.length],
-      backgroundColor: 'transparent',
-      borderWidth: i === 0 ? 2 : 1.5,
-      borderDash: i > 0 ? [4,3] : [],
-      pointRadius: 0, tension: 0, spanGaps: false,
-    }));
-  }
-
+// ── Chart ─────────────────────────────────────────────────────────────────────
+function buildTimePoints(rows, metric) {
   const GAP_MS = 15 * 60 * 1000;
   const points = [];
   for (let i = 0; i < rows.length; i++) {
@@ -7504,20 +7910,55 @@ function buildPoolDatasets(rows) {
     }
     if (r[metric] != null) points.push({ x: new Date(r.ts.replace(' ','T')), y: r[metric] });
   }
-  return [{
-    label: lbl + (unit ? ` (${unit})` : ''),
-    data: points,
-    borderColor: color,
-    backgroundColor: color + '22',
-    borderWidth: 2, pointRadius: 2, pointHoverRadius: 4,
-    fill: true, tension: 0, spanGaps: false,
-  }];
+  return points;
+}
+
+function buildDatasets() {
+  const btn    = document.querySelector('.metric-btn.active');
+  const metric = btn?.dataset.metric || 'temp_f';
+  const unit   = btn?.dataset.unit   || '';
+  const isGrouped = mode === 'month' || mode === 'year';
+  const datasets = [];
+
+  [...activeZones].forEach(zKey => {
+    const rows = historyCache[zKey] || [];
+    if (!rows.length) return;
+    const color = zoneColor(zKey);
+    const name  = zoneLabel(zKey);
+
+    if (isGrouped) {
+      const byYear = {};
+      for (const r of rows) (byYear[r.year] ??= []).push({ x: new Date(r.ts.replace(' ','T')), y: r[metric] });
+      Object.keys(byYear).sort().forEach((year, yi) => {
+        const c = yi === 0 ? color : YEAR_PALETTE[(zones.findIndex(z=>z.name===zKey)+1+yi) % YEAR_PALETTE.length];
+        datasets.push({
+          label: zones.length + (activeZones.has('__unzoned__') ? 1 : 0) > 1 ? `${name} ${year}` : year,
+          data: byYear[year],
+          borderColor: c, backgroundColor: 'transparent',
+          borderWidth: yi === 0 ? 2 : 1.5, borderDash: yi > 0 ? [4,3] : [],
+          pointRadius: 0, tension: 0, spanGaps: false,
+        });
+      });
+    } else {
+      const points = buildTimePoints(rows, metric);
+      const fill = activeZones.size === 1;
+      datasets.push({
+        label: name + (unit ? ` (${unit})` : ''),
+        data: points,
+        borderColor: color, backgroundColor: color + '22',
+        borderWidth: 2, pointRadius: 2, pointHoverRadius: 4,
+        fill, tension: 0, spanGaps: false,
+      });
+    }
+  });
+
+  return datasets;
 }
 
 function renderChart() {
   const btn  = document.querySelector('.metric-btn.active');
   const unit = btn?.dataset.unit || '';
-  const datasets = buildPoolDatasets(historyRows);
+  const datasets = buildDatasets();
 
   if (!poolChart) {
     const ctx = document.getElementById('pool-chart').getContext('2d');
@@ -7650,39 +8091,43 @@ async function setNode() {
   }
 }
 
-// ── Current readings ─────────────────────────────────────────────────────────
+// ── Devices ───────────────────────────────────────────────────────────────────
 async function loadCurrent() {
   try {
-    const rows = await fetchJSON('/api/pool/current');
-    const container = document.getElementById('cards');
-    if (!rows.length) { container.innerHTML = '<span class="no-data">No pool monitor readings yet.</span>'; return; }
+    const rows = await fetchJSON('/api/water-chemistry/current');
+    const wrap = document.getElementById('devices-wrap');
+    if (!rows.length) { wrap.innerHTML = '<span class="no-data">No devices yet.</span>'; return; }
     const bar = document.getElementById('status-bar');
     const allOffline = rows.every(r => r.offline);
     const anyOffline = rows.some(r => r.offline);
     if (allOffline) {
       bar.style.cssText = 'display:;background:#fde8e8;color:#c0392b;';
-      bar.textContent = '\\u25cf Pool monitor offline \\u2014 last reading ' + ago(rows[0].ts);
+      bar.textContent = '\\u25cf Water chemistry monitor offline \\u2014 last reading ' + ago(rows[0].ts);
     } else if (anyOffline) {
       bar.style.cssText = 'display:;background:#fde8e8;color:#c0392b;';
-      bar.textContent = '\\u25cf One or more pool monitors offline';
+      bar.textContent = '\\u25cf One or more monitors offline';
     } else {
       bar.style.display = 'none';
     }
-    const sel = document.getElementById('label-sel');
-    const existing = new Set(Array.from(sel.options).map(o => o.value));
-    rows.forEach(r => {
-      if (!existing.has(r.label)) {
-        const o = document.createElement('option');
-        o.value = o.textContent = r.label;
-        sel.appendChild(o);
-      }
-    });
-    document.getElementById('label-row').style.display = sel.options.length > 1 ? 'flex' : 'none';
-    container.innerHTML = rows.map(r => `
-      <div style="min-width:220px">
-        <div class="card metric-label" style="margin-bottom:.5rem;font-size:.8rem;color:#7a90a8;font-weight:600">${r.label}</div>
+    const zoneOptions = ['<option value="">-- No zone --</option>',
+      ...zones.map(z => `<option value="${esc(z.name)}">${esc(z.name)}</option>`)
+    ].join('');
+    wrap.innerHTML = rows.map((r, ri) => `
+      <div class="device-card">
+        <div class="device-header">
+          <span class="device-name">${esc(r.label)}</span>
+          <span class="device-status ${r.offline ? 'offline' : 'online'}">${r.offline ? '&#9679; Offline' : '&#9679; Online'}</span>
+          <span style="font-size:.75rem;color:#aabbc8">${ago(r.ts)}</span>
+        </div>
+        <div class="device-zone-row">
+          <span class="device-zone-label">Zone</span>
+          <select class="zone-select" id="zone-sel-${ri}" onchange="moveDevice('${r.label.replace(/'/g,\"\\\\'\")}',this.value,document.getElementById('zone-msg-${ri}'))">
+            ${zoneOptions}
+          </select>
+          <span id="zone-msg-${ri}" class="zone-move-msg"></span>
+        </div>
         <div class="cards" style="margin-bottom:0;gap:.75rem">
-          <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '\\u2014'}<span class="metric-unit">\\u00b0F</span></div><div class="metric-ts">${ago(r.ts)}</div></div>
+          <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '\\u2014'}<span class="metric-unit">\\u00b0F</span></div></div>
           <div class="card"><div class="metric-label">pH</div><div class="metric-value" style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '\\u2014'}</div></div>
           <div class="card"><div class="metric-label">ORP</div><div class="metric-value" style="color:${orpColor(r.orp)}">${r.orp != null ? r.orp : '\\u2014'}<span class="metric-unit">mV</span></div></div>
           <div class="card"><div class="metric-label">Free Cl</div><div class="metric-value" style="color:${clColor(r.chlorine)}">${r.chlorine != null ? r.chlorine.toFixed(1) : '\\u2014'}<span class="metric-unit">mg/L</span></div></div>
@@ -7692,15 +8137,29 @@ async function loadCurrent() {
         </div>
       </div>
     `).join('');
+    // Set current zone in each selector
+    rows.forEach((r, ri) => {
+      const sel = document.getElementById('zone-sel-' + ri);
+      if (sel && r.current_zone) sel.value = r.current_zone;
+    });
   } catch(e) { showError('Failed to load current readings: ' + e.message); }
 }
 
-// ── History ──────────────────────────────────────────────────────────────────
-function updateHistoryTable(rows) {
+// ── History ───────────────────────────────────────────────────────────────────
+function updateHistoryTable() {
   const tbody = document.getElementById('hist-body');
-  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="8" class="no-data">No history yet.</td></tr>'; return; }
-  tbody.innerHTML = [...rows].reverse().slice(0, 10).map(r => `<tr>
+  // Collect rows from all active zones, sort by ts desc, take latest 10
+  const allRows = [];
+  for (const zKey of activeZones) {
+    const rows = historyCache[zKey] || [];
+    rows.forEach(r => allRows.push({...r, _zone: zKey}));
+  }
+  allRows.sort((a,b) => b.ts > a.ts ? 1 : -1);
+  const top10 = allRows.slice(0, 10);
+  if (!top10.length) { tbody.innerHTML = '<tr><td colspan="9" class="no-data">No history yet.</td></tr>'; return; }
+  tbody.innerHTML = top10.map(r => `<tr>
     <td>${r.ts}</td>
+    <td>${r._zone === '__unzoned__' ? '<em style="color:#aabbc8">Unzoned</em>' : esc(r._zone || '')}</td>
     <td>${r.temp_f != null ? r.temp_f.toFixed(1) + '\\u00b0F' : '\\u2014'}</td>
     <td style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '\\u2014'}</td>
     <td style="color:${orpColor(r.orp)}">${r.orp != null ? r.orp : '\\u2014'}</td>
@@ -7711,65 +8170,84 @@ function updateHistoryTable(rows) {
   </tr>`).join('');
 }
 
+async function fetchZoneHistory(zoneKey) {
+  const base = '/api/water-chemistry/history';
+  const zp = zoneKey ? '&zone=' + encodeURIComponent(zoneKey) : '';
+  if (mode === 'recent') {
+    const xMax = new Date(Date.now() + offsetMs);
+    const xMin = new Date(xMax.getTime() - rangeDays * 86400000);
+    return await fetchJSON(base + '?limit=100000&bucket_minutes=' + getBucket()
+      + '&start=' + encodeURIComponent(localISO(xMin))
+      + '&end='   + encodeURIComponent(localISO(xMax)) + zp);
+  } else if (mode === 'month') {
+    return await fetchJSON('/api/water-chemistry/history/month?month=' + activeMonth
+      + '&bucket_minutes=' + getBucket() + zp);
+  } else {
+    return await fetchJSON('/api/water-chemistry/history/year?bucket_minutes=' + getBucket() + zp);
+  }
+}
+
 async function loadHistoryForChart() {
-  const label = document.getElementById('label-sel').value;
-  if (!label) return;
   try {
-    let rows;
     if (mode === 'recent') {
       const xMax = new Date(Date.now() + offsetMs);
       const xMin = new Date(xMax.getTime() - rangeDays * 86400000);
       chartXMin = xMin; chartXMax = xMax;
       chartXUnit = rangeDays <= 1 ? 'hour' : 'day';
-      rows = await fetchJSON('/api/pool/history?label=' + encodeURIComponent(label)
-        + '&start=' + encodeURIComponent(localISO(xMin))
-        + '&end='   + encodeURIComponent(localISO(xMax))
-        + '&limit=100000&bucket_minutes=' + getBucket());
-      historyRows = rows;
-      renderChart();
-      updateHistoryTable(rows);
-      const peek = await fetchJSON('/api/pool/history?label=' + encodeURIComponent(label)
-        + '&end=' + encodeURIComponent(localISO(xMin)) + '&limit=1');
-      document.getElementById('btn-prev').disabled = peek.length === 0;
-      document.getElementById('btn-next').disabled = offsetMs >= 0;
     } else if (mode === 'month') {
       chartXMin = new Date(2000, activeMonth - 1, 1);
       chartXMax = new Date(2000, activeMonth, 0, 23, 59, 59);
       chartXUnit = 'day';
-      rows = await fetchJSON('/api/pool/history/month?label=' + encodeURIComponent(label)
-        + '&month=' + activeMonth + '&bucket_minutes=' + getBucket());
-      historyRows = rows;
-      renderChart();
     } else {
       chartXMin = new Date(2000, 0, 1);
       chartXMax = new Date(2000, 11, 31, 23, 59, 59);
       chartXUnit = 'month';
-      rows = await fetchJSON('/api/pool/history/year?label=' + encodeURIComponent(label)
-        + '&bucket_minutes=' + getBucket());
-      historyRows = rows;
-      renderChart();
     }
-    document.getElementById('resp-size').textContent = rows.length + ' pts';
+
+    // If no zones defined, fall back to unfiltered all-data view
+    const zonesOrFallback = activeZones.size > 0 ? [...activeZones] : [null];
+
+    let totalPts = 0;
+    for (const zKey of zonesOrFallback) {
+      if (!historyCache[zKey]) {
+        historyCache[zKey] = await fetchZoneHistory(zKey);
+      }
+      totalPts += historyCache[zKey].length;
+    }
+
+    renderChart();
+    updateHistoryTable();
+    document.getElementById('resp-size').textContent = totalPts + ' pts';
+
+    if (mode === 'recent') {
+      const xMin = chartXMin;
+      const firstZone = zonesOrFallback[0];
+      const zp = firstZone ? '&zone=' + encodeURIComponent(firstZone) : '';
+      const peek = await fetchJSON('/api/water-chemistry/history?end=' + encodeURIComponent(localISO(xMin)) + '&limit=1' + zp);
+      document.getElementById('btn-prev').disabled = peek.length === 0;
+      document.getElementById('btn-next').disabled = offsetMs >= 0;
+    }
   } catch(e) { showError('Failed to load history: ' + e.message); }
 }
 
-function onLabelChange() {
-  historyRows = [];
-  if (poolChart) { poolChart.destroy(); poolChart = null; }
-  loadHistoryForChart();
-}
-
 loadNode();
-loadCurrent().then(() => { loadHistoryForChart(); });
+loadZones();
+loadCurrent();
 setInterval(loadCurrent, 30000);
 </script>
 </body>
 </html>"""
 
 
+@app.get("/water-chemistry")
+def water_chemistry_page():
+    return Response(_WATER_CHEM_PAGE, mimetype="text/html")
+
+
 @app.get("/pool")
-def pool_page():
-    return Response(_POOL_PAGE, mimetype="text/html")
+def pool_page_redirect():
+    from flask import redirect
+    return redirect("/water-chemistry", code=301)
 
 
 @app.get("/api/rssi")
