@@ -8202,9 +8202,10 @@ function updateHistoryTable() {
   const tbody = document.getElementById('hist-body');
   let displayRows;
   if (latestPerZone) {
-    // One latest row per active zone
+    // One latest row per active named zone (skip unzoned)
     displayRows = [];
     for (const zKey of activeZones) {
+      if (zKey === '__unzoned__') continue;
       const rows = historyCache[zKey] || [];
       if (rows.length) {
         const latest = rows.reduce((a, b) => a.ts > b.ts ? a : b);
