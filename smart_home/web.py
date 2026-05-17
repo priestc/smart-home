@@ -7231,14 +7231,18 @@ def api_wc_zones_create():
 
 @app.delete("/api/water-chemistry/zones/<int:zone_id>")
 def api_wc_zones_delete(zone_id):
-    """Delete a water chemistry zone by ID."""
+    """Delete a water chemistry zone by ID. ?purge=true also deletes all readings for that zone."""
+    purge = request.args.get("purge") == "true"
     with _conn() as conn:
         row = conn.execute("SELECT name FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
         if row is None:
             return jsonify({"error": "zone not found"}), 404
+        zone_name = row["name"]
         conn.execute("DELETE FROM wc_zones WHERE id=?", (zone_id,))
+        if purge:
+            conn.execute("DELETE FROM pool_readings WHERE zone=?", (zone_name,))
         conn.commit()
-    return jsonify({"ok": True, "id": zone_id})
+    return jsonify({"ok": True, "id": zone_id, "purged": purge})
 
 
 @app.post("/api/water-chemistry/move")
@@ -7815,19 +7819,44 @@ async function addZone() {
   } catch(e) { showError('Failed to add zone: ' + e.message); }
 }
 
-async function deleteZone(id, name) {
-  if (!confirm(`Delete zone "${name}"? Historical data tagged with this zone is kept.`)) return;
+function deleteZone(id, name) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:999;display:flex;align-items:center;justify-content:center;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:14px;padding:1.5rem 1.75rem;max-width:360px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.18);';
+  box.innerHTML = `
+    <div style="font-size:1rem;font-weight:700;color:#1a2535;margin-bottom:.4rem">Delete zone &#8220;${esc(name)}&#8221;?</div>
+    <div style="font-size:.85rem;color:#5a6e84;margin-bottom:1.25rem">What should happen to historical readings tagged with this zone?</div>
+    <div style="display:flex;flex-direction:column;gap:.55rem">
+      <button id="dz-keep"   style="text-align:left;padding:.6rem .9rem;border-radius:9px;border:1.5px solid #d0dce8;background:#fff;cursor:pointer;font-size:.88rem;font-weight:600;color:#1a2535">Keep historical data &mdash; <span style="font-weight:400;color:#5a6e84">readings stay, zone label removed</span></button>
+      <button id="dz-purge"  style="text-align:left;padding:.6rem .9rem;border-radius:9px;border:1.5px solid #fba8a8;background:#fff5f5;cursor:pointer;font-size:.88rem;font-weight:600;color:#c0392b">Delete historical data &mdash; <span style="font-weight:400">permanently remove all readings for this zone</span></button>
+      <button id="dz-cancel" style="padding:.5rem .9rem;border-radius:9px;border:1.5px solid #d0dce8;background:#f8fafc;cursor:pointer;font-size:.85rem;color:#7a90a8;margin-top:.2rem">Cancel</button>
+    </div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  const close = () => document.body.removeChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  box.querySelector('#dz-cancel').onclick = close;
+  box.querySelector('#dz-keep').onclick  = () => { close(); doDeleteZone(id, name, false); };
+  box.querySelector('#dz-purge').onclick = () => { close(); doDeleteZone(id, name, true);  };
+}
+
+async function doDeleteZone(id, name, purge) {
   try {
-    const r = await fetch('/api/water-chemistry/zones/' + id, {method:'DELETE'});
+    const url = '/api/water-chemistry/zones/' + id + (purge ? '?purge=true' : '');
+    const r = await fetch(url, {method: 'DELETE'});
     const body = await r.json();
     if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
     zones = zones.filter(z => z.id !== id);
     activeZones.delete(name);
     delete historyCache[name];
-    _hasUnzoned = true; // orphaned readings now become "unzoned"
-    if (!activeZones.has('__unzoned__')) activeZones.add('__unzoned__');
+    if (!purge) {
+      _hasUnzoned = true;
+      if (!activeZones.has('__unzoned__')) activeZones.add('__unzoned__');
+    }
     renderZoneButtons();
-    renderChart();
+    invalidateHistoryCache();
+    loadHistoryForChart();
   } catch(e) { showError('Failed to delete zone: ' + e.message); }
 }
 
