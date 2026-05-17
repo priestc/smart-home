@@ -7653,7 +7653,13 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     <canvas id="pool-chart"></canvas>
   </div>
 
-  <div class="section" style="margin-bottom:.75rem">Raw data</div>
+  <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem">
+    <div class="section" style="margin-bottom:0">Raw data</div>
+    <button id="latest-per-zone-btn" onclick="toggleLatestPerZone()"
+      style="font-size:.75rem;padding:.25rem .6rem;border-radius:4px;border:1px solid #445;background:#2a3a4a;color:#8ab;cursor:pointer">
+      Latest from each zone
+    </button>
+  </div>
   <table id="hist-table">
     <thead>
       <tr>
@@ -7672,6 +7678,7 @@ const UNZONED_COLOR = '#aabbc8';
 let zones = [];           // [{id, name}] from API
 let activeZones = new Set(); // zone keys currently on
 let historyCache = {};    // zoneKey -> rows
+let latestPerZone = false;
 let poolChart   = null;
 let chartXMin = null, chartXMax = null, chartXUnit = 'hour';
 let mode = 'recent', rangeDays = 1, activeMonth = null, offsetMs = 0;
@@ -8175,18 +8182,47 @@ async function loadCurrent() {
 }
 
 // ── History ───────────────────────────────────────────────────────────────────
+function toggleLatestPerZone() {
+  latestPerZone = !latestPerZone;
+  const btn = document.getElementById('latest-per-zone-btn');
+  if (latestPerZone) {
+    btn.style.background = '#3a6a9a';
+    btn.style.color = '#def';
+    btn.style.borderColor = '#5af';
+  } else {
+    btn.style.background = '#2a3a4a';
+    btn.style.color = '#8ab';
+    btn.style.borderColor = '#445';
+  }
+  updateHistoryTable();
+}
+
 function updateHistoryTable() {
   const tbody = document.getElementById('hist-body');
-  // Collect rows from all active zones, sort by ts desc, take latest 10
-  const allRows = [];
-  for (const zKey of activeZones) {
-    const rows = historyCache[zKey] || [];
-    rows.forEach(r => allRows.push({...r, _zone: zKey}));
+  let displayRows;
+  if (latestPerZone) {
+    // One latest row per active zone
+    displayRows = [];
+    for (const zKey of activeZones) {
+      const rows = historyCache[zKey] || [];
+      if (rows.length) {
+        const latest = rows.reduce((a, b) => a.ts > b.ts ? a : b);
+        displayRows.push({...latest, _zone: zKey});
+      }
+    }
+    displayRows.sort((a,b) => b.ts > a.ts ? 1 : -1);
+  } else {
+    // Collect rows from all active zones, sort by ts desc, take latest 10
+    const allRows = [];
+    for (const zKey of activeZones) {
+      const rows = historyCache[zKey] || [];
+      rows.forEach(r => allRows.push({...r, _zone: zKey}));
+    }
+    allRows.sort((a,b) => b.ts > a.ts ? 1 : -1);
+    displayRows = allRows.slice(0, 10);
   }
-  allRows.sort((a,b) => b.ts > a.ts ? 1 : -1);
-  const top10 = allRows.slice(0, 10);
-  if (!top10.length) { tbody.innerHTML = '<tr><td colspan="9" class="no-data">No history yet.</td></tr>'; return; }
-  tbody.innerHTML = top10.map(r => `<tr>
+  if (!displayRows.length) { tbody.innerHTML = '<tr><td colspan="9" class="no-data">No history yet.</td></tr>'; return; }
+  tbody.innerHTML = displayRows.map(r => `<tr>
     <td>${r.ts}</td>
     <td>${r._zone === '__unzoned__' ? '<em style="color:#aabbc8">Unzoned</em>' : esc(r._zone || '')}</td>
     <td>${r.temp_f != null ? r.temp_f.toFixed(1) + '\\u00b0F' : '\\u2014'}</td>
