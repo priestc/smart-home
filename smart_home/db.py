@@ -142,12 +142,12 @@ def open_db(path: str) -> sqlite3.Connection:
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS pool_readings_label_ts ON pool_readings (label, ts DESC)")
-    conn.execute("CREATE INDEX IF NOT EXISTS pool_readings_zone_ts ON pool_readings (zone, ts DESC)")
     try:
         conn.execute("ALTER TABLE pool_readings ADD COLUMN zone TEXT")
         conn.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
+    conn.execute("CREATE INDEX IF NOT EXISTS pool_readings_zone_ts ON pool_readings (zone, ts DESC)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS wc_zones (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
