@@ -8115,7 +8115,7 @@ async function loadCurrent() {
     wrap.innerHTML = rows.map((r, ri) => `
       <div class="device-card">
         <div class="device-header">
-          <span class="device-name">${esc(r.label)}</span>
+          <span class="device-name">BLE-YC01</span>
           <span class="device-status ${r.offline ? 'offline' : 'online'}">${r.offline ? '&#9679; Offline' : '&#9679; Online'}</span>
           <span style="font-size:.75rem;color:#aabbc8">${ago(r.ts)}</span>
         </div>
