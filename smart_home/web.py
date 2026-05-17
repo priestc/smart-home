@@ -152,8 +152,8 @@ def ble_relay():
                     if rssi is not None:
                         labeled_seen[reading.label] = rssi
 
-        # Handle pool reading if included in the batch (pool-monitor relays only).
-        pool_reading = data.get("pool_reading") or {}
+        # Handle BLE-YC01 reading if included in the batch.
+        pool_reading = data.get("ble_yc01_reading") or {}
         _pool_reading_stored = False
         if pool_reading:
             pool_result_hex = pool_reading.get("result_hex") or ""
@@ -220,11 +220,11 @@ def ble_relay():
                         )
                         from smart_home import push as _push
                         _push.send_notification(
-                            title="Pool Monitor Online",
+                            title="BLE-YC01 Online",
                             body=f"{_evt_label} is back online",
                         )
 
-                elif data.get("pool_offline") and not data.get("pool_seen") and not data.get("pool_skip"):
+                elif data.get("ble_yc01_offline") and not data.get("ble_yc01_seen") and not data.get("ble_yc01_skip"):
                     # Device not found in scan — fire offline if we were online.
                     if _last_pool_evt is None or _last_pool_evt[0] == "sensor_online":
                         conn.execute(
@@ -233,20 +233,20 @@ def ble_relay():
                         )
                         from smart_home import push as _push
                         _push.send_notification(
-                            title="Pool Monitor Offline",
+                            title="BLE-YC01 Offline",
                             body=f"{_evt_label} has stopped responding",
                         )
 
         # Log this relay check-in for `smart-home relay-log`
         import json as _json
-        if data.get("pool_skip"):
+        if data.get("ble_yc01_skip"):
             labeled_seen["_pool_skip"] = True
-        if data.get("pool_offline"):
+        if data.get("ble_yc01_offline"):
             labeled_seen["_pool_offline"] = True
-        if data.get("pool_seen"):
+        if data.get("ble_yc01_seen"):
             labeled_seen["_pool_seen"] = True
-        if data.get("pool_status"):
-            labeled_seen["_pool_status"] = data["pool_status"]
+        if data.get("ble_yc01_status"):
+            labeled_seen["_pool_status"] = data["ble_yc01_status"]
         if data.get("buffered"):
             labeled_seen["_buffered"] = True
         conn.execute(
@@ -361,7 +361,7 @@ def ble_relay():
     assigned = next(
         (m for m in pool_monitors if m.get("node") == relay_cfg["id"]), None
     )
-    response["pool_monitor"] = {
+    response["ble_yc01"] = {
         "address": assigned["address"],
         "label": assigned.get("label", assigned["address"]),
         "poll_skip_cycles": max(0, assigned.get("poll_interval_s", 60) // 30 - 1),
@@ -7079,7 +7079,7 @@ def api_pool_node_set():
     if node not in valid:
         return jsonify({"error": f"unknown node: {node}"}), 400
     if not _pool.set_node(label, node):
-        return jsonify({"error": f"pool monitor '{label}' not found"}), 404
+        return jsonify({"error": f"BLE-YC01 device '{label}' not found"}), 404
     return jsonify({"ok": True, "label": label, "node": node})
 
 
@@ -7094,7 +7094,7 @@ def api_pool_poll_rate_set():
     if not label or interval_s not in valid:
         return jsonify({"error": "label and valid interval_s (30/60) required"}), 400
     if not _pool.set_poll_interval(label, interval_s):
-        return jsonify({"error": f"pool monitor '{label}' not found"}), 404
+        return jsonify({"error": f"BLE-YC01 device '{label}' not found"}), 404
     return jsonify({"ok": True, "label": label, "interval_s": interval_s})
 
 
@@ -7146,7 +7146,7 @@ def api_pool_relay_reading():
         )
         return jsonify({
             "ok": True,
-            "pool_monitor": {
+            "ble_yc01": {
                 "address": assigned["address"],
                 "label": assigned.get("label", assigned["address"]),
             } if assigned else None,
@@ -7187,14 +7187,14 @@ def api_pool_relay_reading():
                 ")"
             )
 
-    # Return current pool_monitor assignment so the relay knows if it should stop.
+    # Return current BLE-YC01 assignment so the relay knows if it should stop.
     monitors = _pool.load_config()
     assigned = next(
         (m for m in monitors if m.get("node") == relay_cfg["id"]), None
     )
     return jsonify({
         "ok": True,
-        "pool_monitor": {
+        "ble_yc01": {
             "address": assigned["address"],
             "label": assigned.get("label", assigned["address"]),
             "poll_skip_cycles": max(0, assigned.get("poll_interval_s", 60) // 30 - 1),
@@ -7640,7 +7640,7 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     <button class="metric-btn"        data-metric="chlorine" data-label="Free Cl"     data-unit="mg/L"  data-desc="Free Chlorine — the active chlorine available to sanitize the water. Ideal: 1–3 mg/L. Below 0.5 or above 5 is a problem.">Free Cl</button>
     <button class="metric-btn"        data-metric="ec"       data-label="EC"          data-unit="µS/cm" data-desc="Electrical Conductivity — measures how well water conducts electricity, which is a proxy for total dissolved minerals and salts. Higher EC means more dissolved substances.">EC</button>
     <button class="metric-btn"        data-metric="tds"      data-label="TDS"         data-unit="ppm"   data-desc="Total Dissolved Solids — the sum of all dissolved substances (salts, minerals, chemicals) in parts per million. Closely related to EC. Very high TDS can mean it&apos;s time to partially drain and refill.">TDS</button>
-    <button class="metric-btn"        data-metric="battery"  data-label="Battery"     data-unit="%"     data-desc="Battery level of the pool monitor sensor.">Battery</button>
+    <button class="metric-btn"        data-metric="battery"  data-label="Battery"     data-unit="%"     data-desc="Battery level of the BLE-YC01 sensor.">Battery</button>
   </div>
 
   <div id="metric-desc" class="metric-desc"></div>

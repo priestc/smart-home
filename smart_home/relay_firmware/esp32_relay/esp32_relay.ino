@@ -48,8 +48,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.53"
-#define FIRMWARE_REV          60
+#define FIRMWARE_VERSION      "1.7.54"
+#define FIRMWARE_REV          61
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -531,21 +531,21 @@ static bool httpPost(const String& payload, bool parse_gatt) {
                     Serial.printf("Pair mode requested for label: '%s'\n",
                                   g_pair_label.c_str());
                 }
-                // Check for pool monitor assignment change
-                if (!rdoc["pool_monitor"].isNull()) {
-                    String new_addr  = rdoc["pool_monitor"]["address"].as<String>();
-                    String new_label = rdoc["pool_monitor"]["label"].as<String>();
-                    if (rdoc["pool_monitor"]["poll_skip_cycles"].is<int>()) {
-                        int new_skip = rdoc["pool_monitor"]["poll_skip_cycles"].as<int>();
+                // Check for BLE-YC01 assignment change
+                if (!rdoc["ble_yc01"].isNull()) {
+                    String new_addr  = rdoc["ble_yc01"]["address"].as<String>();
+                    String new_label = rdoc["ble_yc01"]["label"].as<String>();
+                    if (rdoc["ble_yc01"]["poll_skip_cycles"].is<int>()) {
+                        int new_skip = rdoc["ble_yc01"]["poll_skip_cycles"].as<int>();
                         if (new_skip != g_poll_skip_cycles) {
                             g_poll_skip_cycles = new_skip;
                             savePollSkipCycles(new_skip);
-                            Serial.printf("Pool: poll rate updated — skip %d cycle(s) (%ds interval)\n",
+                            Serial.printf("BLE-YC01: poll rate updated — skip %d cycle(s) (%ds interval)\n",
                                           new_skip, (new_skip + 1) * 30);
                         }
                     }
                     if (new_addr != g_pool_addr) {
-                        Serial.printf("Pool monitor assigned: %s (%s)\n",
+                        Serial.printf("BLE-YC01 assigned: %s (%s)\n",
                                       new_label.c_str(), new_addr.c_str());
                         savePoolMonitor(new_addr, new_label);
                         g_pool_addr  = new_addr;
@@ -553,7 +553,7 @@ static bool httpPost(const String& payload, bool parse_gatt) {
                         poolDisconnect();
                     }
                 } else if (g_pool_addr.length() > 0) {
-                    Serial.println("Pool monitor cleared by server");
+                    Serial.println("BLE-YC01 cleared by server");
                     savePoolMonitor("", "");
                     g_pool_addr  = "";
                     g_pool_label = "";
@@ -634,12 +634,12 @@ static String buildPayload(bool include_presence, bool pool_offline = false,
         }
     }
 
-    if (pool_skip) doc["pool_skip"] = true;
-    if (pool_offline && !pool_skip) doc["pool_offline"] = true;
-    if (pool_offline && pool_seen && !pool_skip) doc["pool_seen"] = true;
-    if (g_pool_status.length() > 0) doc["pool_status"] = g_pool_status;
+    if (pool_skip) doc["ble_yc01_skip"] = true;
+    if (pool_offline && !pool_skip) doc["ble_yc01_offline"] = true;
+    if (pool_offline && pool_seen && !pool_skip) doc["ble_yc01_seen"] = true;
+    if (g_pool_status.length() > 0) doc["ble_yc01_status"] = g_pool_status;
     if (pool_hex.length() > 0) {
-        JsonObject pr = doc["pool_reading"].to<JsonObject>();
+        JsonObject pr = doc["ble_yc01_reading"].to<JsonObject>();
         pr["address"]    = g_pool_addr;
         pr["label"]      = g_pool_label;
         pr["result_hex"] = pool_hex;
@@ -723,13 +723,13 @@ static void resetBLEStack() {
     // We abandon g_pool_client without deleting: after deinit the GATT resources
     // are released by the stack, and calling the destructor on a dead interface
     // could crash.
-    Serial.println("Pool: resetting BLE stack after connect timeout");
+    Serial.println("BLE-YC01:resetting BLE stack after connect timeout");
     g_pool_client = nullptr;
     String ble_name = String("SmHome-") + g_id;
     BLEDevice::deinit();
     delay(500);
     BLEDevice::init(ble_name.c_str());
-    Serial.println("Pool: BLE stack reset complete");
+    Serial.println("BLE-YC01:BLE stack reset complete");
 }
 
 // Sleep until the next 30-second clock boundary for this relay's assigned offset.
@@ -773,12 +773,12 @@ static void doPoolMonitorCycle() {
     if (WiFi.status() != WL_CONNECTED) {
         s_pool_wifi_fails++;
         if (s_pool_wifi_fails % 4 == 0) {
-            Serial.printf("Pool: WiFi lost (%d failures) — full reconnect\n", s_pool_wifi_fails);
+            Serial.printf("BLE-YC01:WiFi lost (%d failures) — full reconnect\n", s_pool_wifi_fails);
             WiFi.disconnect();
             delay(1000);
             WiFi.begin(g_ssid, g_pass);
         } else {
-            Serial.println("Pool: WiFi lost — reconnecting...");
+            Serial.println("BLE-YC01:WiFi lost — reconnecting...");
             WiFi.reconnect();
         }
         delay(5000);
@@ -835,7 +835,7 @@ static void doPoolMonitorCycle() {
             if (di.name.startsWith("BLE_YC01") || di.name.startsWith("BLE-YC01")) {
                 cur_addr = String(kv.first.c_str());
                 cur_type = (uint8_t)di.addr_type;
-                Serial.printf("Pool: found '%s' at %s type=%d\n",
+                Serial.printf("BLE-YC01:found '%s' at %s type=%d\n",
                               di.name.c_str(), cur_addr.c_str(), cur_type);
                 break;
             }
@@ -847,7 +847,7 @@ static void doPoolMonitorCycle() {
             if (it != g_seen.end()) {
                 cur_addr = String(it->first.c_str());
                 cur_type = (uint8_t)it->second.addr_type;
-                Serial.printf("Pool: found by addr %s type=%d\n",
+                Serial.printf("BLE-YC01:found by addr %s type=%d\n",
                               cur_addr.c_str(), cur_type);
             }
         }
@@ -858,7 +858,7 @@ static void doPoolMonitorCycle() {
         // retry immediately rather than waiting out the configured interval.
         do_gatt = pool_seen_now && (s_pool_skip_counter == 0);
         if (s_pool_skip_counter > 0) {
-            Serial.printf("Pool: skip cycle (%d remaining)\n", s_pool_skip_counter);
+            Serial.printf("BLE-YC01:skip cycle (%d remaining)\n", s_pool_skip_counter);
             s_pool_skip_counter--;
         }
         if (do_gatt) {
@@ -872,7 +872,7 @@ static void doPoolMonitorCycle() {
                 millis() >= g_pool_retry_after_ms) {
                 g_current_op = "pool-connect";
                 unsigned long connect_start = millis();
-                Serial.printf("Pool: connecting to %s (%s) type=%d...\n",
+                Serial.printf("BLE-YC01:connecting to %s (%s) type=%d...\n",
                               g_pool_label.c_str(), cur_addr.c_str(), cur_type);
                 bool ok = g_pool_client->connect(
                     BLEAddress(cur_addr.c_str(), cur_type),
@@ -886,7 +886,7 @@ static void doPoolMonitorCycle() {
                     g_pool_status = connect_ms < 2000 ? "connect_fail_fast" : "connect_timeout";
                     s_pool_last_read_ok = false;
                     s_pool_skip_counter = 0;
-                    Serial.printf("Pool: connect failed in %lums (fail #%d) [%s], retry in %lus\n",
+                    Serial.printf("BLE-YC01:connect failed in %lums (fail #%d) [%s], retry in %lus\n",
                                   connect_ms, g_pool_fails, g_pool_status.c_str(),
                                   POOL_RETRY_INTERVAL_MS / 1000UL);
                     if (connect_ms >= 2000) {
@@ -895,7 +895,7 @@ static void doPoolMonitorCycle() {
                         // BLEDevice::deinit() can briefly disrupt WiFi coexistence; reconnect if needed.
                         resetBLEStack();
                         if (WiFi.status() != WL_CONNECTED) {
-                            Serial.println("Pool: WiFi dropped after BLE reset — reconnecting");
+                            Serial.println("BLE-YC01:WiFi dropped after BLE reset — reconnecting");
                             WiFi.reconnect();
                             delay(3000);
                         }
@@ -906,7 +906,7 @@ static void doPoolMonitorCycle() {
                     g_pool_fails = 0;
                     g_pool_retry_after_ms = 0;
                     g_pool_status = "";
-                    Serial.printf("Pool: connected to %s in %lums\n",
+                    Serial.printf("BLE-YC01:connected to %s in %lums\n",
                                   g_pool_label.c_str(), connect_ms);
                 }
             }
@@ -930,7 +930,7 @@ static void doPoolMonitorCycle() {
                         if (c && c->canRead()) { chr = c; break; }
                     }
                 }
-                Serial.printf("Pool: services found: [%s]\n", svc_uuids.c_str());
+                Serial.printf("BLE-YC01:services found: [%s]\n", svc_uuids.c_str());
 
                 if (chr) {
                     g_current_op = "pool-read";
@@ -943,7 +943,7 @@ static void doPoolMonitorCycle() {
                         g_pool_status = "";
                         s_pool_last_read_ok = true;
                         s_pool_skip_counter = g_poll_skip_cycles;
-                        Serial.printf("Pool: read %u bytes\n", (unsigned)val.length());
+                        Serial.printf("BLE-YC01:read %u bytes\n", (unsigned)val.length());
                         // Disconnect immediately after reading — mirrors Python's connect-read-disconnect
                         // pattern. Keeping the connection open risks hanging on the next readValue()
                         // or getServices() call if the YC01 goes out of range before we reconnect.
@@ -952,7 +952,7 @@ static void doPoolMonitorCycle() {
                         g_pool_status = "empty_read";
                         s_pool_last_read_ok = false;
                         s_pool_skip_counter = 0;
-                        Serial.println("Pool: empty GATT read");
+                        Serial.println("BLE-YC01:empty GATT read");
                         poolDisconnect();
                         g_pool_fails++;
                         // Connection was healthy — no cooldown needed, retry next cycle.
@@ -962,7 +962,7 @@ static void doPoolMonitorCycle() {
                     g_pool_status = String("no_char svcs:") + (pSvcs ? String(pSvcs->size()) : "null");
                     s_pool_last_read_ok = false;
                     s_pool_skip_counter = 0;
-                    Serial.printf("Pool: characteristic not found across %s\n", svc_uuids.c_str());
+                    Serial.printf("BLE-YC01:characteristic not found across %s\n", svc_uuids.c_str());
                     poolDisconnect();
                     g_pool_fails++;
                     // Connection was healthy — no cooldown needed, retry next cycle.
@@ -1021,7 +1021,7 @@ void setup() {
 
     loadPoolMonitor();
     if (g_pool_addr.length() > 0) {
-        Serial.printf("Pool monitor mode active: %s (%s)\n",
+        Serial.printf("BLE-YC01 mode active: %s (%s)\n",
                       g_pool_label.c_str(), g_pool_addr.c_str());
     }
 

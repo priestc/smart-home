@@ -410,7 +410,7 @@ def list_devices():
     pool_monitors = _pool.load_config()
     if pool_monitors:
         any_found = True
-        click.echo("\n  Pool Monitors:")
+        click.echo("\n  BLE-YC01 devices:")
         click.echo("  " + "-" * 50)
         for p in pool_monitors:
             click.echo(f"  {p.get('label', ''):<24} BLE_YC01 ({p.get('address', '')})")
@@ -607,13 +607,13 @@ def relay_log(db):
 
         if is_pool:
             if row["n_inserted"] == 0:
-                parts.append(click.style("pool offline", fg="yellow"))
+                parts.append(click.style("BLE-YC01 offline", fg="yellow"))
                 return "  ".join(parts)
             if row["labeled_json"]:
                 ldata = _json.loads(row["labeled_json"])
                 for lbl, rssi in sorted((k, v) for k, v in ldata.items() if not k.startswith("_")):
                     parts.append(click.style(f"{lbl} {rssi}dBm", fg="magenta"))
-            parts.append(click.style("pool", fg="cyan"))
+            parts.append(click.style("BLE-YC01", fg="cyan"))
             return "  ".join(parts)
 
         parts.append(click.style(rev_str, fg="cyan"))
@@ -635,13 +635,13 @@ def relay_log(db):
         for label, rssi in sorted((k, v) for k, v in labeled.items() if not k.startswith("_")):
             parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
         if labeled.get("_pool_skip"):
-            parts.append(click.style("pool: skip", fg="white", dim=True))
+            parts.append(click.style("BLE-YC01: skip", fg="white", dim=True))
         elif labeled.get("_pool_seen"):
             status = labeled.get("_pool_status") or "unknown"
-            parts.append(click.style(f"pool: no reading [{status}]", fg="blue"))
+            parts.append(click.style(f"BLE-YC01: no reading [{status}]", fg="blue"))
         elif labeled.get("_pool_offline"):
             status = labeled.get("_pool_status", "")
-            label = f"pool: {status}" if status else "pool offline"
+            label = f"BLE-YC01: {status}" if status else "BLE-YC01 offline"
             parts.append(click.style(label, fg="yellow"))
         if labeled.get("_buffered"):
             parts.append(click.style("*buffered", fg="cyan"))
@@ -1104,7 +1104,7 @@ def configure_pool_monitor(timeout):
     Scans for BLE_YC01 advertisements and saves the device's MAC address and
     a user-assigned label to ~/.config/smart-home/pool_monitors.json.
     """
-    click.echo("\nPool Monitor Setup\n")
+    click.echo("\nBLE-YC01 Setup\n")
     click.echo(f"Scanning for BLE_YC01 devices ({int(timeout)}s)...")
     found: dict[str, str] = {}  # address -> ble name
 
@@ -1137,7 +1137,7 @@ def configure_pool_monitor(timeout):
         idx = click.prompt("\nWhich one?", type=click.IntRange(1, len(items))) - 1
         addr, ble_name = items[idx]
 
-    label = click.prompt("Label for this pool monitor (e.g. 'pool')").strip()
+    label = click.prompt("Label for this BLE-YC01 device (e.g. 'swimming-pool')").strip()
 
     monitors = _pool.load_config()
     existing = next((m for m in monitors if m["address"] == addr), None)
@@ -1146,7 +1146,7 @@ def configure_pool_monitor(timeout):
         click.echo(f"Updated existing entry for {addr}.")
     else:
         monitors.append({"address": addr, "label": label})
-        click.echo(f"Added pool monitor '{label}' ({addr}).")
+        click.echo(f"Added BLE-YC01 '{label}' ({addr}).")
 
     _pool.save_config(monitors)
     click.echo("\nSaved. Run 'smart-home monitor' to start polling this device.")
@@ -1211,8 +1211,8 @@ def remove_device(name, purge, db):
     new_pool = [p for p in pool_monitors if p.get("label", "").lower() != name_lower and p.get("address", "").lower() != name_lower]
     if len(new_pool) < len(pool_monitors):
         _pool.save_config(new_pool)
-        click.echo(f"Removed pool monitor '{name}'.")
-        removed.append("pool monitor")
+        click.echo(f"Removed BLE-YC01 '{name}'.")
+        removed.append("BLE-YC01")
 
     if not removed:
         click.echo(f"No device found matching {name!r}.")
@@ -1826,7 +1826,7 @@ def monitor(duration, verbose, db, no_db):
             ).fetchone()
             if row:
                 pool_last_reading[pool_lbl] = datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
-                click.echo(f"Pool monitor '{pool_lbl}' last reading: {row[0]}")
+                click.echo(f"BLE-YC01 '{pool_lbl}' last reading: {row[0]}")
 
     # Identify relay-connected pools (node != "server"). Their pool_last_reading is
     # never updated by _yc01_persistent_loop, so snapshot_loop must refresh from DB.
@@ -1856,7 +1856,7 @@ def monitor(duration, verbose, db, no_db):
                         (ts_now, "sensor_offline", None, pool_lbl),
                     )
                     conn.commit()
-                    click.echo(f"Pool monitor '{pool_lbl}' offline event inserted at startup")
+                    click.echo(f"BLE-YC01 '{pool_lbl}' offline event inserted at startup")
 
     # Tracks which hour-of-day the record check last ran; -1 forces a run at startup
     _last_record_check_hour = -1
@@ -1918,7 +1918,7 @@ def monitor(duration, verbose, db, no_db):
             scanner = scanner_ref[0] if scanner_ref else None
             if scanner:
                 await scanner.stop()
-            click.echo(f"[{ts}] Pool: connecting to {label} ({addr})...")
+            click.echo(f"[{ts}] BLE-YC01:connecting to {label} ({addr})...")
             try:
                 async with BleakClient(ble_device, timeout=20.0) as client:
                     fail_count = 0
@@ -1926,13 +1926,13 @@ def monitor(duration, verbose, db, no_db):
                         await scanner.start()
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
                     _, last_rssi = yc01_devices.get(addr_upper, (None, None))
-                    click.echo(f"[{ts}] Pool: connected to {label} ({addr})  rssi={last_rssi}dBm")
+                    click.echo(f"[{ts}] BLE-YC01:connected to {label} ({addr})  rssi={last_rssi}dBm")
                     while client.is_connected:
                         try:
                             raw = await client.read_gatt_char(_pool.READ_UUID)
                         except Exception as e:
                             ts = datetime.datetime.now().strftime("%H:%M:%S")
-                            click.echo(f"[{ts}] Pool: GATT read failed for {label}: {e}")
+                            click.echo(f"[{ts}] BLE-YC01:GATT read failed for {label}: {e}")
                             break
                         reading = _pool.parse_gatt_data(raw)
                         ts = datetime.datetime.now().strftime("%H:%M:%S")
@@ -1941,17 +1941,17 @@ def monitor(duration, verbose, db, no_db):
                             reading.label = label
                             _, last_rssi = yc01_devices.get(addr_upper, (None, None))
                             reading.rssi = last_rssi
-                            click.echo(f"[{ts}] Pool: {reading}")
+                            click.echo(f"[{ts}] BLE-YC01:{reading}")
                             if conn:
                                 zone = _pool.get_device_zone(label)
                                 insert_pool_reading(conn, reading, zone=zone)
                                 pool_last_reading[label] = datetime.datetime.now()
                         else:
-                            click.echo(f"[{ts}] Pool: GATT data too short from {label}")
+                            click.echo(f"[{ts}] BLE-YC01:GATT data too short from {label}")
                         await asyncio.sleep(30)
             except Exception as e:
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
-                click.echo(f"[{ts}] Pool: {label} ({addr}) connection failed: {e}")
+                click.echo(f"[{ts}] BLE-YC01:{label} ({addr}) connection failed: {e}")
                 # Remove stale cache entry — forces a fresh advertisement wait next loop.
                 yc01_devices.pop(addr_upper, None)
             finally:
@@ -1963,7 +1963,7 @@ def monitor(duration, verbose, db, no_db):
 
             fail_count += 1
             ts = datetime.datetime.now().strftime("%H:%M:%S")
-            click.echo(f"[{ts}] Pool: {label} disconnected (attempt {fail_count}), waiting for re-advertisement...")
+            click.echo(f"[{ts}] BLE-YC01:{label} disconnected (attempt {fail_count}), waiting for re-advertisement...")
 
     # latest reading per address, updated on every advertisement
     latest_reading: dict[str, object] = {}
@@ -2211,8 +2211,8 @@ def monitor(duration, verbose, db, no_db):
                             (ts, "sensor_online", None, online_details),
                         )
                         if pool_label not in _alert_config.get_suppressed_offline():
-                            _push.send_notification(title="Pool Monitor Online", body=f"{pool_label} is back online")
-                        click.echo(f"[{log_ts}] Pool monitor back online: {pool_label}")
+                            _push.send_notification(title="BLE-YC01 Online", body=f"{pool_label} is back online")
+                        click.echo(f"[{log_ts}] BLE-YC01 back online: {pool_label}")
                 else:
                     if (now_dt - last) >= POOL_OFFLINE_THRESHOLD:
                         pool_offline_alerted.add(pool_label)
@@ -2221,8 +2221,8 @@ def monitor(duration, verbose, db, no_db):
                             (ts, "sensor_offline", None, pool_label),
                         )
                         if pool_label not in _alert_config.get_suppressed_offline():
-                            _push.send_notification(title="Pool Monitor Offline", body=f"{pool_label} has stopped responding")
-                        click.echo(f"[{log_ts}] Pool monitor offline: {pool_label}")
+                            _push.send_notification(title="BLE-YC01 Offline", body=f"{pool_label} has stopped responding")
+                        click.echo(f"[{log_ts}] BLE-YC01 offline: {pool_label}")
 
             conn.commit()
             n = len(latest_reading)
