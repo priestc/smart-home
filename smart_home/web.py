@@ -7787,6 +7787,7 @@ async function loadZones() {
     renderZoneButtons();
     invalidateHistoryCache();
     loadHistoryForChart();
+    loadCurrent();
   } catch(e) { showError('Failed to load zones: ' + e.message); }
 }
 
@@ -8297,7 +8298,6 @@ async function loadHistoryForChart() {
 
 loadNode();
 loadZones();
-loadCurrent();
 setInterval(loadCurrent, 30000);
 </script>
 </body>
