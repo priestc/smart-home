@@ -7927,6 +7927,142 @@ def api_wc_history_year():
     return jsonify(result)
 
 
+_ZONES_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zones</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 1.5rem; color: #1a2535; letter-spacing: -.02em; }
+    .back { font-size: .85rem; font-weight: 500; color: #2e7dd4; text-decoration: none; margin-left: .75rem; }
+    #error-bar { display:none; background:#fde8e8; color:#c0392b; border-radius:8px; padding:.6rem 1rem; margin-bottom:1rem; font-size:.85rem; font-weight:500; }
+    .card { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); margin-bottom: 1.5rem; overflow: hidden; }
+    .card-header { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: #7a90a8; padding: .75rem 1.25rem; background: #f8fafc; border-bottom: 1px solid #e8edf3; }
+    .zone-row { display: flex; align-items: center; gap: .75rem; padding: .75rem 1.25rem; border-bottom: 1px solid #f0f4f8; }
+    .zone-row:last-child { border-bottom: none; }
+    .zone-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+    .zone-name { flex: 1; font-size: .95rem; font-weight: 600; color: #1a2535; }
+    .del-btn { font-size: .8rem; color: #c0392b; background: none; border: none; cursor: pointer; padding: .3rem .6rem; border-radius: 6px; font-weight: 600; }
+    .del-btn:hover { background: #fde8e8; }
+    .empty { padding: 1rem 1.25rem; font-size: .88rem; color: #aabbc8; }
+    .add-row { display: flex; gap: .6rem; align-items: center; padding: .75rem 1.25rem; border-top: 1px solid #f0f4f8; }
+    .add-input { flex: 1; font-size: .9rem; padding: .4rem .75rem; border: 1.5px solid #d0dce8; border-radius: 8px; color: #1a2535; outline: none; background: #fff; max-width: 280px; }
+    .add-input:focus { border-color: #2e7dd4; }
+    .add-btn { font-size: .85rem; font-weight: 700; background: #2e7dd4; color: #fff; border: none; border-radius: 8px; padding: .4rem .9rem; cursor: pointer; }
+    .add-btn:hover { background: #2569b5; }
+  </style>
+</head>
+<body>
+  <div id="error-bar"></div>
+  <h1>Zones <a class="back" href="/">&larr; Home</a></h1>
+  <div class="card">
+    <div class="card-header">All Zones</div>
+    <div id="zone-list"></div>
+    <div class="add-row">
+      <input class="add-input" id="add-input" type="text" placeholder="New zone name&hellip;"
+             onkeydown="if(event.key==='Enter')addZone()">
+      <button class="add-btn" onclick="addZone()">Add Zone</button>
+    </div>
+  </div>
+<script>
+const ZONE_COLORS = ['#2e7dd4','#e07820','#2a9d6e','#7b4fb5','#c0392b','#16a085','#d35400'];
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function showError(msg) {
+  const bar = document.getElementById('error-bar');
+  bar.style.display = '';
+  bar.textContent = msg;
+}
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+let zones = [];
+
+function renderZones() {
+  const el = document.getElementById('zone-list');
+  if (!zones.length) {
+    el.innerHTML = '<div class="empty">No zones yet. Add one below.</div>';
+    return;
+  }
+  el.innerHTML = zones.map((z, i) => `
+    <div class="zone-row">
+      <div class="zone-dot" style="background:${ZONE_COLORS[i % ZONE_COLORS.length]}"></div>
+      <span class="zone-name">${esc(z.name)}</span>
+      <button class="del-btn" onclick="confirmDelete(${z.id},'${z.name.replace(/'/g,"\\\\'")}')">Delete</button>
+    </div>`).join('');
+}
+
+async function addZone() {
+  const inp = document.getElementById('add-input');
+  const name = inp.value.trim();
+  if (!name) { inp.focus(); return; }
+  try {
+    const r = await fetch('/api/water-chemistry/zones', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({name}),
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+    zones.push(body);
+    inp.value = '';
+    renderZones();
+  } catch(e) { showError('Failed to add zone: ' + e.message); }
+}
+
+function confirmDelete(id, name) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:999;display:flex;align-items:center;justify-content:center;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:14px;padding:1.5rem 1.75rem;max-width:360px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.18);';
+  box.innerHTML = `
+    <div style="font-size:1rem;font-weight:700;color:#1a2535;margin-bottom:.4rem">Delete zone &#8220;${esc(name)}&#8221;?</div>
+    <div style="font-size:.85rem;color:#5a6e84;margin-bottom:1.25rem">What should happen to historical readings tagged with this zone?</div>
+    <div style="display:flex;flex-direction:column;gap:.55rem">
+      <button id="dz-keep"   style="text-align:left;padding:.6rem .9rem;border-radius:9px;border:1.5px solid #d0dce8;background:#fff;cursor:pointer;font-size:.88rem;font-weight:600;color:#1a2535">Keep historical data &mdash; <span style="font-weight:400;color:#5a6e84">readings stay, zone label removed</span></button>
+      <button id="dz-purge"  style="text-align:left;padding:.6rem .9rem;border-radius:9px;border:1.5px solid #fba8a8;background:#fff5f5;cursor:pointer;font-size:.88rem;font-weight:600;color:#c0392b">Delete historical data &mdash; <span style="font-weight:400">permanently remove all readings for this zone</span></button>
+      <button id="dz-cancel" style="padding:.5rem .9rem;border-radius:9px;border:1.5px solid #d0dce8;background:#f8fafc;cursor:pointer;font-size:.85rem;color:#7a90a8;margin-top:.2rem">Cancel</button>
+    </div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  const close = () => document.body.removeChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  box.querySelector('#dz-cancel').onclick = close;
+  box.querySelector('#dz-keep').onclick  = () => { close(); doDeleteZone(id, name, false); };
+  box.querySelector('#dz-purge').onclick = () => { close(); doDeleteZone(id, name, true);  };
+}
+
+async function doDeleteZone(id, name, purge) {
+  try {
+    const url = '/api/water-chemistry/zones/' + id + (purge ? '?purge=true' : '');
+    const r = await fetch(url, {method: 'DELETE'});
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+    zones = zones.filter(z => z.id !== id);
+    renderZones();
+  } catch(e) { showError('Failed to delete zone: ' + e.message); }
+}
+
+async function load() {
+  try {
+    zones = await fetchJSON('/api/water-chemistry/zones');
+    renderZones();
+  } catch(e) { showError('Failed to load zones: ' + e.message); }
+}
+
+load();
+</script>
+</body>
+</html>"""
+
+
 _WATER_CHEM_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8005,15 +8141,6 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     }
     .zone-btn:hover { background:#f0f4f8; }
     .zone-btn.active { background:var(--zc,#aabbc8); color:#fff; border-color:transparent; }
-    .zone-del { font-size:.9rem; line-height:1; opacity:.65; }
-    .zone-del:hover { opacity:1; }
-    .add-zone-row { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
-    .add-zone-btn { font-size:.82rem; font-weight:600; padding:.4rem .9rem; border-radius:20px; border:2px dashed #d0dce8; cursor:pointer; background:#fff; color:#7a90a8; transition:all .15s; }
-    .add-zone-btn:hover { border-color:#aabbc8; color:#4a6080; }
-    .add-zone-input { font-size:.85rem; padding:.35rem .7rem; border:1px solid #d0dce8; border-radius:8px; background:#fff; color:#1a2535; outline:none; }
-    .add-zone-input:focus { border-color:#2e7dd4; }
-    .add-zone-confirm { font-size:.82rem; font-weight:600; padding:.35rem .8rem; border-radius:8px; border:none; background:#2e7dd4; color:#fff; cursor:pointer; }
-    .add-zone-confirm:hover { background:#2569b5; }
   </style>
 </head>
 <body>
@@ -8026,14 +8153,11 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
   <div id="devices-wrap"><span class="no-data">Loading&hellip;</span></div>
 
   <div class="zone-section">
-    <div class="section" style="margin-bottom:.75rem">Zones</div>
-    <div class="zone-btns" id="zone-btns"></div>
-    <div class="add-zone-row">
-      <button class="add-zone-btn" id="add-zone-open" onclick="openAddZone()">+ Add Zone</button>
-      <input class="add-zone-input" id="add-zone-input" type="text" placeholder="Zone name&hellip;" style="display:none"
-             onkeydown="if(event.key==='Enter')addZone();if(event.key==='Escape')closeAddZone()">
-      <button class="add-zone-confirm" id="add-zone-confirm" style="display:none" onclick="addZone()">Add</button>
+    <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem">
+      <div class="section" style="margin-bottom:0">Zones</div>
+      <a href="/zones" style="font-size:.75rem;color:#2e7dd4;text-decoration:none;font-weight:600">Manage &#8594;</a>
     </div>
+    <div class="zone-btns" id="zone-btns"></div>
   </div>
 
   <div class="res-row">
@@ -8199,10 +8323,7 @@ function renderZoneButtons() {
     const color = ZONE_COLORS[i % ZONE_COLORS.length];
     const active = activeZones.has(z.name) ? 'active' : '';
     return `<button class="zone-btn ${active}" data-zone="${esc(z.name)}" style="--zc:${color}"
-              onclick="toggleZone('${z.name.replace(/'/g,\"\\\\'\")}')">
-              ${esc(z.name)}
-              <span class="zone-del" onclick="event.stopPropagation();deleteZone(${z.id},'${z.name.replace(/'/g,\"\\\\'\")}')">&#215;</span>
-            </button>`;
+              onclick="toggleZone('${z.name.replace(/'/g,\"\\\\'\")}'">${esc(z.name)}</button>`;
   });
   if (_hasUnzoned) {
     const active = activeZones.has('__unzoned__') ? 'active' : '';
@@ -8243,80 +8364,6 @@ function toggleZone(zoneKey) {
     b.classList.toggle('active', activeZones.has(b.dataset.zone));
   });
   renderChart();
-}
-
-async function addZone() {
-  const inp = document.getElementById('add-zone-input');
-  const name = inp.value.trim();
-  if (!name) return;
-  try {
-    const r = await fetch('/api/water-chemistry/zones', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({name}),
-    });
-    const body = await r.json();
-    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
-    zones.push(body);
-    activeZones.add(body.name);
-    renderZoneButtons();
-    closeAddZone();
-    invalidateHistoryCache();
-    loadHistoryForChart();
-  } catch(e) { showError('Failed to add zone: ' + e.message); }
-}
-
-function deleteZone(id, name) {
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:999;display:flex;align-items:center;justify-content:center;';
-  const box = document.createElement('div');
-  box.style.cssText = 'background:#fff;border-radius:14px;padding:1.5rem 1.75rem;max-width:360px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.18);';
-  box.innerHTML = `
-    <div style="font-size:1rem;font-weight:700;color:#1a2535;margin-bottom:.4rem">Delete zone &#8220;${esc(name)}&#8221;?</div>
-    <div style="font-size:.85rem;color:#5a6e84;margin-bottom:1.25rem">What should happen to historical readings tagged with this zone?</div>
-    <div style="display:flex;flex-direction:column;gap:.55rem">
-      <button id="dz-keep"   style="text-align:left;padding:.6rem .9rem;border-radius:9px;border:1.5px solid #d0dce8;background:#fff;cursor:pointer;font-size:.88rem;font-weight:600;color:#1a2535">Keep historical data &mdash; <span style="font-weight:400;color:#5a6e84">readings stay, zone label removed</span></button>
-      <button id="dz-purge"  style="text-align:left;padding:.6rem .9rem;border-radius:9px;border:1.5px solid #fba8a8;background:#fff5f5;cursor:pointer;font-size:.88rem;font-weight:600;color:#c0392b">Delete historical data &mdash; <span style="font-weight:400">permanently remove all readings for this zone</span></button>
-      <button id="dz-cancel" style="padding:.5rem .9rem;border-radius:9px;border:1.5px solid #d0dce8;background:#f8fafc;cursor:pointer;font-size:.85rem;color:#7a90a8;margin-top:.2rem">Cancel</button>
-    </div>`;
-  overlay.appendChild(box);
-  document.body.appendChild(overlay);
-  const close = () => document.body.removeChild(overlay);
-  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
-  box.querySelector('#dz-cancel').onclick = close;
-  box.querySelector('#dz-keep').onclick  = () => { close(); doDeleteZone(id, name, false); };
-  box.querySelector('#dz-purge').onclick = () => { close(); doDeleteZone(id, name, true);  };
-}
-
-async function doDeleteZone(id, name, purge) {
-  try {
-    const url = '/api/water-chemistry/zones/' + id + (purge ? '?purge=true' : '');
-    const r = await fetch(url, {method: 'DELETE'});
-    const body = await r.json();
-    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
-    zones = zones.filter(z => z.id !== id);
-    activeZones.delete(name);
-    delete historyCache[name];
-    if (!purge) {
-      _hasUnzoned = true;
-      if (!activeZones.has('__unzoned__')) activeZones.add('__unzoned__');
-    }
-    renderZoneButtons();
-    invalidateHistoryCache();
-    loadHistoryForChart();
-  } catch(e) { showError('Failed to delete zone: ' + e.message); }
-}
-
-function openAddZone() {
-  document.getElementById('add-zone-open').style.display = 'none';
-  document.getElementById('add-zone-input').style.display = '';
-  document.getElementById('add-zone-confirm').style.display = '';
-  document.getElementById('add-zone-input').focus();
-}
-function closeAddZone() {
-  document.getElementById('add-zone-input').value = '';
-  document.getElementById('add-zone-open').style.display = '';
-  document.getElementById('add-zone-input').style.display = 'none';
-  document.getElementById('add-zone-confirm').style.display = 'none';
 }
 
 // ── Range selectors ──────────────────────────────────────────────────────────
@@ -8639,6 +8686,11 @@ setInterval(loadCurrent, 30000);
 </script>
 </body>
 </html>"""
+
+
+@app.get("/zones")
+def zones_page():
+    return Response(_ZONES_PAGE, mimetype="text/html")
 
 
 @app.get("/water-chemistry")
