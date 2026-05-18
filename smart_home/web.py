@@ -7703,6 +7703,19 @@ def api_wc_zones_delete(zone_id):
     return jsonify({"ok": True, "id": zone_id, "purged": purge})
 
 
+@app.get("/api/water-chemistry/zone-list")
+def api_wc_zone_list():
+    """Zones that have at least one pool reading, plus whether unzoned readings exist."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT zone FROM pool_readings WHERE zone IS NOT NULL ORDER BY zone"
+        ).fetchall()
+        has_unzoned = conn.execute(
+            "SELECT 1 FROM pool_readings WHERE zone IS NULL LIMIT 1"
+        ).fetchone() is not None
+    return jsonify({"zones": [r[0] for r in rows], "has_unzoned": has_unzoned})
+
+
 @app.post("/api/water-chemistry/move")
 def api_wc_move():
     """Assign a device to a zone (or clear zone assignment)."""
@@ -8068,8 +8081,6 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Water Chemistry</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
@@ -8080,7 +8091,6 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     .card .metric-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .2rem; }
     .card .metric-value { font-size: 2rem; font-weight: 700; line-height: 1; }
     .card .metric-unit  { font-size: .85rem; color: #7a90a8; margin-left: .2rem; }
-    .card .metric-ts    { font-size: .7rem; color: #aabbc8; margin-top: .5rem; }
     .temp  { color: #e07820; }
     .ph    { color: #2e7dd4; }
     .orp   { color: #7b4fb5; }
@@ -8089,12 +8099,161 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     .tds   { color: #1a6db5; }
     .bat   { color: #7a90a8; }
     .section { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .75rem; }
-    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.08); font-size: .85rem; }
-    th { background: #f8fafc; color: #7a90a8; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; padding: .6rem 1rem; text-align: left; border-bottom: 1px solid #eef2f7; white-space: nowrap; }
-    td { padding: .55rem 1rem; border-bottom: 1px solid #f0f4f8; white-space: nowrap; }
-    tr:last-child td { border-bottom: none; }
     #error-bar { display:none; background:#fde8e8; color:#c0392b; border-radius:8px; padding:.6rem 1rem; margin-bottom:1rem; font-size:.85rem; font-weight:500; }
     .no-data { color: #aabbc8; font-style: italic; padding: 1rem; }
+    .device-card { background:#fff; border-radius:12px; padding:1.2rem 1.5rem; margin-bottom:.75rem; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+    .device-header { display:flex; align-items:center; gap:1rem; flex-wrap:wrap; margin-bottom:.75rem; }
+    .device-name { font-size:1rem; font-weight:700; color:#1a2535; }
+    .device-status { font-size:.78rem; font-weight:600; padding:.2rem .6rem; border-radius:20px; }
+    .device-status.online { background:#eafaf1; color:#2a9d6e; }
+    .device-status.offline { background:#fde8e8; color:#c0392b; }
+    .zone-list { display:flex; gap:1rem; flex-wrap:wrap; margin-top:.75rem; }
+    .zone-card {
+      display:block; text-decoration:none; background:#fff; border-radius:12px;
+      padding:1.1rem 1.5rem; min-width:180px;
+      box-shadow:0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05);
+      border-left:4px solid var(--zc,#aabbc8);
+      transition:box-shadow .15s, transform .1s;
+    }
+    .zone-card:hover { box-shadow:0 3px 10px rgba(0,0,0,.13); transform:translateY(-1px); }
+    .zone-card .zc-name { font-size:1rem; font-weight:700; color:#1a2535; margin-bottom:.3rem; }
+    .zone-card .zc-arrow { font-size:.85rem; color:#7a90a8; }
+  </style>
+</head>
+<body>
+  <div id="error-bar"></div>
+  <h1>Water Chemistry <a class="back" href="/">&larr; Home</a></h1>
+
+  <div id="status-bar" style="display:none;margin-bottom:1.25rem;padding:.6rem 1.1rem;border-radius:10px;font-size:.85rem;font-weight:600"></div>
+
+  <div class="section" style="margin-bottom:.75rem">Devices</div>
+  <div id="devices-wrap"><span class="no-data">Loading&hellip;</span></div>
+
+  <div style="margin-top:2rem">
+    <div class="section" style="margin-bottom:.75rem">Zones with readings</div>
+    <div class="zone-list" id="zone-list"><span class="no-data">Loading&hellip;</span></div>
+  </div>
+
+<script>
+const ZONE_COLORS = ['#2e7dd4','#e07820','#2a9d6e','#7b4fb5','#c0392b','#16a085','#d35400'];
+const UNZONED_COLOR = '#aabbc8';
+
+function showError(msg) {
+  const el = document.getElementById('error-bar');
+  el.textContent = '⚠ ' + msg;
+  el.style.display = 'block';
+}
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function ago(ts) {
+  const secs = Math.floor((Date.now() - new Date(ts.replace(' ','T')).getTime()) / 1000);
+  if (secs < 0)     return 'just now';
+  if (secs < 60)    return secs + 's ago';
+  if (secs < 3600)  return Math.floor(secs/60) + 'm ago';
+  if (secs < 86400) return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm ago';
+  return Math.floor(secs/86400) + 'd ago';
+}
+function phColor(ph) {
+  if (ph < 7.0 || ph > 7.8) return '#c0392b';
+  if (ph >= 7.2 && ph <= 7.6) return '#2a9d6e';
+  return '#e07820';
+}
+function orpColor(orp) {
+  if (orp >= 650 && orp <= 750) return '#2a9d6e';
+  if (orp < 400 || orp > 900)  return '#c0392b';
+  return '#e07820';
+}
+function clColor(cl) {
+  if (cl >= 1.0 && cl <= 3.0) return '#2a9d6e';
+  if (cl < 0.5  || cl > 5.0)  return '#c0392b';
+  return '#e07820';
+}
+
+async function loadZoneList() {
+  try {
+    const data = await fetchJSON('/api/water-chemistry/zone-list');
+    const container = document.getElementById('zone-list');
+    const cards = data.zones.map((name, i) => {
+      const color = ZONE_COLORS[i % ZONE_COLORS.length];
+      return `<a class="zone-card" href="/water-chemistry/${encodeURIComponent(name)}" style="--zc:${color}">
+        <div class="zc-name">${esc(name)}</div>
+        <div class="zc-arrow">View chart &rarr;</div>
+      </a>`;
+    });
+    if (data.has_unzoned) {
+      cards.push(`<a class="zone-card" href="/water-chemistry/__unzoned__" style="--zc:${UNZONED_COLOR}">
+        <div class="zc-name" style="color:#7a90a8">Unzoned</div>
+        <div class="zc-arrow">View chart &rarr;</div>
+      </a>`);
+    }
+    container.innerHTML = cards.length ? cards.join('') : '<span class="no-data">No readings yet.</span>';
+  } catch(e) { showError('Failed to load zones: ' + e.message); }
+}
+
+async function loadCurrent() {
+  try {
+    const rows = await fetchJSON('/api/water-chemistry/current');
+    const wrap = document.getElementById('devices-wrap');
+    if (!rows.length) { wrap.innerHTML = '<span class="no-data">No devices yet.</span>'; return; }
+    const bar = document.getElementById('status-bar');
+    const allOffline = rows.every(r => r.offline);
+    const anyOffline = rows.some(r => r.offline);
+    if (allOffline) {
+      bar.style.cssText = 'display:;background:#fde8e8;color:#c0392b;';
+      bar.textContent = '● Water chemistry monitor offline — last reading ' + ago(rows[0].ts);
+    } else if (anyOffline) {
+      bar.style.cssText = 'display:;background:#fde8e8;color:#c0392b;';
+      bar.textContent = '● One or more monitors offline';
+    } else {
+      bar.style.display = 'none';
+    }
+    wrap.innerHTML = rows.map(r => `
+      <div class="device-card">
+        <div class="device-header">
+          <span class="device-name">BLE-YC01</span>
+          <span class="device-status ${r.offline ? 'offline' : 'online'}">${r.offline ? '&#9679; Offline' : '&#9679; Online'}</span>
+          <span style="font-size:.75rem;color:#aabbc8">${ago(r.ts)}</span>
+        </div>
+        <div class="cards" style="margin-bottom:0;gap:.75rem">
+          <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '—'}<span class="metric-unit">°F</span></div></div>
+          <div class="card"><div class="metric-label">pH</div><div class="metric-value" style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '—'}</div></div>
+          <div class="card"><div class="metric-label">ORP</div><div class="metric-value" style="color:${orpColor(r.orp)}">${r.orp != null ? r.orp : '—'}<span class="metric-unit">mV</span></div></div>
+          <div class="card"><div class="metric-label">Free Cl</div><div class="metric-value" style="color:${clColor(r.chlorine)}">${r.chlorine != null ? r.chlorine.toFixed(1) : '—'}<span class="metric-unit">mg/L</span></div></div>
+          <div class="card"><div class="metric-label">EC</div><div class="metric-value ec">${r.ec != null ? r.ec : '—'}<span class="metric-unit">µS/cm</span></div></div>
+          <div class="card"><div class="metric-label">TDS</div><div class="metric-value tds">${r.tds != null ? r.tds : '—'}<span class="metric-unit">ppm</span></div></div>
+          <div class="card"><div class="metric-label">Battery</div><div class="metric-value bat">${r.battery != null ? r.battery : '—'}<span class="metric-unit">%</span></div></div>
+        </div>
+      </div>
+    `).join('');
+  } catch(e) { showError('Failed to load current readings: ' + e.message); }
+}
+
+loadCurrent();
+loadZoneList();
+setInterval(loadCurrent, 30000);
+</script>
+</body>
+</html>"""
+
+
+_WATER_CHEM_ZONE_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__ZONE_TITLE__ — Water Chemistry</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 1.5rem; color: #1a2535; letter-spacing: -.02em; }
+    .back { font-size: .85rem; font-weight: 500; color: #2e7dd4; text-decoration: none; margin-left: .75rem; }
+    #error-bar { display:none; background:#fde8e8; color:#c0392b; border-radius:8px; padding:.6rem 1rem; margin-bottom:1rem; font-size:.85rem; font-weight:500; }
     .metric-btns { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
     .metric-btn {
       font-size: .8rem; font-weight: 600; padding: .4rem .9rem; border-radius: 20px;
@@ -8111,8 +8270,8 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     .metric-btn[data-metric="ec"].active      { background: #c0662b; }
     .metric-btn[data-metric="tds"].active     { background: #1a6db5; }
     .metric-btn[data-metric="battery"].active { background: #7a90a8; }
-    .chart-wrap { background: #fff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 2rem; }
     .metric-desc { font-size: .82rem; color: #5a6e84; background: #f0f4f8; border-left: 3px solid #d0dce8; border-radius: 0 6px 6px 0; padding: .5rem .85rem; margin-bottom: .75rem; display: none; }
+    .chart-wrap { background: #fff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 2rem; }
     .btn-group { margin-bottom: 1.2rem; }
     .btn-group-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .4rem; }
     .range-btns { display: flex; gap: .4rem; flex-wrap: wrap; }
@@ -8124,37 +8283,11 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     .res-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
     .res-row select { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; cursor: pointer; }
     #resp-size { font-size: .72rem; color: #4a6080; }
-    .device-card { background:#fff; border-radius:12px; padding:1.2rem 1.5rem; margin-bottom:.75rem; box-shadow:0 1px 4px rgba(0,0,0,.08); }
-    .device-header { display:flex; align-items:center; gap:1rem; flex-wrap:wrap; margin-bottom:.75rem; }
-    .device-name { font-size:1rem; font-weight:700; color:#1a2535; }
-    .device-status { font-size:.78rem; font-weight:600; padding:.2rem .6rem; border-radius:20px; }
-    .device-status.online { background:#eafaf1; color:#2a9d6e; }
-    .device-status.offline { background:#fde8e8; color:#c0392b; }
-    .zone-section { margin-bottom:1.5rem; }
-    .zone-btns { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; margin-bottom:.75rem; }
-    .zone-btn {
-      font-size:.82rem; font-weight:600; padding:.4rem .9rem; border-radius:20px;
-      border:2px solid var(--zc,#aabbc8); cursor:pointer; background:#fff; color:#4a6080;
-      transition:all .15s; box-shadow:0 1px 3px rgba(0,0,0,.08);
-      display:flex; align-items:center; gap:.35rem;
-    }
-    .zone-btn:hover { background:#f0f4f8; }
-    .zone-btn.active { background:var(--zc,#aabbc8); color:#fff; border-color:transparent; }
   </style>
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>Water Chemistry <a class="back" href="/">&larr; Home</a></h1>
-
-  <div id="status-bar" style="display:none;margin-bottom:1.25rem;padding:.6rem 1.1rem;border-radius:10px;font-size:.85rem;font-weight:600"></div>
-
-  <div class="section" style="margin-bottom:.75rem">Devices</div>
-  <div id="devices-wrap"><span class="no-data">Loading&hellip;</span></div>
-
-  <div class="zone-section">
-    <div class="section" style="margin-bottom:.75rem">Zones</div>
-    <div class="zone-btns" id="zone-btns"></div>
-  </div>
+  <h1>__ZONE_TITLE__ <a class="back" href="/water-chemistry">&larr; Water Chemistry</a></h1>
 
   <div class="res-row">
     <label for="res">Resolution</label>
@@ -8197,47 +8330,27 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
 
   <div class="metric-btns" id="metric-btns">
     <button class="metric-btn active" data-metric="temp_f"  data-label="Temperature" data-unit="°F"    data-desc="Water temperature.">Temperature</button>
-    <button class="metric-btn"        data-metric="ph"       data-label="pH"          data-unit=""      data-desc="Acidity/alkalinity of the water. Ideal range: 7.2–7.6. Outside 7.0–7.8 indicates a problem.">pH</button>
-    <button class="metric-btn"        data-metric="orp"      data-label="ORP"         data-unit="mV"    data-desc="Oxidation-Reduction Potential — how effective the sanitizer is at killing bacteria. Higher = more sanitizing power. Ideal: 650–750 mV.">ORP</button>
-    <button class="metric-btn"        data-metric="chlorine" data-label="Free Cl"     data-unit="mg/L"  data-desc="Free Chlorine — the active chlorine available to sanitize the water. Ideal: 1–3 mg/L. Below 0.5 or above 5 is a problem.">Free Cl</button>
-    <button class="metric-btn"        data-metric="ec"       data-label="EC"          data-unit="µS/cm" data-desc="Electrical Conductivity — measures how well water conducts electricity, which is a proxy for total dissolved minerals and salts. Higher EC means more dissolved substances.">EC</button>
-    <button class="metric-btn"        data-metric="tds"      data-label="TDS"         data-unit="ppm"   data-desc="Total Dissolved Solids — the sum of all dissolved substances (salts, minerals, chemicals) in parts per million. Closely related to EC. Very high TDS can mean it&apos;s time to partially drain and refill.">TDS</button>
-    <button class="metric-btn"        data-metric="battery"  data-label="Battery"     data-unit="%"     data-desc="Battery level of the BLE-YC01 sensor.">Battery</button>
+    <button class="metric-btn"        data-metric="ph"       data-label="pH"          data-unit=""           data-desc="Acidity/alkalinity of the water. Ideal range: 7.2–7.6. Outside 7.0–7.8 indicates a problem.">pH</button>
+    <button class="metric-btn"        data-metric="orp"      data-label="ORP"         data-unit="mV"         data-desc="Oxidation-Reduction Potential — how effective the sanitizer is at killing bacteria. Higher = more sanitizing power. Ideal: 650–750 mV.">ORP</button>
+    <button class="metric-btn"        data-metric="chlorine" data-label="Free Cl"     data-unit="mg/L"       data-desc="Free Chlorine — the active chlorine available to sanitize the water. Ideal: 1–3 mg/L.">Free Cl</button>
+    <button class="metric-btn"        data-metric="ec"       data-label="EC"          data-unit="µS/cm" data-desc="Electrical Conductivity — measures dissolved minerals and salts.">EC</button>
+    <button class="metric-btn"        data-metric="tds"      data-label="TDS"         data-unit="ppm"        data-desc="Total Dissolved Solids — the sum of all dissolved substances in parts per million.">TDS</button>
+    <button class="metric-btn"        data-metric="battery"  data-label="Battery"     data-unit="%"          data-desc="Battery level of the BLE-YC01 sensor.">Battery</button>
   </div>
 
   <div id="metric-desc" class="metric-desc"></div>
 
-  <div class="chart-wrap" id="chart-wrap">
+  <div class="chart-wrap">
     <canvas id="pool-chart"></canvas>
   </div>
 
-  <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem">
-    <div class="section" style="margin-bottom:0">Raw data</div>
-    <button id="latest-per-zone-btn" onclick="toggleLatestPerZone()"
-      style="font-size:.75rem;padding:.25rem .6rem;border-radius:4px;border:1px solid #445;background:#2a3a4a;color:#8ab;cursor:pointer">
-      Latest from each zone
-    </button>
-  </div>
-  <table id="hist-table">
-    <thead>
-      <tr>
-        <th>Time</th><th>Zone</th><th>Temp</th><th>pH</th><th>ORP (mV)</th><th>Cl (mg/L)</th>
-        <th>EC (µS/cm)</th><th>TDS (ppm)</th><th>Battery</th>
-      </tr>
-    </thead>
-    <tbody id="hist-body"><tr><td colspan="9" class="no-data">Loading&hellip;</td></tr></tbody>
-  </table>
-
 <script>
-const ZONE_COLORS = ['#2e7dd4','#e07820','#2a9d6e','#7b4fb5','#c0392b','#16a085','#d35400'];
+const ZONE = __ZONE_JSON__;
+const ZONE_COLOR = __ZONE_COLOR_JSON__;
 const YEAR_PALETTE = ['#2e7dd4','#e07820','#2a9d6e','#7b4fb5','#c0392b','#16a085','#d35400'];
-const UNZONED_COLOR = '#aabbc8';
 
-let zones = [];           // [{id, name}] from API
-let activeZones = new Set(); // zone keys currently on
-let historyCache = {};    // zoneKey -> rows
-let latestPerZone = false;
-let poolChart   = null;
+let historyCache = {};
+let poolChart = null;
 let chartXMin = null, chartXMax = null, chartXUnit = 'hour';
 let mode = 'recent', rangeDays = 1, activeMonth = null, offsetMs = 0;
 
@@ -8262,7 +8375,7 @@ function getBucket() {
 
 function showError(msg) {
   const el = document.getElementById('error-bar');
-  el.textContent = '\\u26a0 ' + msg;
+  el.textContent = '⚠ ' + msg;
   el.style.display = 'block';
 }
 async function fetchJSON(url) {
@@ -8270,99 +8383,11 @@ async function fetchJSON(url) {
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return r.json();
 }
-function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-function ago(ts) {
-  const secs = Math.floor((Date.now() - new Date(ts.replace(' ','T')).getTime()) / 1000);
-  if (secs < 0)     return 'just now';
-  if (secs < 60)    return secs + 's ago';
-  if (secs < 3600)  return Math.floor(secs/60) + 'm ago';
-  if (secs < 86400) return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm ago';
-  return Math.floor(secs/86400) + 'd ago';
-}
 function localISO(d) {
   const p = n => String(n).padStart(2,'0');
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
-function phColor(ph) {
-  if (ph < 7.0 || ph > 7.8) return '#c0392b';
-  if (ph >= 7.2 && ph <= 7.6) return '#2a9d6e';
-  return '#e07820';
-}
-function orpColor(orp) {
-  if (orp >= 650 && orp <= 750) return '#2a9d6e';
-  if (orp < 400 || orp > 900)  return '#c0392b';
-  return '#e07820';
-}
-function clColor(cl) {
-  if (cl >= 1.0 && cl <= 3.0) return '#2a9d6e';
-  if (cl < 0.5  || cl > 5.0)  return '#c0392b';
-  return '#e07820';
-}
 
-// Zone color by index
-function zoneColor(zoneKey) {
-  if (zoneKey === '__unzoned__') return UNZONED_COLOR;
-  const idx = zones.findIndex(z => z.name === zoneKey);
-  return ZONE_COLORS[idx >= 0 ? idx % ZONE_COLORS.length : 0];
-}
-function zoneLabel(zoneKey) {
-  return zoneKey === '__unzoned__' ? 'Unzoned' : zoneKey;
-}
-
-// ── Zones ─────────────────────────────────────────────────────────────────────
-let _hasUnzoned = false;
-
-function renderZoneButtons() {
-  const container = document.getElementById('zone-btns');
-  const btns = zones.map((z, i) => {
-    const color = ZONE_COLORS[i % ZONE_COLORS.length];
-    const active = activeZones.has(z.name) ? 'active' : '';
-    return `<button class="zone-btn ${active}" data-zone="${esc(z.name)}" style="--zc:${color}"
-              onclick="toggleZone('${z.name.replace(/'/g,\"\\\\'\")}'">${esc(z.name)}</button>`;
-  });
-  if (_hasUnzoned) {
-    const active = activeZones.has('__unzoned__') ? 'active' : '';
-    btns.push(`<button class="zone-btn ${active}" data-zone="__unzoned__" style="--zc:${UNZONED_COLOR}"
-                 onclick="toggleZone('__unzoned__')">Unzoned</button>`);
-  }
-  container.innerHTML = btns.join('');
-}
-
-async function loadZones() {
-  try {
-    const data = await fetchJSON('/api/water-chemistry/zones');
-    zones = data;
-    // Check if any null-zone data exists
-    const peek = await fetchJSON('/api/water-chemistry/history?zone=__unzoned__&limit=1');
-    _hasUnzoned = peek.length > 0;
-    // Default: all zones active
-    activeZones = new Set(zones.map(z => z.name));
-    if (_hasUnzoned) activeZones.add('__unzoned__');
-    renderZoneButtons();
-    invalidateHistoryCache();
-    loadHistoryForChart();
-    loadCurrent();
-  } catch(e) { showError('Failed to load zones: ' + e.message); }
-}
-
-function toggleZone(zoneKey) {
-  if (activeZones.has(zoneKey)) {
-    activeZones.delete(zoneKey);
-  } else {
-    activeZones.add(zoneKey);
-    if (!historyCache[zoneKey]) {
-      loadHistoryForChart();
-      return;
-    }
-  }
-  document.querySelectorAll('.zone-btn').forEach(b => {
-    b.classList.toggle('active', activeZones.has(b.dataset.zone));
-  });
-  renderChart();
-}
-
-// ── Range selectors ──────────────────────────────────────────────────────────
 function setRange(days) {
   mode = 'recent'; rangeDays = days; offsetMs = 0;
   document.querySelectorAll('#recent-btns button[data-days]').forEach(b =>
@@ -8397,7 +8422,6 @@ function setMonth(m) {
 }
 function invalidateHistoryCache() { historyCache = {}; }
 
-// ── Chart ─────────────────────────────────────────────────────────────────────
 function buildTimePoints(rows, metric) {
   const GAP_MS = 15 * 60 * 1000;
   const points = [];
@@ -8418,41 +8442,31 @@ function buildDatasets() {
   const metric = btn?.dataset.metric || 'temp_f';
   const unit   = btn?.dataset.unit   || '';
   const isGrouped = mode === 'month' || mode === 'year';
-  const datasets = [];
+  const rows   = historyCache[ZONE] || [];
+  if (!rows.length) return [];
 
-  [...activeZones].forEach(zKey => {
-    const rows = historyCache[zKey] || [];
-    if (!rows.length) return;
-    const color = zoneColor(zKey);
-    const name  = zoneLabel(zKey);
-
-    if (isGrouped) {
-      const byYear = {};
-      for (const r of rows) (byYear[r.year] ??= []).push({ x: new Date(r.ts.replace(' ','T')), y: r[metric] });
-      Object.keys(byYear).sort().forEach((year, yi) => {
-        const c = yi === 0 ? color : YEAR_PALETTE[(zones.findIndex(z=>z.name===zKey)+1+yi) % YEAR_PALETTE.length];
-        datasets.push({
-          label: zones.length + (activeZones.has('__unzoned__') ? 1 : 0) > 1 ? `${name} ${year}` : year,
-          data: byYear[year],
-          borderColor: c, backgroundColor: 'transparent',
-          borderWidth: yi === 0 ? 2 : 1.5, borderDash: yi > 0 ? [4,3] : [],
-          pointRadius: 0, tension: 0, spanGaps: false,
-        });
-      });
-    } else {
-      const points = buildTimePoints(rows, metric);
-      const fill = activeZones.size === 1;
-      datasets.push({
-        label: name + (unit ? ` (${unit})` : ''),
-        data: points,
-        borderColor: color, backgroundColor: color + '22',
-        borderWidth: 2, pointRadius: 2, pointHoverRadius: 4,
-        fill, tension: 0, spanGaps: false,
-      });
-    }
-  });
-
-  return datasets;
+  if (isGrouped) {
+    const byYear = {};
+    for (const r of rows) (byYear[r.year] ??= []).push({ x: new Date(r.ts.replace(' ','T')), y: r[metric] });
+    return Object.keys(byYear).sort().map((year, yi) => {
+      const c = yi === 0 ? ZONE_COLOR : YEAR_PALETTE[(1 + yi) % YEAR_PALETTE.length];
+      return {
+        label: year,
+        data: byYear[year],
+        borderColor: c, backgroundColor: 'transparent',
+        borderWidth: yi === 0 ? 2 : 1.5, borderDash: yi > 0 ? [4,3] : [],
+        pointRadius: 0, tension: 0, spanGaps: false,
+      };
+    });
+  }
+  const points = buildTimePoints(rows, metric);
+  return [{
+    label: (ZONE === '__unzoned__' ? 'Unzoned' : ZONE) + (unit ? ` (${unit})` : ''),
+    data: points,
+    borderColor: ZONE_COLOR, backgroundColor: ZONE_COLOR + '22',
+    borderWidth: 2, pointRadius: 2, pointHoverRadius: 4,
+    fill: true, tension: 0, spanGaps: false,
+  }];
 }
 
 function renderChart() {
@@ -8523,103 +8537,9 @@ document.getElementById('metric-btns').addEventListener('click', e => {
 });
 updateDesc(document.querySelector('.metric-btn.active'));
 
-// ── Devices ───────────────────────────────────────────────────────────────────
-async function loadCurrent() {
-  try {
-    const rows = await fetchJSON('/api/water-chemistry/current');
-    const wrap = document.getElementById('devices-wrap');
-    if (!rows.length) { wrap.innerHTML = '<span class="no-data">No devices yet.</span>'; return; }
-    const bar = document.getElementById('status-bar');
-    const allOffline = rows.every(r => r.offline);
-    const anyOffline = rows.some(r => r.offline);
-    if (allOffline) {
-      bar.style.cssText = 'display:;background:#fde8e8;color:#c0392b;';
-      bar.textContent = '\\u25cf Water chemistry monitor offline \\u2014 last reading ' + ago(rows[0].ts);
-    } else if (anyOffline) {
-      bar.style.cssText = 'display:;background:#fde8e8;color:#c0392b;';
-      bar.textContent = '\\u25cf One or more monitors offline';
-    } else {
-      bar.style.display = 'none';
-    }
-    wrap.innerHTML = rows.map((r, ri) => `
-      <div class="device-card">
-        <div class="device-header">
-          <span class="device-name">BLE-YC01</span>
-          <span class="device-status ${r.offline ? 'offline' : 'online'}">${r.offline ? '&#9679; Offline' : '&#9679; Online'}</span>
-          <span style="font-size:.75rem;color:#aabbc8">${ago(r.ts)}</span>
-        </div>
-        <div class="cards" style="margin-bottom:0;gap:.75rem">
-          <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '\\u2014'}<span class="metric-unit">\\u00b0F</span></div></div>
-          <div class="card"><div class="metric-label">pH</div><div class="metric-value" style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '\\u2014'}</div></div>
-          <div class="card"><div class="metric-label">ORP</div><div class="metric-value" style="color:${orpColor(r.orp)}">${r.orp != null ? r.orp : '\\u2014'}<span class="metric-unit">mV</span></div></div>
-          <div class="card"><div class="metric-label">Free Cl</div><div class="metric-value" style="color:${clColor(r.chlorine)}">${r.chlorine != null ? r.chlorine.toFixed(1) : '\\u2014'}<span class="metric-unit">mg/L</span></div></div>
-          <div class="card"><div class="metric-label">EC</div><div class="metric-value ec">${r.ec != null ? r.ec : '\\u2014'}<span class="metric-unit">\\u00b5S/cm</span></div></div>
-          <div class="card"><div class="metric-label">TDS</div><div class="metric-value tds">${r.tds != null ? r.tds : '\\u2014'}<span class="metric-unit">ppm</span></div></div>
-          <div class="card"><div class="metric-label">Battery</div><div class="metric-value bat">${r.battery != null ? r.battery : '\\u2014'}<span class="metric-unit">%</span></div></div>
-        </div>
-      </div>
-    `).join('');
-  } catch(e) { showError('Failed to load current readings: ' + e.message); }
-}
-
-// ── History ───────────────────────────────────────────────────────────────────
-function toggleLatestPerZone() {
-  latestPerZone = !latestPerZone;
-  const btn = document.getElementById('latest-per-zone-btn');
-  if (latestPerZone) {
-    btn.style.background = '#3a6a9a';
-    btn.style.color = '#def';
-    btn.style.borderColor = '#5af';
-  } else {
-    btn.style.background = '#2a3a4a';
-    btn.style.color = '#8ab';
-    btn.style.borderColor = '#445';
-  }
-  updateHistoryTable();
-}
-
-function updateHistoryTable() {
-  const tbody = document.getElementById('hist-body');
-  let displayRows;
-  if (latestPerZone) {
-    // One latest row per active named zone (skip unzoned)
-    displayRows = [];
-    for (const zKey of activeZones) {
-      if (zKey === '__unzoned__') continue;
-      const rows = historyCache[zKey] || [];
-      if (rows.length) {
-        const latest = rows.reduce((a, b) => a.ts > b.ts ? a : b);
-        displayRows.push({...latest, _zone: zKey});
-      }
-    }
-    displayRows.sort((a,b) => b.ts > a.ts ? 1 : -1);
-  } else {
-    // Collect rows from all active zones, sort by ts desc, take latest 10
-    const allRows = [];
-    for (const zKey of activeZones) {
-      const rows = historyCache[zKey] || [];
-      rows.forEach(r => allRows.push({...r, _zone: zKey}));
-    }
-    allRows.sort((a,b) => b.ts > a.ts ? 1 : -1);
-    displayRows = allRows.slice(0, 10);
-  }
-  if (!displayRows.length) { tbody.innerHTML = '<tr><td colspan="9" class="no-data">No history yet.</td></tr>'; return; }
-  tbody.innerHTML = displayRows.map(r => `<tr>
-    <td>${r.ts}</td>
-    <td>${r._zone === '__unzoned__' ? '<em style="color:#aabbc8">Unzoned</em>' : esc(r._zone || '')}</td>
-    <td>${r.temp_f != null ? r.temp_f.toFixed(1) + '\\u00b0F' : '\\u2014'}</td>
-    <td style="color:${phColor(r.ph)}">${r.ph != null ? r.ph.toFixed(2) : '\\u2014'}</td>
-    <td style="color:${orpColor(r.orp)}">${r.orp != null ? r.orp : '\\u2014'}</td>
-    <td style="color:${clColor(r.chlorine)}">${r.chlorine != null ? r.chlorine.toFixed(1) : '\\u2014'}</td>
-    <td>${r.ec != null ? r.ec : '\\u2014'}</td>
-    <td>${r.tds != null ? r.tds : '\\u2014'}</td>
-    <td>${r.battery != null ? r.battery + '%' : '\\u2014'}</td>
-  </tr>`).join('');
-}
-
-async function fetchZoneHistory(zoneKey) {
+async function fetchZoneHistory() {
   const base = '/api/water-chemistry/history';
-  const zp = zoneKey ? '&zone=' + encodeURIComponent(zoneKey) : '';
+  const zp = '&zone=' + encodeURIComponent(ZONE);
   if (mode === 'recent') {
     const xMax = new Date(Date.now() + offsetMs);
     const xMin = new Date(xMax.getTime() - rangeDays * 86400000);
@@ -8651,34 +8571,23 @@ async function loadHistoryForChart() {
       chartXUnit = 'month';
     }
 
-    // If no zones defined, fall back to unfiltered all-data view
-    const zonesOrFallback = activeZones.size > 0 ? [...activeZones] : [null];
-
-    let totalPts = 0;
-    for (const zKey of zonesOrFallback) {
-      if (!historyCache[zKey]) {
-        historyCache[zKey] = await fetchZoneHistory(zKey);
-      }
-      totalPts += historyCache[zKey].length;
+    if (!historyCache[ZONE]) {
+      historyCache[ZONE] = await fetchZoneHistory();
     }
-
+    const totalPts = historyCache[ZONE].length;
     renderChart();
-    updateHistoryTable();
     document.getElementById('resp-size').textContent = totalPts + ' pts';
 
     if (mode === 'recent') {
-      const xMin = chartXMin;
-      const firstZone = zonesOrFallback[0];
-      const zp = firstZone ? '&zone=' + encodeURIComponent(firstZone) : '';
-      const peek = await fetchJSON('/api/water-chemistry/history?end=' + encodeURIComponent(localISO(xMin)) + '&limit=1' + zp);
+      const peek = await fetchJSON('/api/water-chemistry/history?end=' + encodeURIComponent(localISO(chartXMin))
+        + '&limit=1&zone=' + encodeURIComponent(ZONE));
       document.getElementById('btn-prev').disabled = peek.length === 0;
       document.getElementById('btn-next').disabled = offsetMs >= 0;
     }
   } catch(e) { showError('Failed to load history: ' + e.message); }
 }
 
-loadZones();
-setInterval(loadCurrent, 30000);
+loadHistoryForChart();
 </script>
 </body>
 </html>"""
@@ -8692,6 +8601,28 @@ def zones_page():
 @app.get("/water-chemistry")
 def water_chemistry_page():
     return Response(_WATER_CHEM_PAGE, mimetype="text/html")
+
+
+@app.get("/water-chemistry/<path:zone_name>")
+def water_chemistry_zone_page(zone_name):
+    import json as _json
+    ZONE_COLORS = ['#2e7dd4', '#e07820', '#2a9d6e', '#7b4fb5', '#c0392b', '#16a085', '#d35400']
+    UNZONED_COLOR = '#aabbc8'
+    if zone_name == '__unzoned__':
+        title = 'Unzoned'
+        color = UNZONED_COLOR
+    else:
+        with _conn() as conn:
+            rows = conn.execute("SELECT name FROM wc_zones ORDER BY id ASC").fetchall()
+        names = [r[0] for r in rows]
+        idx = names.index(zone_name) if zone_name in names else 0
+        title = zone_name
+        color = ZONE_COLORS[idx % len(ZONE_COLORS)]
+    html = (_WATER_CHEM_ZONE_PAGE_TEMPLATE
+            .replace('__ZONE_TITLE__', title)
+            .replace('__ZONE_JSON__', _json.dumps(zone_name))
+            .replace('__ZONE_COLOR_JSON__', _json.dumps(color)))
+    return Response(html, mimetype="text/html")
 
 
 @app.get("/pool")
