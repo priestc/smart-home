@@ -4907,6 +4907,114 @@ load();
     return Response(html, mimetype="text/html")
 
 
+@app.get("/api/devices")
+def api_devices():
+    from smart_home import labels as _labels
+    from smart_home import smart_plug as _plug
+    from smart_home import camera as _camera
+    from smart_home import garage as _garage
+    from smart_home import presence as _presence
+    from smart_home import pool as _pool
+
+    label_map = _labels.load()
+    ble = [{"address": addr, "label": lbl} for addr, lbl in sorted(label_map.items(), key=lambda x: x[1])]
+
+    plugs = [{"id": p["name"], "name": p["name"], "device_type": p.get("type", ""), "ip": p.get("ip", "")}
+             for p in _plug.load_config()]
+
+    cameras = [{"id": c["name"], "name": c["name"]} for c in _camera.load_config()]
+
+    garages = [{"id": g["name"], "name": g["name"]} for g in _garage.load_config()]
+
+    presence_devs = [
+        {"id": name, "name": name, "model_name": info.get("model_name", "")}
+        for name, info in _presence.load_iphone_devices().items()
+    ]
+
+    pool_monitors = [
+        {"id": m["label"], "label": m["label"], "address": m.get("address", "")}
+        for m in _pool.load_config()
+    ]
+
+    return jsonify({
+        "ble_sensors": ble,
+        "smart_plugs": plugs,
+        "cameras": cameras,
+        "garages": garages,
+        "presence": presence_devs,
+        "pool_monitors": pool_monitors,
+    })
+
+
+@app.post("/api/devices/rename")
+def api_devices_rename():
+    from smart_home import labels as _labels
+    from smart_home import smart_plug as _plug
+    from smart_home import camera as _camera
+    from smart_home import garage as _garage
+    from smart_home import presence as _presence
+    from smart_home import pool as _pool
+
+    body = request.get_json(force=True)
+    device_type = body.get("type")
+    device_id   = body.get("id")
+    new_name    = (body.get("new_name") or "").strip()
+
+    if not device_type or not device_id or not new_name:
+        return jsonify({"error": "type, id, and new_name are required"}), 400
+
+    if device_type == "ble_sensor":
+        label_map = _labels.load()
+        if device_id not in label_map:
+            return jsonify({"error": "device not found"}), 404
+        label_map[device_id] = new_name
+        _labels.save(label_map)
+
+    elif device_type == "smart_plug":
+        plugs = _plug.load_config()
+        match = next((p for p in plugs if p["name"] == device_id), None)
+        if match is None:
+            return jsonify({"error": "device not found"}), 404
+        match["name"] = new_name
+        _plug.save_config(plugs)
+
+    elif device_type == "camera":
+        cameras = _camera.load_config()
+        match = next((c for c in cameras if c["name"] == device_id), None)
+        if match is None:
+            return jsonify({"error": "device not found"}), 404
+        match["name"] = new_name
+        _camera.save_config(cameras)
+
+    elif device_type == "garage":
+        garages = _garage.load_config()
+        match = next((g for g in garages if g["name"] == device_id), None)
+        if match is None:
+            return jsonify({"error": "device not found"}), 404
+        match["name"] = new_name
+        _garage.save_config(garages)
+
+    elif device_type == "presence":
+        devices = _presence.load_iphone_devices()
+        if device_id not in devices:
+            return jsonify({"error": "device not found"}), 404
+        devices[new_name] = devices.pop(device_id)
+        _presence.save_iphone_devices(devices)
+
+    elif device_type == "pool_monitor":
+        monitors = _pool.load_config()
+        match = next((m for m in monitors if m["label"] == device_id), None)
+        if match is None:
+            return jsonify({"error": "device not found"}), 404
+        match["label"] = new_name
+        _pool.save_config(monitors)
+
+    else:
+        return jsonify({"error": f"unknown device type: {device_type}"}), 400
+
+    return jsonify({"ok": True})
+
+
 @app.get("/")
 def index():
     html = """<!DOCTYPE html>
@@ -4970,7 +5078,7 @@ def index():
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a></h1>
+  <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a>&nbsp;<a href="/devices" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Devices &#9881;</a></h1>
 
   <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem">
     <div class="cards" id="cards" style="margin-bottom:0;flex-wrap:wrap;display:flex;gap:1rem"></div>
@@ -5188,6 +5296,218 @@ setInterval(loadPresence, 30000);
 setInterval(loadEvents, 60000);
 setInterval(loadGarage, 15000);
 setInterval(loadPool, 60000);
+</script>
+</body>
+</html>"""
+    return Response(html, mimetype="text/html")
+
+
+@app.get("/devices")
+def devices_page():
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Device Settings</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 1.5rem; color: #1a2535; letter-spacing: -.02em; }
+    .back { font-size: .85rem; font-weight: 500; color: #2e7dd4; text-decoration: none; margin-left: .75rem; }
+    .section { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); margin-bottom: 1.5rem; overflow: hidden; }
+    .section-header { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: #7a90a8; padding: .75rem 1.25rem; background: #f8fafc; border-bottom: 1px solid #e8edf3; }
+    .device-row { display: flex; align-items: center; gap: 1rem; padding: .75rem 1.25rem; border-bottom: 1px solid #f0f4f8; }
+    .device-row:last-child { border-bottom: none; }
+    .device-name { flex: 1; font-size: .95rem; font-weight: 600; color: #1a2535; }
+    .device-sub  { font-size: .78rem; color: #7a90a8; font-weight: 400; margin-top: .1rem; }
+    .edit-btn { font-size: .8rem; color: #2e7dd4; background: none; border: none; cursor: pointer; padding: .3rem .6rem; border-radius: 6px; font-weight: 600; }
+    .edit-btn:hover { background: #e8f1fb; }
+    .edit-form { display: none; flex: 1; align-items: center; gap: .5rem; }
+    .edit-input { flex: 1; font-size: .9rem; padding: .35rem .65rem; border: 1.5px solid #2e7dd4; border-radius: 7px; color: #1a2535; outline: none; }
+    .save-btn   { font-size: .8rem; font-weight: 700; background: #2e7dd4; color: #fff; border: none; border-radius: 7px; padding: .35rem .75rem; cursor: pointer; }
+    .save-btn:hover { background: #2469b8; }
+    .cancel-btn { font-size: .8rem; color: #7a90a8; background: none; border: none; cursor: pointer; padding: .35rem .5rem; border-radius: 7px; }
+    .cancel-btn:hover { background: #f0f4f8; }
+    .empty { padding: 1rem 1.25rem; font-size: .88rem; color: #aabbc8; }
+    #error-bar { display:none; background:#fde8e8; color:#c0392b; border-radius:8px; padding:.6rem 1rem; margin-bottom:1rem; font-size:.85rem; font-weight:500; }
+  </style>
+</head>
+<body>
+  <div id="error-bar"></div>
+  <h1>Device Settings &nbsp;<a href="/" class="back">&larr; Dashboard</a></h1>
+  <div id="sections"></div>
+<script>
+const TYPE_LABELS = {
+  ble_sensors:   "BLE Temperature Sensors",
+  smart_plugs:   "Smart Plugs",
+  cameras:       "Cameras",
+  garages:       "Garage Doors",
+  presence:      "Presence Devices (iPhones)",
+  pool_monitors: "Pool Monitors",
+};
+
+function deviceId(type, d) {
+  if (type === "ble_sensors")   return d.address;
+  if (type === "pool_monitors") return d.id;
+  return d.id;
+}
+
+function deviceLabel(type, d) {
+  if (type === "ble_sensors")   return d.label || d.address;
+  if (type === "pool_monitors") return d.label;
+  return d.name;
+}
+
+function deviceSub(type, d) {
+  if (type === "ble_sensors")   return d.address;
+  if (type === "smart_plugs")   return [d.device_type, d.ip].filter(Boolean).join(" · ");
+  if (type === "presence")      return d.model_name || "";
+  if (type === "pool_monitors") return d.address || "";
+  return "";
+}
+
+function apiType(type) {
+  if (type === "ble_sensors")   return "ble_sensor";
+  if (type === "smart_plugs")   return "smart_plug";
+  if (type === "pool_monitors") return "pool_monitor";
+  return type.replace(/s$/, "");
+}
+
+function showError(msg) {
+  const bar = document.getElementById("error-bar");
+  bar.style.display = "";
+  bar.textContent = msg;
+}
+
+async function renameDevice(type, id, newName, row) {
+  try {
+    const r = await fetch("/api/devices/rename", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({type: apiType(type), id, new_name: newName}),
+    });
+    const data = await r.json();
+    if (!r.ok) { showError(data.error || "Rename failed"); return false; }
+    return true;
+  } catch(e) { showError("Network error: " + e.message); return false; }
+}
+
+function buildRow(type, d) {
+  const id    = deviceId(type, d);
+  const label = deviceLabel(type, d);
+  const sub   = deviceSub(type, d);
+
+  const row = document.createElement("div");
+  row.className = "device-row";
+  row.dataset.currentLabel = label;
+
+  const nameEl = document.createElement("div");
+  nameEl.className = "device-name";
+  nameEl.textContent = label;
+  if (sub) {
+    const subEl = document.createElement("div");
+    subEl.className = "device-sub";
+    subEl.textContent = sub;
+    nameEl.appendChild(subEl);
+  }
+
+  const editBtn = document.createElement("button");
+  editBtn.className = "edit-btn";
+  editBtn.textContent = "Rename";
+  editBtn.onclick = () => startEdit(row, type, id);
+
+  const form = document.createElement("div");
+  form.className = "edit-form";
+  form.style.display = "none";
+
+  const inp = document.createElement("input");
+  inp.className = "edit-input";
+  inp.type = "text";
+
+  const saveBtn = document.createElement("button");
+  saveBtn.className = "save-btn";
+  saveBtn.textContent = "Save";
+  saveBtn.onclick = () => saveEdit(row, type, id);
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "cancel-btn";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.onclick = () => cancelEdit(row);
+
+  form.append(inp, saveBtn, cancelBtn);
+  row.append(nameEl, editBtn, form);
+  return row;
+}
+
+function startEdit(row, type, id) {
+  const currentLabel = row.dataset.currentLabel;
+  row.querySelector(".device-name").style.display = "none";
+  row.querySelector(".edit-btn").style.display = "none";
+  const form = row.querySelector(".edit-form");
+  form.style.display = "flex";
+  const inp = row.querySelector(".edit-input");
+  inp.value = currentLabel;
+  inp.focus();
+  inp.select();
+  inp.onkeydown = e => {
+    if (e.key === "Enter") saveEdit(row, type, id);
+    if (e.key === "Escape") cancelEdit(row);
+  };
+}
+
+function cancelEdit(row) {
+  row.querySelector(".device-name").style.display = "";
+  row.querySelector(".edit-btn").style.display = "";
+  row.querySelector(".edit-form").style.display = "none";
+}
+
+async function saveEdit(row, type, id) {
+  const inp = row.querySelector(".edit-input");
+  const newName = inp.value.trim();
+  if (!newName) { inp.focus(); return; }
+  inp.disabled = true;
+  const ok = await renameDevice(type, id, newName, row);
+  inp.disabled = false;
+  if (!ok) return;
+  row.dataset.currentLabel = newName;
+  const nameEl = row.querySelector(".device-name");
+  const sub = nameEl.querySelector(".device-sub");
+  nameEl.textContent = newName;
+  if (sub) nameEl.appendChild(sub);
+  row.querySelector(".device-name").style.display = "";
+  row.querySelector(".edit-btn").style.display = "";
+  row.querySelector(".edit-form").style.display = "none";
+}
+
+async function load() {
+  let data;
+  try {
+    const r = await fetch("/api/devices");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    data = await r.json();
+  } catch(e) { showError("Failed to load devices: " + e.message); return; }
+
+  const container = document.getElementById("sections");
+  for (const [type, devices] of Object.entries(data)) {
+    const section = document.createElement("div");
+    section.className = "section";
+    const header = document.createElement("div");
+    header.className = "section-header";
+    header.textContent = TYPE_LABELS[type] || type;
+    section.appendChild(header);
+    if (!devices.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "No devices configured";
+      section.appendChild(empty);
+    } else {
+      devices.forEach(d => section.appendChild(buildRow(type, d)));
+    }
+    container.appendChild(section);
+  }
+}
+load();
 </script>
 </body>
 </html>"""
