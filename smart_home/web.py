@@ -5344,6 +5344,12 @@ def devices_page():
   <h1>Device Settings &nbsp;<a href="/" class="back">&larr; Dashboard</a></h1>
   <div id="sections"></div>
 <script>
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
 const TYPE_LABELS = {
   ble_sensors:   "BLE Temperature Sensors",
   smart_plugs:   "Smart Plugs",
@@ -7465,9 +7471,11 @@ def api_pool_history_year():
 def api_pool_node_get():
     """Return node assignment and available options for each water chemistry device."""
     from smart_home import pool as _pool
-    from smart_home import relay as _relay
     monitors = _pool.load_config()
-    relay_ids = [r["id"] for r in _relay.load_relays()]
+    with _conn() as conn:
+        relay_ids = [r[0] for r in conn.execute(
+            "SELECT relay_id FROM relay_checkin ORDER BY ts DESC"
+        ).fetchall()]
     options = [{"id": "server"}] + [{"id": rid} for rid in relay_ids]
     result = {}
     for m in monitors:
