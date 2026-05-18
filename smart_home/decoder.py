@@ -59,7 +59,7 @@ def decode_pvvx_advertisement(
         battery=battery,
         rssi=rssi,
         raw_reading=data.hex(),
-        device_type="Xiaomi",
+        device_type="Xiaomi LYWSD03MMC",
     )
 
 
