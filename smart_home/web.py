@@ -8124,8 +8124,6 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
   <div id="error-bar"></div>
   <h1>Water Chemistry <a class="back" href="/">&larr; Home</a></h1>
 
-  <div id="status-bar" style="display:none;margin-bottom:1.25rem;padding:.6rem 1.1rem;border-radius:10px;font-size:.85rem;font-weight:600"></div>
-
   <div class="section" style="margin-bottom:.75rem">Devices</div>
   <div id="devices-wrap"><span class="no-data">Loading&hellip;</span></div>
 
@@ -8199,24 +8197,13 @@ async function loadCurrent() {
     const rows = await fetchJSON('/api/water-chemistry/current');
     const wrap = document.getElementById('devices-wrap');
     if (!rows.length) { wrap.innerHTML = '<span class="no-data">No devices yet.</span>'; return; }
-    const bar = document.getElementById('status-bar');
-    const allOffline = rows.every(r => r.offline);
-    const anyOffline = rows.some(r => r.offline);
-    if (allOffline) {
-      bar.style.cssText = 'display:;background:#fde8e8;color:#c0392b;';
-      bar.textContent = '● Water chemistry monitor offline — last reading ' + ago(rows[0].ts);
-    } else if (anyOffline) {
-      bar.style.cssText = 'display:;background:#fde8e8;color:#c0392b;';
-      bar.textContent = '● One or more monitors offline';
-    } else {
-      bar.style.display = 'none';
-    }
     wrap.innerHTML = rows.map(r => `
       <div class="device-card">
         <div class="device-header">
           <span class="device-name">BLE-YC01</span>
           <span class="device-status ${r.offline ? 'offline' : 'online'}">${r.offline ? '&#9679; Offline' : '&#9679; Online'}</span>
           <span style="font-size:.75rem;color:#aabbc8">${ago(r.ts)}</span>
+          ${r.current_zone ? `<span style="font-size:.78rem;color:#7a90a8">&rarr; ${esc(r.current_zone)}</span>` : ''}
         </div>
         <div class="cards" style="margin-bottom:0;gap:.75rem">
           <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '—'}<span class="metric-unit">°F</span></div></div>
