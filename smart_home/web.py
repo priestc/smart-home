@@ -5464,6 +5464,10 @@ function buildRow(type, d) {
         <option value="30">30 seconds</option>
         <option value="60">60 seconds</option>
       </select>
+      <span class="wc-ctrl-label" style="margin-left:.5rem">Zone</span>
+      <select class="wc-select wc-zone-sel" onchange="setWcZone(this)">
+        <option value="">Loading…</option>
+      </select>
       <span class="wc-msg"></span>`;
     row.appendChild(controls);
   }
@@ -5513,8 +5517,16 @@ async function saveEdit(row, type, id) {
 
 async function loadWaterChemistrySettings() {
   try {
-    const data = await fetchJSON('/api/pool/node');
-    for (const [label, info] of Object.entries(data)) {
+    const [nodeData, zones, currentData] = await Promise.all([
+      fetchJSON('/api/pool/node'),
+      fetchJSON('/api/water-chemistry/zones'),
+      fetchJSON('/api/water-chemistry/current'),
+    ]);
+    const currentZoneByLabel = {};
+    for (const r of currentData) currentZoneByLabel[r.label] = r.current_zone || '';
+    const zoneOptions = '<option value="">-- No zone --</option>'
+      + zones.map(z => `<option value="${z.name}">${z.name}</option>`).join('');
+    for (const [label, info] of Object.entries(nodeData)) {
       const controls = document.querySelector(`.wc-controls[data-label="${CSS.escape(label)}"]`);
       if (!controls) continue;
       const nodeSel = controls.querySelector('.wc-node-sel');
@@ -5528,6 +5540,9 @@ async function loadWaterChemistrySettings() {
       for (const opt of pollSel.options) {
         if (parseInt(opt.value) === interval) { opt.selected = true; break; }
       }
+      const zoneSel = controls.querySelector('.wc-zone-sel');
+      zoneSel.innerHTML = zoneOptions;
+      zoneSel.value = currentZoneByLabel[label] || '';
     }
   } catch(e) { showError('Failed to load water chemistry settings: ' + e.message); }
 }
@@ -5575,6 +5590,27 @@ async function setWcPollRate(sel) {
   } catch(e) {
     msg.className = 'wc-msg err'; msg.textContent = 'Error: ' + e.message;
     showError('Failed to set poll rate: ' + e.message);
+  }
+}
+
+async function setWcZone(sel) {
+  const controls = sel.closest('.wc-controls');
+  const label = controls.dataset.label;
+  const zone = sel.value || null;
+  const msg = controls.querySelector('.wc-msg');
+  msg.className = 'wc-msg'; msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/water-chemistry/move', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({label, zone}),
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+    msg.className = 'wc-msg ok'; msg.textContent = 'Zone saved';
+    setTimeout(() => { msg.textContent = ''; }, 3000);
+  } catch(e) {
+    msg.className = 'wc-msg err'; msg.textContent = 'Error: ' + e.message;
+    showError('Failed to set zone: ' + e.message);
   }
 }
 
@@ -7959,12 +7995,6 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     .device-status { font-size:.78rem; font-weight:600; padding:.2rem .6rem; border-radius:20px; }
     .device-status.online { background:#eafaf1; color:#2a9d6e; }
     .device-status.offline { background:#fde8e8; color:#c0392b; }
-    .device-zone-row { display:flex; align-items:center; gap:.5rem; margin-bottom:.75rem; }
-    .device-zone-label { font-size:.72rem; color:#7a90a8; text-transform:uppercase; letter-spacing:.07em; font-weight:600; }
-    .zone-select { font-size:.85rem; padding:.3rem .6rem; border:1px solid #d0dce8; border-radius:8px; background:#fff; color:#1a2535; cursor:pointer; }
-    .zone-move-msg { font-size:.78rem; }
-    .zone-move-msg.ok  { color:#2a9d6e; }
-    .zone-move-msg.err { color:#c0392b; }
     .zone-section { margin-bottom:1.5rem; }
     .zone-btns { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; margin-bottom:.75rem; }
     .zone-btn {
@@ -8289,24 +8319,6 @@ function closeAddZone() {
   document.getElementById('add-zone-confirm').style.display = 'none';
 }
 
-// ── Move device to zone ───────────────────────────────────────────────────────
-async function moveDevice(label, zoneName, msgEl) {
-  msgEl.className = 'zone-move-msg'; msgEl.textContent = 'Saving\\u2026';
-  try {
-    const r = await fetch('/api/water-chemistry/move', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({label, zone: zoneName || null}),
-    });
-    const body = await r.json();
-    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
-    msgEl.className = 'zone-move-msg ok'; msgEl.textContent = 'Moved!';
-    setTimeout(() => { msgEl.textContent = ''; }, 3000);
-  } catch(e) {
-    msgEl.className = 'zone-move-msg err'; msgEl.textContent = 'Error: ' + e.message;
-    showError('Failed to move device: ' + e.message);
-  }
-}
-
 // ── Range selectors ──────────────────────────────────────────────────────────
 function setRange(days) {
   mode = 'recent'; rangeDays = days; offsetMs = 0;
@@ -8486,22 +8498,12 @@ async function loadCurrent() {
     } else {
       bar.style.display = 'none';
     }
-    const zoneOptions = ['<option value="">-- No zone --</option>',
-      ...zones.map(z => `<option value="${esc(z.name)}">${esc(z.name)}</option>`)
-    ].join('');
     wrap.innerHTML = rows.map((r, ri) => `
       <div class="device-card">
         <div class="device-header">
           <span class="device-name">BLE-YC01</span>
           <span class="device-status ${r.offline ? 'offline' : 'online'}">${r.offline ? '&#9679; Offline' : '&#9679; Online'}</span>
           <span style="font-size:.75rem;color:#aabbc8">${ago(r.ts)}</span>
-        </div>
-        <div class="device-zone-row">
-          <span class="device-zone-label">Zone</span>
-          <select class="zone-select" id="zone-sel-${ri}" onchange="moveDevice('${r.label.replace(/'/g,\"\\\\'\")}',this.value,document.getElementById('zone-msg-${ri}'))">
-            ${zoneOptions}
-          </select>
-          <span id="zone-msg-${ri}" class="zone-move-msg"></span>
         </div>
         <div class="cards" style="margin-bottom:0;gap:.75rem">
           <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '\\u2014'}<span class="metric-unit">\\u00b0F</span></div></div>
@@ -8514,11 +8516,6 @@ async function loadCurrent() {
         </div>
       </div>
     `).join('');
-    // Set current zone in each selector
-    rows.forEach((r, ri) => {
-      const sel = document.getElementById('zone-sel-' + ri);
-      if (sel && r.current_zone) sel.value = r.current_zone;
-    });
   } catch(e) { showError('Failed to load current readings: ' + e.message); }
 }
 
