@@ -12,6 +12,7 @@ class Reading:
     rssi: int | None
     raw_reading: str | None = None  # hex-encoded full manufacturer payload
     label: str | None = None
+    device_type: str | None = None
 
     @property
     def temp_f(self) -> float:
@@ -58,6 +59,7 @@ def decode_pvvx_advertisement(
         battery=battery,
         rssi=rssi,
         raw_reading=data.hex(),
+        device_type="Xiaomi",
     )
 
 
@@ -100,4 +102,5 @@ def decode_advertisement(address: str, name: str, manufacturer_data: dict, rssi:
         battery=battery,
         rssi=rssi,
         raw_reading=data.hex(),
+        device_type="Govee H5074",
     )

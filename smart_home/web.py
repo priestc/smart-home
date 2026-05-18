@@ -48,6 +48,7 @@ def ble_relay():
         decode_advertisement, decode_pvvx_advertisement, Reading,
     )
     from smart_home import labels as _labels
+    from smart_home import ble_types as _ble_types
     from smart_home.db import insert_reading
 
     auth = request.headers.get("Authorization", "")
@@ -146,6 +147,7 @@ def ble_relay():
 
             if reading is not None:
                 reading.label = label_map.get(address)
+                _ble_types.record(address, reading.device_type)
                 if reading.label:
                     insert_reading(conn, reading, batch_ts_local)
                     inserted += 1
@@ -4916,8 +4918,13 @@ def api_devices():
     from smart_home import presence as _presence
     from smart_home import pool as _pool
 
+    from smart_home import ble_types as _ble_types
     label_map = _labels.load()
-    ble = [{"address": addr, "label": lbl} for addr, lbl in sorted(label_map.items(), key=lambda x: x[1])]
+    type_map = _ble_types.load()
+    ble = [
+        {"address": addr, "label": lbl, "device_type": type_map.get(addr, "")}
+        for addr, lbl in sorted(label_map.items(), key=lambda x: x[1])
+    ]
 
     plugs = [{"id": p["name"], "name": p["name"], "device_type": p.get("type", ""), "ip": p.get("ip", "")}
              for p in _plug.load_config()]
@@ -5373,7 +5380,7 @@ function deviceLabel(type, d) {
 }
 
 function deviceSub(type, d) {
-  if (type === "ble_sensors")   return d.address;
+  if (type === "ble_sensors")   return [d.device_type, d.address].filter(Boolean).join(" · ");
   if (type === "smart_plugs")   return [d.device_type, d.ip].filter(Boolean).join(" · ");
   if (type === "presence")      return d.model_name || "";
   if (type === "water_chemistry") return d.address || "";

@@ -11,6 +11,7 @@ import click
 from bleak import BleakScanner, BleakClient
 from smart_home.scanner import scan, is_pvvx_lywsd03mmc, is_ble_yc01
 from smart_home import labels as _labels
+from smart_home import ble_types as _ble_types
 from smart_home import alert_config as _alert_config
 from smart_home import pvvx as _pvvx
 from smart_home import presence as _presence
@@ -1973,6 +1974,7 @@ def monitor(duration, verbose, db, no_db):
     def on_reading(reading):
         db_label = label_map.get(reading.address)
         reading.label = db_label or reading.name or reading.address  # always show something in terminal
+        _ble_types.record(reading.address, reading.device_type)
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         click.echo(f"[{ts}] {reading}")
         seen.add(reading.address)
