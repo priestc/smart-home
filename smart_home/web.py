@@ -18,7 +18,7 @@ def _conn() -> sqlite3.Connection:
 
 @app.get("/api/current")
 def current():
-    """Latest reading for each sensor label, including pool monitors."""
+    """Latest reading for each sensor label, including water chemistry sensors."""
     with _conn() as conn:
         rows = conn.execute("""
             SELECT label, temp_f, humidity, rssi, ts, 'reading' AS source
@@ -355,11 +355,11 @@ def ble_relay():
                 break
         _relay.save_relays(relays)
 
-    # Tell the relay which pool monitor (if any) it is assigned to handle.
+    # Tell the relay which water chemistry device (if any) it is assigned to handle.
     from smart_home import pool as _pool
-    pool_monitors = _pool.load_config()
+    water_chemistry_devices = _pool.load_config()
     assigned = next(
-        (m for m in pool_monitors if m.get("node") == relay_cfg["id"]), None
+        (m for m in water_chemistry_devices if m.get("node") == relay_cfg["id"]), None
     )
     response["ble_yc01"] = {
         "address": assigned["address"],
@@ -4931,7 +4931,7 @@ def api_devices():
         for name, info in _presence.load_iphone_devices().items()
     ]
 
-    pool_monitors = [
+    water_chemistry_devices = [
         {"id": m["label"], "label": m["label"], "address": m.get("address", "")}
         for m in _pool.load_config()
     ]
@@ -4942,7 +4942,7 @@ def api_devices():
         "cameras": cameras,
         "garages": garages,
         "presence": presence_devs,
-        "pool_monitors": pool_monitors,
+        "water_chemistry": water_chemistry_devices,
     })
 
 
@@ -5001,7 +5001,7 @@ def api_devices_rename():
         devices[new_name] = devices.pop(device_id)
         _presence.save_iphone_devices(devices)
 
-    elif device_type == "pool_monitor":
+    elif device_type == "water_chemistry":
         monitors = _pool.load_config()
         match = next((m for m in monitors if m["label"] == device_id), None)
         if match is None:
@@ -5344,18 +5344,18 @@ const TYPE_LABELS = {
   cameras:       "Cameras",
   garages:       "Garage Doors",
   presence:      "Presence Devices (iPhones)",
-  pool_monitors: "Pool Monitors",
+  water_chemistry: "Water Chemistry",
 };
 
 function deviceId(type, d) {
   if (type === "ble_sensors")   return d.address;
-  if (type === "pool_monitors") return d.id;
+  if (type === "water_chemistry") return d.id;
   return d.id;
 }
 
 function deviceLabel(type, d) {
   if (type === "ble_sensors")   return d.label || d.address;
-  if (type === "pool_monitors") return d.label;
+  if (type === "water_chemistry") return d.label;
   return d.name;
 }
 
@@ -5363,14 +5363,14 @@ function deviceSub(type, d) {
   if (type === "ble_sensors")   return d.address;
   if (type === "smart_plugs")   return [d.device_type, d.ip].filter(Boolean).join(" · ");
   if (type === "presence")      return d.model_name || "";
-  if (type === "pool_monitors") return d.address || "";
+  if (type === "water_chemistry") return d.address || "";
   return "";
 }
 
 function apiType(type) {
   if (type === "ble_sensors")   return "ble_sensor";
   if (type === "smart_plugs")   return "smart_plug";
-  if (type === "pool_monitors") return "pool_monitor";
+  if (type === "water_chemistry") return "water_chemistry";
   return type.replace(/s$/, "");
 }
 
@@ -7150,12 +7150,12 @@ def garage_page():
     return Response(_GARAGE_PAGE, mimetype="text/html")
 
 
-# Pool monitor
+# Water chemistry
 # ---------------------------------------------------------------------------
 
 @app.get("/api/pool/events")
 def api_pool_events():
-    """Recent offline/online events for pool monitors."""
+    """Recent offline/online events for water chemistry devices."""
     with _conn() as conn:
         rows = conn.execute("""
             SELECT id, ts, event_type, value, details
@@ -7172,7 +7172,7 @@ def api_pool_events():
 
 @app.get("/api/pool/current")
 def api_pool_current():
-    """Latest reading for each pool monitor."""
+    """Latest reading for each water chemistry device."""
     with _conn() as conn:
         rows = conn.execute("""
             SELECT label, address, temp_c, ph, ec, tds, orp, chlorine, battery, rssi, ts
@@ -7368,7 +7368,7 @@ def api_pool_history_year():
 
 @app.get("/api/pool/node")
 def api_pool_node_get():
-    """Return node assignment and available options for each pool monitor."""
+    """Return node assignment and available options for each water chemistry device."""
     from smart_home import pool as _pool
     from smart_home import relay as _relay
     monitors = _pool.load_config()
@@ -7387,7 +7387,7 @@ def api_pool_node_get():
 
 @app.post("/api/pool/node")
 def api_pool_node_set():
-    """Set the node for a pool monitor."""
+    """Set the node for a water chemistry device."""
     from smart_home import pool as _pool
     from smart_home import relay as _relay
     data = request.get_json(silent=True) or {}
@@ -7405,7 +7405,7 @@ def api_pool_node_set():
 
 @app.post("/api/pool/poll-rate")
 def api_pool_poll_rate_set():
-    """Set the poll interval for a pool monitor."""
+    """Set the poll interval for a water chemistry device."""
     from smart_home import pool as _pool
     data = request.get_json(silent=True) or {}
     label = data.get("label")
@@ -7420,7 +7420,7 @@ def api_pool_poll_rate_set():
 
 @app.post("/api/pool/relay-reading")
 def api_pool_relay_reading():
-    """Receive a pool reading POSTed directly by a relay in persistent pool-monitor mode."""
+    """Receive a pool reading POSTed directly by a relay in persistent water-chemistry mode."""
     from smart_home import relay as _relay
     from smart_home import pool as _pool
     from smart_home.db import insert_pool_reading
@@ -7439,7 +7439,7 @@ def api_pool_relay_reading():
     result_hex = data.get("result_hex") or ""
     rssi = data.get("rssi")
 
-    # Relay is reporting that the pool monitor is offline (no reading available).
+    # Relay is reporting that the water chemistry device is offline (no reading available).
     if data.get("offline"):
         import json as _json
         with _conn() as conn:

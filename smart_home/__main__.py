@@ -407,12 +407,12 @@ def list_devices():
             ip = info.get("local_ip", "—")
             click.echo(f"  {name:<28} {status:<10} {last_seen}  (bt={bt}, ip={ip})")
 
-    pool_monitors = _pool.load_config()
-    if pool_monitors:
+    water_chemistry_devices = _pool.load_config()
+    if water_chemistry_devices:
         any_found = True
         click.echo("\n  BLE-YC01 devices:")
         click.echo("  " + "-" * 50)
-        for p in pool_monitors:
+        for p in water_chemistry_devices:
             click.echo(f"  {p.get('label', ''):<24} BLE_YC01 ({p.get('address', '')})")
 
     if not any_found:
@@ -1095,11 +1095,11 @@ def configure_garage():
     click.echo(f"\nDone. Control it at: http://<your-server>:5000/garage")
 
 
-@main.command("configure-pool-monitor")
+@main.command("configure-water-chemistry")
 @click.option("--timeout", "-t", type=float, default=20.0,
               help="Seconds to scan for BLE_YC01 devices (default: 20).")
-def configure_pool_monitor(timeout):
-    """Register a BLE_YC01 pool monitor.
+def configure_water_chemistry(timeout):
+    """Register a BLE_YC01 water chemistry device.
 
     Scans for BLE_YC01 advertisements and saves the device's MAC address and
     a user-assigned label to ~/.config/smart-home/pool_monitors.json.
@@ -1207,10 +1207,10 @@ def remove_device(name, purge, db):
         click.echo(f"Removed iPhone presence device '{name}'.")
         removed.append("presence device")
 
-    pool_monitors = _pool.load_config()
-    new_pool = [p for p in pool_monitors if p.get("label", "").lower() != name_lower and p.get("address", "").lower() != name_lower]
-    if len(new_pool) < len(pool_monitors):
-        _pool.save_config(new_pool)
+    water_chemistry_devices = _pool.load_config()
+    new_water_chemistry = [p for p in water_chemistry_devices if p.get("label", "").lower() != name_lower and p.get("address", "").lower() != name_lower]
+    if len(new_water_chemistry) < len(water_chemistry_devices):
+        _pool.save_config(new_water_chemistry)
         click.echo(f"Removed BLE-YC01 '{name}'.")
         removed.append("BLE-YC01")
 
@@ -1435,7 +1435,7 @@ def monitor(duration, verbose, db, no_db):
     pool_last_reading: dict[str, datetime.datetime] = {}  # pool label -> time of last successful reading
     pool_offline_alerted: set[str] = set()               # pool labels with active offline alert
 
-    # BLE_YC01 pool monitors — persistent GATT connection keeps the device awake.
+    # BLE_YC01 water chemistry devices — persistent GATT connection keeps the device awake.
     pool_config = {m["address"].upper(): m["label"] for m in _pool.load_config()}
     yc01_devices: dict[str, tuple] = {}  # address -> (BLEDevice, last_rssi)
 
@@ -1518,7 +1518,7 @@ def monitor(duration, verbose, db, no_db):
             is_new = curr_upper not in yc01_devices
             yc01_devices[curr_upper] = (device, adv.rssi)
             if is_new and curr_upper in pool_config:
-                click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered pool monitor: {pool_config[curr_upper]} ({device.address})")
+                click.echo(f"[{now.strftime('%H:%M:%S')}] Discovered water chemistry device: {pool_config[curr_upper]} ({device.address})")
 
         if verbose:
             if ble_name:
@@ -1862,7 +1862,7 @@ def monitor(duration, verbose, db, no_db):
     _last_record_check_hour = -1
 
     async def _yc01_persistent_loop(addr: str, label: str) -> None:
-        """Maintain a persistent GATT connection to a BLE_YC01 pool monitor.
+        """Maintain a persistent GATT connection to a BLE_YC01 water chemistry device.
 
         Keeping the connection open prevents the device from entering sleep/off mode.
 
@@ -1887,7 +1887,7 @@ def monitor(duration, verbose, db, no_db):
                 continue
 
             def _pick_device():
-                """Return BLEDevice for this pool monitor, handling RPA address rotation."""
+                """Return BLEDevice for this water chemistry device, handling RPA address rotation."""
                 if addr_upper in yc01_devices:
                     return yc01_devices[addr_upper][0]
                 if yc01_devices:
@@ -2172,7 +2172,7 @@ def monitor(duration, verbose, db, no_db):
                                 _push.send_notification(title="Sensor Offline", body=f"{label} has stopped responding")
                             click.echo(f"[{log_ts}] Sensor offline: {label}")
 
-            # Check pool monitor connectivity
+            # Check water chemistry device connectivity
             POOL_OFFLINE_THRESHOLD = datetime.timedelta(minutes=10)
 
             # Relay pools are not updated by _yc01_persistent_loop — refresh from DB.

@@ -56,7 +56,7 @@ def save_config(monitors: list[dict]) -> None:
 
 
 def set_node(label: str, node: str) -> bool:
-    """Set the node responsible for this pool monitor ('server' or a relay ID).
+    """Set the node responsible for this water chemistry device ('server' or a relay ID).
 
     Returns False if no monitor with the given label is found.
     """
@@ -92,7 +92,7 @@ def set_device_zone(label: str, zone_name: str | None) -> bool:
 
 
 def set_poll_interval(label: str, interval_s: int) -> bool:
-    """Set the poll interval in seconds for a pool monitor.
+    """Set the poll interval in seconds for a water chemistry device.
 
     Returns False if no monitor with the given label is found.
     """
