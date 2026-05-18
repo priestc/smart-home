@@ -5317,7 +5317,13 @@ def devices_page():
     .back { font-size: .85rem; font-weight: 500; color: #2e7dd4; text-decoration: none; margin-left: .75rem; }
     .section { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); margin-bottom: 1.5rem; overflow: hidden; }
     .section-header { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: #7a90a8; padding: .75rem 1.25rem; background: #f8fafc; border-bottom: 1px solid #e8edf3; }
-    .device-row { display: flex; align-items: center; gap: 1rem; padding: .75rem 1.25rem; border-bottom: 1px solid #f0f4f8; }
+    .device-row { display: flex; align-items: center; gap: 1rem; padding: .75rem 1.25rem; border-bottom: 1px solid #f0f4f8; flex-wrap: wrap; }
+    .wc-controls { width: 100%; display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; padding-top: .4rem; }
+    .wc-ctrl-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+    .wc-select { font-size: .85rem; padding: .3rem .6rem; border: 1px solid #d0dce8; border-radius: 8px; background: #fff; color: #1a2535; cursor: pointer; }
+    .wc-msg { font-size: .78rem; }
+    .wc-msg.ok  { color: #2a9d6e; }
+    .wc-msg.err { color: #c0392b; }
     .device-row:last-child { border-bottom: none; }
     .device-name { flex: 1; font-size: .95rem; font-weight: 600; color: #1a2535; }
     .device-sub  { font-size: .78rem; color: #7a90a8; font-weight: 400; margin-top: .1rem; }
@@ -5437,6 +5443,25 @@ function buildRow(type, d) {
 
   form.append(inp, saveBtn, cancelBtn);
   row.append(nameEl, editBtn, form);
+
+  if (type === "water_chemistry") {
+    const controls = document.createElement("div");
+    controls.className = "wc-controls";
+    controls.dataset.label = id;
+    controls.innerHTML = `
+      <span class="wc-ctrl-label">Connection node</span>
+      <select class="wc-select wc-node-sel" onchange="setWcNode(this)">
+        <option value="">Loading…</option>
+      </select>
+      <span class="wc-ctrl-label" style="margin-left:.5rem">Poll rate</span>
+      <select class="wc-select wc-poll-sel" onchange="setWcPollRate(this)">
+        <option value="30">30 seconds</option>
+        <option value="60">60 seconds</option>
+      </select>
+      <span class="wc-msg"></span>`;
+    row.appendChild(controls);
+  }
+
   return row;
 }
 
@@ -5480,6 +5505,73 @@ async function saveEdit(row, type, id) {
   row.querySelector(".edit-form").style.display = "none";
 }
 
+async function loadWaterChemistrySettings() {
+  try {
+    const data = await fetchJSON('/api/pool/node');
+    for (const [label, info] of Object.entries(data)) {
+      const controls = document.querySelector(`.wc-controls[data-label="${CSS.escape(label)}"]`);
+      if (!controls) continue;
+      const nodeSel = controls.querySelector('.wc-node-sel');
+      nodeSel.innerHTML = info.relay_options.map(opt => {
+        const name = opt.id === 'server' ? 'Server (tank2)' : opt.id;
+        const selected = opt.id === info.node ? ' selected' : '';
+        return `<option value="${opt.id}"${selected}>${name}</option>`;
+      }).join('');
+      const pollSel = controls.querySelector('.wc-poll-sel');
+      const interval = info.poll_interval_s ?? 60;
+      for (const opt of pollSel.options) {
+        if (parseInt(opt.value) === interval) { opt.selected = true; break; }
+      }
+    }
+  } catch(e) { showError('Failed to load water chemistry settings: ' + e.message); }
+}
+
+async function setWcNode(sel) {
+  const controls = sel.closest('.wc-controls');
+  const label = controls.dataset.label;
+  const node = sel.value;
+  const msg = controls.querySelector('.wc-msg');
+  msg.className = 'wc-msg'; msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/pool/node', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({label, node}),
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+    msg.className = 'wc-msg ok';
+    msg.textContent = node === 'server'
+      ? 'Server will handle on next restart'
+      : `Relay '${node}' will activate on its next check-in (~18s)`;
+    setTimeout(() => { msg.textContent = ''; }, 5000);
+  } catch(e) {
+    msg.className = 'wc-msg err'; msg.textContent = 'Error: ' + e.message;
+    showError('Failed to set node: ' + e.message);
+  }
+}
+
+async function setWcPollRate(sel) {
+  const controls = sel.closest('.wc-controls');
+  const label = controls.dataset.label;
+  const interval_s = parseInt(sel.value);
+  const msg = controls.querySelector('.wc-msg');
+  msg.className = 'wc-msg'; msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/pool/poll-rate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({label, interval_s}),
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+    msg.className = 'wc-msg ok';
+    msg.textContent = 'Poll rate saved — relay will apply on next check-in';
+    setTimeout(() => { msg.textContent = ''; }, 5000);
+  } catch(e) {
+    msg.className = 'wc-msg err'; msg.textContent = 'Error: ' + e.message;
+    showError('Failed to set poll rate: ' + e.message);
+  }
+}
+
 async function load() {
   let data;
   try {
@@ -5505,6 +5597,9 @@ async function load() {
       devices.forEach(d => section.appendChild(buildRow(type, d)));
     }
     container.appendChild(section);
+  }
+  if (data.water_chemistry && data.water_chemistry.length) {
+    loadWaterChemistrySettings();
   }
 }
 load();
@@ -7821,7 +7916,6 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     tr:last-child td { border-bottom: none; }
     #error-bar { display:none; background:#fde8e8; color:#c0392b; border-radius:8px; padding:.6rem 1rem; margin-bottom:1rem; font-size:.85rem; font-weight:500; }
     .no-data { color: #aabbc8; font-style: italic; padding: 1rem; }
-    .label-select { font-size: .9rem; padding: .4rem .75rem; border: 1px solid #d0dce8; border-radius: 8px; background: #fff; color: #1a2535; cursor: pointer; }
     .metric-btns { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
     .metric-btn {
       font-size: .8rem; font-weight: 600; padding: .4rem .9rem; border-radius: 20px;
@@ -7840,9 +7934,6 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     .metric-btn[data-metric="battery"].active { background: #7a90a8; }
     .chart-wrap { background: #fff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 2rem; }
     .metric-desc { font-size: .82rem; color: #5a6e84; background: #f0f4f8; border-left: 3px solid #d0dce8; border-radius: 0 6px 6px 0; padding: .5rem .85rem; margin-bottom: .75rem; display: none; }
-    .node-msg { font-size: .8rem; color: #7a90a8; }
-    .node-msg.ok  { color: #2a9d6e; }
-    .node-msg.err { color: #c0392b; }
     .btn-group { margin-bottom: 1.2rem; }
     .btn-group-label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .4rem; }
     .range-btns { display: flex; gap: .4rem; flex-wrap: wrap; }
@@ -7905,17 +7996,6 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
              onkeydown="if(event.key==='Enter')addZone();if(event.key==='Escape')closeAddZone()">
       <button class="add-zone-confirm" id="add-zone-confirm" style="display:none" onclick="addZone()">Add</button>
     </div>
-  </div>
-
-  <div id="node-wrap" style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem">
-    <div class="section" style="margin-bottom:0">Connection node</div>
-    <select class="label-select" id="node-sel" onchange="setNode()"></select>
-    <div class="section" style="margin-bottom:0;margin-left:.5rem">Poll rate</div>
-    <select class="label-select" id="poll-rate-sel" onchange="setPollRate()">
-      <option value="30">30 seconds</option>
-      <option value="60">60 seconds</option>
-    </select>
-    <span id="node-msg" class="node-msg"></span>
   </div>
 
   <div class="res-row">
@@ -8380,74 +8460,6 @@ document.getElementById('metric-btns').addEventListener('click', e => {
 });
 updateDesc(document.querySelector('.metric-btn.active'));
 
-// ── Node / poll rate ─────────────────────────────────────────────────────────
-let _nodeLabel = null;
-
-async function loadNode() {
-  try {
-    const data = await fetchJSON('/api/pool/node');
-    const labels = Object.keys(data);
-    if (!labels.length) { document.getElementById('node-wrap').style.display = 'none'; return; }
-    _nodeLabel = labels[0];
-    const info = data[_nodeLabel];
-    const sel  = document.getElementById('node-sel');
-    sel.innerHTML = info.relay_options.map(opt => {
-      const name     = opt.id === 'server' ? 'Server (tank2)' : opt.id;
-      const selected = opt.id === info.node ? ' selected' : '';
-      return `<option value="${opt.id}"${selected}>${name}</option>`;
-    }).join('');
-    const pollSel  = document.getElementById('poll-rate-sel');
-    const interval = info.poll_interval_s ?? 60;
-    for (const opt of pollSel.options) {
-      if (parseInt(opt.value) === interval) { opt.selected = true; break; }
-    }
-  } catch(e) { showError('Failed to load node config: ' + e.message); }
-}
-
-async function setPollRate() {
-  if (!_nodeLabel) return;
-  const interval_s = parseInt(document.getElementById('poll-rate-sel').value);
-  const msg = document.getElementById('node-msg');
-  msg.className = 'node-msg'; msg.textContent = 'Saving\\u2026';
-  try {
-    const r = await fetch('/api/pool/poll-rate', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({label: _nodeLabel, interval_s}),
-    });
-    const body = await r.json();
-    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
-    msg.className = 'node-msg ok';
-    msg.textContent = 'Poll rate saved \\u2014 relay will apply on next check-in';
-    setTimeout(() => { msg.textContent = ''; }, 5000);
-  } catch(e) {
-    msg.className = 'node-msg err'; msg.textContent = 'Error: ' + e.message;
-    showError('Failed to set poll rate: ' + e.message);
-  }
-}
-
-async function setNode() {
-  if (!_nodeLabel) return;
-  const node = document.getElementById('node-sel').value;
-  const msg  = document.getElementById('node-msg');
-  msg.className = 'node-msg'; msg.textContent = 'Saving\\u2026';
-  try {
-    const r = await fetch('/api/pool/node', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({label: _nodeLabel, node}),
-    });
-    const body = await r.json();
-    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
-    msg.className = 'node-msg ok';
-    msg.textContent = node === 'server'
-      ? 'Server will handle on next restart'
-      : `Relay '${node}' will activate on its next check-in (~18s)`;
-    setTimeout(() => { msg.textContent = ''; }, 5000);
-  } catch(e) {
-    msg.className = 'node-msg err'; msg.textContent = 'Error: ' + e.message;
-    showError('Failed to set node: ' + e.message);
-  }
-}
-
 // ── Devices ───────────────────────────────────────────────────────────────────
 async function loadCurrent() {
   try {
@@ -8617,7 +8629,6 @@ async function loadHistoryForChart() {
   } catch(e) { showError('Failed to load history: ' + e.message); }
 }
 
-loadNode();
 loadZones();
 setInterval(loadCurrent, 30000);
 </script>
