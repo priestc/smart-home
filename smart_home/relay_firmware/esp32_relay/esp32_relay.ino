@@ -44,18 +44,19 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <esp_system.h>
+#include <algorithm>
 #include <map>
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.54"
-#define FIRMWARE_REV          61
+#define FIRMWARE_VERSION      "1.7.58"
+#define FIRMWARE_REV          65
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
 #define BOOT_PROBE_MS          3000UL
 #define HTTP_TIMEOUT_MS        2000
-#define MAX_BUFFER             30
+#define MAX_BUFFER             60
 
 // GATT UUIDs — full 128-bit form matches what Python pool.py uses and avoids
 // 16-bit→128-bit expansion mismatches in the Bluedroid BLEUUID comparator.
@@ -653,12 +654,71 @@ static String buildPayload(bool include_presence, bool pool_offline = false,
 
 // ── BLE advertisement batch POST with buffering ───────────────────────────────
 
+// Extract the batch_ts string ("YYYY-MM-DD HH:MM:SS") from a stored payload.
+// Returns "" if missing — sorts before any real timestamp, which is safe.
+static String batchTs(const String& payload) {
+    int idx = payload.indexOf("\"batch_ts\":\"");
+    if (idx < 0) return "";
+    idx += 12;
+    if (idx + 19 > (int)payload.length()) return "";
+    return payload.substring(idx, idx + 19);
+}
+
+// Parse "YYYY-MM-DD HH:MM:SS" to epoch seconds via mktime (UTC, since the
+// relay runs with configTime(0,0,...) so local time == UTC).
+static long tsToSecs(const String& ts) {
+    if (ts.length() < 19) return 0;
+    const char* s = ts.c_str();
+    struct tm t = {};
+    t.tm_year  = (s[0]-'0')*1000+(s[1]-'0')*100+(s[2]-'0')*10+(s[3]-'0') - 1900;
+    t.tm_mon   = (s[5]-'0')*10+(s[6]-'0') - 1;
+    t.tm_mday  = (s[8]-'0')*10+(s[9]-'0');
+    t.tm_hour  = (s[11]-'0')*10+(s[12]-'0');
+    t.tm_min   = (s[14]-'0')*10+(s[15]-'0');
+    t.tm_sec   = (s[17]-'0')*10+(s[18]-'0');
+    t.tm_isdst = 0;
+    return (long)mktime(&t);
+}
+
+static void bufferClear() {
+    g_batch_queue.clear();
+}
+
+// When the buffer is not yet full, append and keep sorted by timestamp.
+// When full, add the new reading, re-sort, then evict the interior reading
+// whose removal creates the smallest merged gap with its two neighbors.
+// The oldest and newest readings are never evicted, so the buffer always
+// spans [first outage reading … most recent reading].
 static void bufferPush(const String& payload) {
-    if (g_batch_queue.size() >= MAX_BUFFER) {
-        g_batch_queue.erase(g_batch_queue.begin());
-        Serial.println("Buffer full — dropped oldest batch");
-    }
     g_batch_queue.push_back(payload);
+    std::sort(g_batch_queue.begin(), g_batch_queue.end(),
+              [](const String& a, const String& b) {
+                  return batchTs(a) < batchTs(b);
+              });
+
+    int n = (int)g_batch_queue.size();
+    if (n <= MAX_BUFFER) {
+        Serial.printf("Buffer: %d/%d\n", n, MAX_BUFFER);
+        return;
+    }
+
+    // Precompute epoch seconds once, then scan for the victim.
+    std::vector<long> epoch(n);
+    for (int i = 0; i < n; i++)
+        epoch[i] = tsToSecs(batchTs(g_batch_queue[i]));
+
+    int victim = 1;
+    long min_merged = 9999999999L;
+    for (int i = 1; i < n - 1; i++) {
+        long merged = epoch[i + 1] - epoch[i - 1];
+        if (merged < min_merged) {
+            min_merged = merged;
+            victim = i;
+        }
+    }
+    g_batch_queue.erase(g_batch_queue.begin() + victim);
+    Serial.printf("Buffer full: evicted slot %d (merged gap %lds)  %d entries\n",
+                  victim + 1, min_merged, MAX_BUFFER);
 }
 
 // Set true after the first successful POST when the buffer is non-empty.
@@ -681,7 +741,7 @@ static void postBatch(bool pool_offline = false, const String& pool_hex = "", in
                                   false, &g_batch_queue), true)) {
             Serial.printf("Drain complete — %u buffered entries delivered.\n",
                           (unsigned)g_batch_queue.size());
-            g_batch_queue.clear();
+            bufferClear();
         } else {
             Serial.println("Drain POST failed — buffering current batch, will retry next reconnect.");
             bufferPush(buildPayload(false, pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip, true));

@@ -39,8 +39,9 @@ def make_payload(ts: datetime) -> str:
 class Buffer:
     """Mirrors the g_batch_queue logic in esp32_relay.ino."""
 
-    def __init__(self, max_buffer: int = 60):
+    def __init__(self, max_buffer: int = 60, parity: int = 0):
         self.MAX_BUFFER = max_buffer
+        self.parity = parity  # 0=reads every W seconds; 1=reads every W/2 seconds
         self.queue: list[str] = []   # always sorted by batch_ts
 
     def clear(self):
@@ -70,6 +71,22 @@ class Buffer:
 
         del self.queue[victim]
         return f"evicted:{victim + 1}"
+
+    def next_read_delay(self) -> float:
+        """
+        Seconds until the next reading should be taken.
+        Phase 1 (filling): 30 s — same rate as before.
+        Phase 2 (full): W = span / (MAX_BUFFER - 1), the ideal spacing
+        given the buffer's current time range. parity=0 returns W;
+        parity=1 returns W/2 so this relay reads at the midpoints
+        between a parity-0 relay's readings.
+        """
+        if len(self.queue) < self.MAX_BUFFER:
+            return 30.0
+        times = [ts_to_secs(batch_ts(p)) for p in self.queue]
+        span = times[-1] - times[0]
+        W = span / (self.MAX_BUFFER - 1)
+        return W / 2 if self.parity == 1 else W
 
     def timestamps(self) -> list[str]:
         return [batch_ts(p) for p in self.queue]
