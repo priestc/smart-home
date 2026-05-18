@@ -49,8 +49,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.58"
-#define FIRMWARE_REV          65
+#define FIRMWARE_VERSION      "1.7.59"
+#define FIRMWARE_REV          66
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -552,6 +552,10 @@ static bool httpPost(const String& payload, bool parse_gatt) {
                         g_pool_addr  = new_addr;
                         g_pool_label = new_label;
                         poolDisconnect();
+                    } else if (new_label != g_pool_label) {
+                        Serial.printf("BLE-YC01 label updated: %s\n", new_label.c_str());
+                        g_pool_label = new_label;
+                        savePoolMonitor(g_pool_addr, new_label);
                     }
                 } else if (g_pool_addr.length() > 0) {
                     Serial.println("BLE-YC01 cleared by server");

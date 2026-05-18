@@ -1943,7 +1943,7 @@ def monitor(duration, verbose, db, no_db):
                             reading.rssi = last_rssi
                             click.echo(f"[{ts}] BLE-YC01:{reading}")
                             if conn:
-                                zone = _pool.get_device_zone(label)
+                                zone = _pool.get_device_zone(label, addr)
                                 insert_pool_reading(conn, reading, zone=zone)
                                 pool_last_reading[label] = datetime.datetime.now()
                         else:

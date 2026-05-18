@@ -69,10 +69,11 @@ def set_node(label: str, node: str) -> bool:
     return False
 
 
-def get_device_zone(label: str) -> str | None:
-    """Return the current zone name for a monitor, or None if unset."""
+def get_device_zone(label: str, address: str = "") -> str | None:
+    """Return the current zone name for a monitor, matching by label or address."""
+    address_upper = address.upper() if address else ""
     for m in load_config():
-        if m.get("label") == label:
+        if m.get("label") == label or (address_upper and m.get("address", "").upper() == address_upper):
             return m.get("current_zone")
     return None
 

@@ -172,7 +172,7 @@ def ble_relay():
                     reading.address = pool_address
                     reading.label = pool_label
                     reading.rssi = pool_rssi
-                    insert_pool_reading(conn, reading, zone=_pool.get_device_zone(pool_label))
+                    insert_pool_reading(conn, reading, zone=_pool.get_device_zone(pool_label, pool_address))
                     _pool_reading_stored = True
                     if pool_rssi is not None:
                         labeled_seen[pool_label] = pool_rssi
