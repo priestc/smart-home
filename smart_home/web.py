@@ -4922,24 +4922,36 @@ def api_devices():
     label_map = _labels.load()
     type_map = _ble_types.load()
     ble = [
-        {"address": addr, "label": lbl, "device_type": type_map.get(addr, "")}
+        {"address": addr, "label": lbl, "model": type_map.get(addr, "")}
         for addr, lbl in sorted(label_map.items(), key=lambda x: x[1])
     ]
 
-    plugs = [{"id": p["name"], "name": p["name"], "device_type": p.get("type", ""), "ip": p.get("ip", "")}
-             for p in _plug.load_config()]
+    plugs = [
+        {"id": p["name"], "name": p["name"], "model": p.get("type", ""), "address": p.get("ip", "")}
+        for p in _plug.load_config()
+    ]
 
-    cameras = [{"id": c["name"], "name": c["name"]} for c in _camera.load_config()]
+    def _camera_ip(c):
+        url = c.get("url", "")
+        return url.replace("https://", "").replace("http://", "").split("/")[0]
 
-    garages = [{"id": g["name"], "name": g["name"]} for g in _garage.load_config()]
+    cameras = [
+        {"id": c["name"], "name": c["name"], "model": c.get("model", ""), "address": _camera_ip(c)}
+        for c in _camera.load_config()
+    ]
+
+    garages = [
+        {"id": g["name"], "name": g["name"], "model": g.get("model", ""), "address": g.get("ip", "")}
+        for g in _garage.load_config()
+    ]
 
     presence_devs = [
-        {"id": name, "name": name, "model_name": info.get("model_name", "")}
+        {"id": name, "name": name, "model": "", "address": info.get("local_ip", "")}
         for name, info in _presence.load_iphone_devices().items()
     ]
 
     water_chemistry_devices = [
-        {"id": m["label"], "label": m["label"], "address": m.get("address", "")}
+        {"id": m["label"], "label": m["label"], "model": "BLE-YC01", "address": m.get("address", "")}
         for m in _pool.load_config()
     ]
 
@@ -5380,11 +5392,7 @@ function deviceLabel(type, d) {
 }
 
 function deviceSub(type, d) {
-  if (type === "ble_sensors")   return [d.device_type, d.address].filter(Boolean).join(" · ");
-  if (type === "smart_plugs")   return [d.device_type, d.ip].filter(Boolean).join(" · ");
-  if (type === "presence")      return d.model_name || "";
-  if (type === "water_chemistry") return d.address || "";
-  return "";
+  return [d.model, d.address].filter(Boolean).join(" · ");
 }
 
 function apiType(type) {
