@@ -5518,13 +5518,10 @@ async function saveEdit(row, type, id) {
 
 async function loadWaterChemistrySettings() {
   try {
-    const [nodeData, zones, currentData] = await Promise.all([
+    const [nodeData, zones] = await Promise.all([
       fetchJSON('/api/pool/node'),
       fetchJSON('/api/water-chemistry/zones'),
-      fetchJSON('/api/water-chemistry/current'),
     ]);
-    const currentZoneByLabel = {};
-    for (const r of currentData) currentZoneByLabel[r.label] = r.current_zone || '';
     const zoneOptions = '<option value="">-- No zone --</option>'
       + zones.map(z => `<option value="${z.name}">${z.name}</option>`).join('');
     for (const [label, info] of Object.entries(nodeData)) {
@@ -5543,7 +5540,7 @@ async function loadWaterChemistrySettings() {
       }
       const zoneSel = controls.querySelector('.wc-zone-sel');
       zoneSel.innerHTML = zoneOptions;
-      zoneSel.value = currentZoneByLabel[label] || '';
+      zoneSel.value = info.current_zone || '';
     }
   } catch(e) { showError('Failed to load water chemistry settings: ' + e.message); }
 }
@@ -7521,6 +7518,7 @@ def api_pool_node_get():
             "node": m.get("node", "server"),
             "poll_interval_s": m.get("poll_interval_s", 60),
             "relay_options": options,
+            "current_zone": m.get("current_zone"),
         }
     return jsonify(result)
 
