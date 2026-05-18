@@ -5102,6 +5102,7 @@ def index():
     <a href="/camera"            class="chart-link"><span class="cl-title">Cameras</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/water-chemistry"   class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Water Chemistry</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/zones"             class="chart-link"><span class="cl-title">Zones</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/rssi"              class="chart-link"><span class="cl-title">Bluetooth Signal</span><span class="cl-arrow">&#8594;</span></a>
   </div>
 
@@ -8153,10 +8154,7 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
   <div id="devices-wrap"><span class="no-data">Loading&hellip;</span></div>
 
   <div class="zone-section">
-    <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem">
-      <div class="section" style="margin-bottom:0">Zones</div>
-      <a href="/zones" style="font-size:.75rem;color:#2e7dd4;text-decoration:none;font-weight:600">Manage &#8594;</a>
-    </div>
+    <div class="section" style="margin-bottom:.75rem">Zones</div>
     <div class="zone-btns" id="zone-btns"></div>
   </div>
 
