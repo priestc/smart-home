@@ -127,7 +127,7 @@ python3 smart_home/relay_firmware/test_buffer.py
 
 ## What the animation shows
 
-<video src="buffer_adaptive_cubic.mp4" controls width="100%"></video>
+**[▶ Watch animation — buffer_adaptive_cubic.mp4](https://github.com/priestc/smart-home/blob/master/smart_home/relay_firmware/buffer_adaptive_cubic.mp4)**
 
 The animation plays through a full 24-hour outage using live **outside-shade**
 sensor data from 2026-05-16 (range: 69.8 °F → 91.6 °F).
