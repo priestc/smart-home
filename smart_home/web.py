@@ -7745,7 +7745,6 @@ def api_wc_current():
         """).fetchall()
     now = datetime.datetime.now()
     monitors = _pool.load_config()
-    zone_map = {m.get("label", ""): m.get("current_zone") for m in monitors}
     result = []
     for r in rows:
         d = dict(r)
@@ -7755,7 +7754,13 @@ def api_wc_current():
             d["offline"] = age > 600
         except (ValueError, TypeError):
             d["offline"] = True
-        d["current_zone"] = zone_map.get(d["label"])
+        addr_upper = (d["address"] or "").upper()
+        zone = None
+        for m in monitors:
+            if m.get("label") == d["label"] or (addr_upper and m.get("address", "").upper() == addr_upper):
+                zone = m.get("current_zone")
+                break
+        d["current_zone"] = zone
         result.append(d)
     return jsonify(result)
 
@@ -8203,7 +8208,7 @@ async function loadCurrent() {
           <span class="device-name">BLE-YC01</span>
           <span class="device-status ${r.offline ? 'offline' : 'online'}">${r.offline ? '&#9679; Offline' : '&#9679; Online'}</span>
           <span style="font-size:.75rem;color:#aabbc8">${ago(r.ts)}</span>
-          ${r.current_zone ? `<span style="font-size:.78rem;color:#7a90a8">&rarr; ${esc(r.current_zone)}</span>` : ''}
+          <span style="font-size:.78rem;color:${r.current_zone ? '#7a90a8' : '#aabbc8'}">&rarr; ${r.current_zone ? esc(r.current_zone) : 'No zone'}</span>
         </div>
         <div class="cards" style="margin-bottom:0;gap:.75rem">
           <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '—'}<span class="metric-unit">°F</span></div></div>
