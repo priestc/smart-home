@@ -7999,7 +7999,12 @@ def api_wc_current():
             d["streak_start"] = streak_start
 
             d["current_zone"] = monitor.get("current_zone") if monitor else None
-            d["paused"] = bool(monitor.get("paused")) if monitor else False
+            paused = bool(monitor.get("paused")) if monitor else False
+            # Auto-clear paused once the device is confirmed offline so it reconnects automatically
+            if paused and d["offline"] and monitor:
+                _pool.resume_recording(monitor["label"])
+                paused = False
+            d["paused"] = paused
             result.append(d)
     return jsonify(result)
 
