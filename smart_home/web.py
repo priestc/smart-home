@@ -445,6 +445,7 @@ def ble_relay_crash():
 @app.get("/api/relay-startup")
 def relay_startup():
     """Return the list of tracked BLE devices so the relay can filter its scan output."""
+    import json as _json
     from smart_home import relay as _relay
     from smart_home import labels as _labels
 
@@ -452,11 +453,28 @@ def relay_startup():
     if not auth.startswith("Bearer "):
         return jsonify({"error": "missing or invalid Authorization header"}), 401
     token = auth[len("Bearer "):]
-    if _relay.find_relay_by_token(token) is None:
+    relay_cfg = _relay.find_relay_by_token(token)
+    if relay_cfg is None:
         return jsonify({"error": "unknown token"}), 401
 
-    label_map = _labels.load()
+    try:
+        firmware_rev = int(request.args.get("rev", ""))
+    except (ValueError, TypeError):
+        firmware_rev = None
 
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO relay_checkin (relay_id, ts, firmware_rev) "
+            "VALUES (?, strftime('%Y-%m-%d %H:%M:%S','now'), ?)",
+            (relay_cfg["id"], firmware_rev),
+        )
+        conn.execute(
+            "INSERT INTO relay_log (ts, relay_id, n_adverts, n_inserted, labeled_json) "
+            "VALUES (strftime('%Y-%m-%d %H:%M:%S','now'), ?, -2, 0, ?)",
+            (relay_cfg["id"], _json.dumps({"_startup": True, "_rev": firmware_rev})),
+        )
+
+    label_map = _labels.load()
     return jsonify({
         "tracked_macs": list(label_map.keys()),
     })

@@ -49,8 +49,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.60"
-#define FIRMWARE_REV          67
+#define FIRMWARE_VERSION      "1.7.61"
+#define FIRMWARE_REV          68
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -431,7 +431,7 @@ static void poolDisconnect();  // forward declaration
 static void fetchTrackedDevices() {
     if (WiFi.status() != WL_CONNECTED || strlen(g_url) == 0) return;
     HTTPClient http;
-    http.begin(String(g_url) + "/api/relay-startup");
+    http.begin(String(g_url) + "/api/relay-startup?rev=" + String(FIRMWARE_REV));
     http.addHeader("Authorization", String("Bearer ") + g_token);
     http.setTimeout(10000);
     int code = http.GET();

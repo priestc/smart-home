@@ -589,6 +589,14 @@ def relay_log(db):
         if delta_str:
             parts.append(delta_str)
 
+        # Startup entry (n_adverts == -2)
+        if row["n_adverts"] == -2:
+            info = _json.loads(row["labeled_json"] or "{}")
+            rev = info.get("_rev")
+            rev_str = f" r{rev}" if rev is not None else ""
+            parts.append(click.style(f"ONLINE{rev_str}", fg="green", bold=True))
+            return "  ".join(parts)
+
         # Crash entry (n_adverts == -1)
         if row["n_adverts"] == -1:
             crash_info = _json.loads(row["labeled_json"] or "{}")
