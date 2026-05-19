@@ -8500,6 +8500,12 @@ function showError(msg) {
   el.textContent = msg; el.style.display = '';
 }
 
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
 function fmt(v, dec=2) { return v != null ? Number(v).toFixed(dec) : '—'; }
 
 function tsLabel(ts) {
