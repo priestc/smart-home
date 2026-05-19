@@ -196,7 +196,7 @@ def ble_relay():
                             (pool_label, f"-{effective_window}"),
                         ).fetchone()
                         if not has_zoned:
-                            _pool.pause_recording(pool_label)
+                            _pool.pause_recording(pool_label, reason="auto")
 
         # Fire sensor_online/offline events immediately from the relay's pool state.
         # The relay detects the pool's presence in every scan, so we don't need to

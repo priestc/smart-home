@@ -49,8 +49,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.64"
-#define FIRMWARE_REV          71
+#define FIRMWARE_VERSION      "1.7.65"
+#define FIRMWARE_REV          72
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -851,6 +851,9 @@ static void doPoolMonitorCycle() {
     checkAppWatchdog();
     g_last_cycle_start_ms = millis();  // watchdog measures from here to next cycle start
     g_pool_status = "";  // clear each cycle so stale statuses don't persist
+    // -1 is a one-cycle sentinel meaning "just finished shutoff skip" — prevents the same-cycle
+    // httpPost response from immediately restarting the countdown.
+    if (g_shutoff_skip_remaining < 0) g_shutoff_skip_remaining = 0;
 
     static int s_pool_wifi_fails = 0;
     if (WiFi.status() != WL_CONNECTED) {
@@ -953,6 +956,9 @@ static void doPoolMonitorCycle() {
             g_pool_status = sbuf;
             Serial.printf("BLE-YC01: %s\n", sbuf);
             g_shutoff_skip_remaining--;
+            // Use -1 sentinel after last skip so the same-cycle httpPost response
+            // (which may still say "stop") cannot immediately restart the countdown.
+            if (g_shutoff_skip_remaining == 0) g_shutoff_skip_remaining = -1;
             do_gatt = false;
             is_shutoff_skip = true;
         }
