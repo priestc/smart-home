@@ -644,7 +644,11 @@ def relay_log(db):
         for label, rssi in sorted((k, v) for k, v in labeled.items() if not k.startswith("_")):
             parts.append(click.style(f"{label} {rssi}dBm", fg="magenta"))
         if labeled.get("_pool_skip"):
-            parts.append(click.style("BLE-YC01: skip", fg="white", dim=True))
+            skip_status = labeled.get("_pool_status", "")
+            if skip_status.startswith("shutoff-skip"):
+                parts.append(click.style(f"BLE-YC01: {skip_status}", fg="yellow"))
+            else:
+                parts.append(click.style("BLE-YC01: skip", fg="white", dim=True))
         elif labeled.get("_pool_seen"):
             status = labeled.get("_pool_status") or "unknown"
             parts.append(click.style(f"BLE-YC01: no reading [{status}]", fg="blue"))

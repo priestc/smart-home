@@ -49,8 +49,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.65"
-#define FIRMWARE_REV          72
+#define FIRMWARE_VERSION      "1.7.66"
+#define FIRMWARE_REV          73
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -1087,10 +1087,12 @@ static void doPoolMonitorCycle() {
     // pool_skip: this cycle was an intentional wait between reads.
     // was_skip_cycle was captured before any read so a successful read this
     // cycle doesn't cause its own POST to be tagged as a skip.
-    // Shutoff skips report as offline (with status), not as regular poll-interval skips.
-    bool pool_skip = was_skip_cycle && !is_shutoff_skip;
+    // Shutoff skips are tagged as pool_skip (not offline) so the server's
+    // online/offline event logic is not triggered — only real absence does that.
+    bool pool_skip = was_skip_cycle || is_shutoff_skip;
     bool pool_seen = !is_shutoff_skip && pool_offline && pool_seen_now;
-    postBatch(pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip);
+    bool report_offline = pool_offline && !is_shutoff_skip;
+    postBatch(report_offline, pool_hex, pool_rssi, pool_seen, pool_skip);
     g_current_op = "";
     maybeSendPendingCrash();
 }
