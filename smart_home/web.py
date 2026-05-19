@@ -7762,11 +7762,9 @@ def api_wc_zone_list():
     with _conn() as conn:
         rows = conn.execute(
             """
-            SELECT DISTINCT pr.zone FROM pool_readings pr
-            JOIN wc_zones z ON z.name = pr.zone
-            WHERE pr.zone IS NOT NULL
-              AND z.zone_type IN ('running_water', 'pooling_water')
-            ORDER BY pr.zone
+            SELECT name FROM wc_zones
+            WHERE zone_type IN ('running_water', 'pooling_water')
+            ORDER BY name
             """
         ).fetchall()
         has_unzoned = conn.execute(
