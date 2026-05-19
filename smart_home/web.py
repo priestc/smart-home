@@ -5025,8 +5025,15 @@ def api_devices_rename():
         match = next((m for m in monitors if m["label"] == device_id), None)
         if match is None:
             return jsonify({"error": "device not found"}), 404
+        old_label = match["label"]
         match["label"] = new_name
         _pool.save_config(monitors)
+        with _conn() as conn:
+            conn.execute(
+                "UPDATE pool_readings SET label=? WHERE label=?",
+                (new_name, old_label),
+            )
+            conn.commit()
 
     else:
         return jsonify({"error": f"unknown device type: {device_type}"}), 400
