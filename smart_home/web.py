@@ -7738,8 +7738,9 @@ def api_pool_relay_reading():
         reading.address = address
         reading.label = label
         reading.rssi = rssi
+        current_zone = _pool.get_device_zone(label)
         with _conn() as conn:
-            insert_pool_reading(conn, reading, zone=_pool.get_device_zone(label))
+            insert_pool_reading(conn, reading, zone=current_zone)
             conn.execute(
                 "INSERT OR REPLACE INTO relay_checkin (relay_id, ts) "
                 "VALUES (?, strftime('%Y-%m-%d %H:%M:%S','now'))",
@@ -7758,6 +7759,15 @@ def api_pool_relay_reading():
                 "  OR (labeled_json LIKE '%\"_buffered\": true%' AND datetime(ts) < datetime('now', '-60 minutes'))"
                 ")"
             )
+            # Auto-pause if device has been running without a zone for 5 minutes
+            if current_zone is None:
+                has_zoned_reading = conn.execute(
+                    "SELECT 1 FROM pool_readings WHERE label=? AND zone IS NOT NULL"
+                    " AND ts >= datetime('now', '-300 seconds') LIMIT 1",
+                    (label,),
+                ).fetchone()
+                if not has_zoned_reading:
+                    _pool.pause_recording(label)
 
     # Return current BLE-YC01 assignment so the relay knows if it should stop.
     monitors = _pool.load_config()
