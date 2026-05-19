@@ -7758,10 +7758,16 @@ def api_wc_zones_delete(zone_id):
 
 @app.get("/api/water-chemistry/zone-list")
 def api_wc_zone_list():
-    """Zones that have at least one pool reading, plus whether unzoned readings exist."""
+    """Zones typed running_water or pooling_water that have at least one reading."""
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT DISTINCT zone FROM pool_readings WHERE zone IS NOT NULL ORDER BY zone"
+            """
+            SELECT DISTINCT pr.zone FROM pool_readings pr
+            JOIN wc_zones z ON z.name = pr.zone
+            WHERE pr.zone IS NOT NULL
+              AND z.zone_type IN ('running_water', 'pooling_water')
+            ORDER BY pr.zone
+            """
         ).fetchall()
         has_unzoned = conn.execute(
             "SELECT 1 FROM pool_readings WHERE zone IS NULL LIMIT 1"
@@ -8308,7 +8314,7 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
   <div id="devices-wrap"><span class="no-data">Loading&hellip;</span></div>
 
   <div style="margin-top:2rem">
-    <div class="section" style="margin-bottom:.75rem">Zones with readings</div>
+    <div class="section" style="margin-bottom:.75rem">Zones</div>
     <div class="zone-list" id="zone-list"><span class="no-data">Loading&hellip;</span></div>
   </div>
 
