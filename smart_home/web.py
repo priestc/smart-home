@@ -8839,7 +8839,7 @@ function renderZoneList() {
         <div class="zc-header"><div class="zc-name">${esc(name)}</div>${badge}</div>
         <div class="zc-footer">
           <a href="/water-chemistry/${encodeURIComponent(name)}" style="font-size:.85rem;color:#7a90a8;text-decoration:none">View chart &rarr;</a>
-          <button class="record-btn" onclick="startRecording(${JSON.stringify(name)})" ${otherActive?'disabled title="Another recording is active"':''}>Record</button>
+          <button class="record-btn" data-zone="${esc(name)}" onclick="startRecording(this)" ${otherActive?'disabled title="Another recording is active"':''}>Record</button>
         </div>
       </div>`;
     }
@@ -8866,8 +8866,8 @@ async function loadZoneList() {
   } catch(e) { showError('Failed to load zones: ' + e.message); }
 }
 
-async function startRecording(zoneName) {
-  const btn = event.target;
+async function startRecording(btn) {
+  const zoneName = btn.dataset.zone;
   btn.disabled = true;
   btn.textContent = 'Starting…';
   try {
