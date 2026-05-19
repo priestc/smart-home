@@ -49,8 +49,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.63"
-#define FIRMWARE_REV          70
+#define FIRMWARE_VERSION      "1.7.64"
+#define FIRMWARE_REV          71
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -119,7 +119,9 @@ static unsigned long       g_pool_retry_after_ms = 0;     // millis() after whic
 static String              g_pool_status;                  // last outcome, sent in POST for relay-log
 static int                 g_relay_offset = 0;             // seconds offset within 30-s period (0–29)
 static int                 g_poll_skip_cycles = 1;         // cycles to skip between pool reads when stable
+static int                 g_shutoff_skip_remaining = 0;   // countdown when server sends stop
 #define POOL_RETRY_INTERVAL_MS 30000UL
+#define SHUTOFF_SKIP_TOTAL     3
 
 // ── App watchdog state ────────────────────────────────────────────────────────
 
@@ -535,19 +537,19 @@ static bool httpPost(const String& payload, bool parse_gatt) {
                 // Check for BLE-YC01 assignment change
                 if (!rdoc["ble_yc01"].isNull()) {
                     if (rdoc["ble_yc01"]["stop"].as<bool>()) {
-                        // Server requests graceful disconnect — clear assignment so
-                        // device can power down, will reassign automatically on next checkin.
-                        if (g_pool_addr.length() > 0) {
-                            Serial.println("BLE-YC01: stop requested by server");
-                            savePoolMonitor("", "");
-                            g_pool_addr  = "";
-                            g_pool_label = "";
+                        // Server requests shutoff — skip GATT for SHUTOFF_SKIP_TOTAL cycles so
+                        // the device can go offline naturally. Address kept for auto-reconnect.
+                        if (g_pool_addr.length() > 0 && g_shutoff_skip_remaining == 0) {
+                            Serial.printf("BLE-YC01: shutoff requested — skipping GATT for %d cycles\n",
+                                          SHUTOFF_SKIP_TOTAL);
                             poolDisconnect();
+                            g_shutoff_skip_remaining = SHUTOFF_SKIP_TOTAL;
                         }
                     } else {
                         bool resuming = rdoc["ble_yc01"]["cancel_shutoff"].as<bool>();
                         if (resuming) {
                             Serial.println("BLE-YC01: cancel shutoff requested by server — reconnecting");
+                            g_shutoff_skip_remaining = 0;
                         }
                         String new_addr  = rdoc["ble_yc01"]["address"].as<String>();
                         String new_label = rdoc["ble_yc01"]["label"].as<String>();
@@ -902,6 +904,7 @@ static void doPoolMonitorCycle() {
     bool pool_offline = true;
     bool pool_seen_now = false;
     bool do_gatt = false;  // set inside pool block; used by pool_skip below
+    bool is_shutoff_skip = false;
     // Capture skip state before the read so pool_skip reflects this cycle,
     // not the counter value written for the NEXT cycle after a successful read.
     bool was_skip_cycle = (s_pool_skip_counter > 0) && (g_pool_addr.length() > 0);
@@ -941,6 +944,17 @@ static void doPoolMonitorCycle() {
         if (s_pool_skip_counter > 0) {
             Serial.printf("BLE-YC01:skip cycle (%d remaining)\n", s_pool_skip_counter);
             s_pool_skip_counter--;
+        }
+        // Shutoff skip: suppress GATT for SHUTOFF_SKIP_TOTAL cycles after stop command.
+        if (g_shutoff_skip_remaining > 0) {
+            int current = SHUTOFF_SKIP_TOTAL - g_shutoff_skip_remaining + 1;
+            char sbuf[40];
+            snprintf(sbuf, sizeof(sbuf), "shutoff-skip-%d-of-%d", current, SHUTOFF_SKIP_TOTAL);
+            g_pool_status = sbuf;
+            Serial.printf("BLE-YC01: %s\n", sbuf);
+            g_shutoff_skip_remaining--;
+            do_gatt = false;
+            is_shutoff_skip = true;
         }
         if (do_gatt) {
             if (!g_pool_client) {
@@ -1067,8 +1081,10 @@ static void doPoolMonitorCycle() {
     // pool_skip: this cycle was an intentional wait between reads.
     // was_skip_cycle was captured before any read so a successful read this
     // cycle doesn't cause its own POST to be tagged as a skip.
-    bool pool_skip = was_skip_cycle;
-    postBatch(pool_offline, pool_hex, pool_rssi, pool_offline && pool_seen_now, pool_skip);
+    // Shutoff skips report as offline (with status), not as regular poll-interval skips.
+    bool pool_skip = was_skip_cycle && !is_shutoff_skip;
+    bool pool_seen = !is_shutoff_skip && pool_offline && pool_seen_now;
+    postBatch(pool_offline, pool_hex, pool_rssi, pool_seen, pool_skip);
     g_current_op = "";
     maybeSendPendingCrash();
 }
