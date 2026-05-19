@@ -49,8 +49,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.66"
-#define FIRMWARE_REV          73
+#define FIRMWARE_VERSION      "1.7.67"
+#define FIRMWARE_REV          74
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -121,7 +121,7 @@ static int                 g_relay_offset = 0;             // seconds offset wit
 static int                 g_poll_skip_cycles = 1;         // cycles to skip between pool reads when stable
 static int                 g_shutoff_skip_remaining = 0;   // countdown when server sends stop
 #define POOL_RETRY_INTERVAL_MS 30000UL
-#define SHUTOFF_SKIP_TOTAL     3
+#define SHUTOFF_SKIP_TOTAL     2
 
 // ── App watchdog state ────────────────────────────────────────────────────────
 
