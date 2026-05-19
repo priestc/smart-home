@@ -407,7 +407,8 @@ def ble_relay():
     import json as _json
     server_cmd = {}
     if response.get("ble_yc01") and response["ble_yc01"].get("stop"):
-        server_cmd["ble_yc01"] = "stop"
+        stop_reason = (assigned or {}).get("paused_reason", "user")
+        server_cmd["ble_yc01"] = f"stop:{stop_reason}"
     elif response.get("ble_yc01") and response["ble_yc01"].get("cancel_shutoff"):
         server_cmd["ble_yc01"] = "cancel_shutoff"
     elif response.get("ble_yc01"):
@@ -7830,7 +7831,7 @@ def api_pool_relay_reading():
                     (label,),
                 ).fetchone()
                 if not has_zoned_reading:
-                    _pool.pause_recording(label)
+                    _pool.pause_recording(label, reason="auto")
 
     # Return current BLE-YC01 assignment so the relay knows if it should stop.
     monitors = _pool.load_config()
@@ -7853,10 +7854,11 @@ def api_pool_relay_reading():
     # Log the server command alongside the reading entry.
     if ble_yc01_resp and ble_yc01_resp.get("stop"):
         import json as _json
+        stop_reason = (assigned or {}).get("paused_reason", "user")
         with _conn() as conn:
             conn.execute(
                 "UPDATE relay_log SET server_cmd=? WHERE relay_id=? ORDER BY id DESC LIMIT 1",
-                (_json.dumps({"ble_yc01": "stop"}), relay_cfg["id"]),
+                (_json.dumps({"ble_yc01": f"stop:{stop_reason}"}), relay_cfg["id"]),
             )
 
     return jsonify({"ok": True, "ble_yc01": ble_yc01_resp})

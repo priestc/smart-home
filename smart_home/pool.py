@@ -69,15 +69,17 @@ def set_node(label: str, node: str) -> bool:
     return False
 
 
-def pause_recording(label: str) -> bool:
+def pause_recording(label: str, reason: str = "user") -> bool:
     """Pause recording for a monitor. The relay will keep getting null for ble_yc01
     on every checkin until resume_recording() is called, so the device goes offline.
     Node assignment is preserved for auto-reconnect on resume. Returns False if not found.
+    reason: 'user' for manual stop, 'auto' for timeout-triggered stop.
     """
     monitors = load_config()
     for m in monitors:
         if m.get("label") == label:
             m["paused"] = True
+            m["paused_reason"] = reason
             save_config(monitors)
             return True
     return False

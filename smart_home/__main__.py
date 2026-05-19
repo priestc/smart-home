@@ -657,8 +657,11 @@ def relay_log(db):
 
         # Show server-to-relay commands
         server_cmd = _json.loads(row["server_cmd"]) if row["server_cmd"] else {}
-        if server_cmd.get("ble_yc01") == "stop":
-            parts.append(click.style("→ YC01: STOP", fg="red", bold=True))
+        yc01_cmd = server_cmd.get("ble_yc01", "")
+        if yc01_cmd.startswith("stop"):
+            reason = yc01_cmd.split(":", 1)[1] if ":" in yc01_cmd else "user"
+            display = "auto-shutoff" if reason == "auto" else "user-shutoff"
+            parts.append(click.style(f"→ YC01: STOP ({display})", fg="red", bold=True))
         elif server_cmd.get("ble_yc01") == "cancel_shutoff":
             parts.append(click.style("→ YC01: CANCEL SHUTOFF", fg="green", bold=True))
         elif server_cmd.get("ble_yc01", "").startswith("assign:"):
