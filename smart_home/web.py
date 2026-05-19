@@ -8108,7 +8108,10 @@ def api_wc_zone_set_mode(zone_id):
 
 @app.post("/api/water-chemistry/zones/<path:zone_name>/record")
 def api_wc_zone_record(zone_name):
-    """Start a one-time measurement session for a running_water zone."""
+    """Start recording for a zone.
+    running_water → one-time mode (auto-stops when stable).
+    pooling_water → continuous mode (assigns zone, resumes if paused).
+    """
     from smart_home import pool as _pool
     import datetime as _dt
 
@@ -8116,23 +8119,34 @@ def api_wc_zone_record(zone_name):
         row = conn.execute("SELECT zone_type FROM wc_zones WHERE name=?", (zone_name,)).fetchone()
     if not row:
         return jsonify({"error": "zone not found"}), 404
-    if row["zone_type"] != "running_water":
-        return jsonify({"error": "one-time recording is only supported for running_water zones"}), 400
+    zone_type = row["zone_type"]
+    if zone_type not in ("running_water", "pooling_water"):
+        return jsonify({"error": "recording only supported for running_water and pooling_water zones"}), 400
 
     monitors = _pool.load_config()
     if not monitors:
         return jsonify({"error": "no BLE-YC01 devices configured"}), 404
 
-    # Cancel any other active one-time session first
+    # Cancel any active one-time session first
     for m in monitors:
         if m.get("one_time_active"):
             _pool.clear_one_time(m["label"])
 
     label = monitors[0]["label"]
-    start_ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    if not _pool.start_one_time(label, zone_name, start_ts):
-        return jsonify({"error": "device not found"}), 404
-    return jsonify({"ok": True, "label": label, "zone": zone_name, "start_ts": start_ts})
+
+    if zone_type == "running_water":
+        start_ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not _pool.start_one_time(label, zone_name, start_ts):
+            return jsonify({"error": "device not found"}), 404
+        return jsonify({"ok": True, "label": label, "zone": zone_name, "mode": "one_time", "start_ts": start_ts})
+    else:
+        # Continuous: just assign zone and resume if paused
+        if not _pool.set_device_zone(label, zone_name):
+            return jsonify({"error": "device not found"}), 404
+        monitor = next((m for m in _pool.load_config() if m.get("label") == label), None)
+        if monitor and monitor.get("paused"):
+            _pool.request_cancel_shutoff(label)
+        return jsonify({"ok": True, "label": label, "zone": zone_name, "mode": "continuous"})
 
 
 @app.post("/api/water-chemistry/record/cancel")
@@ -8819,6 +8833,7 @@ function renderZoneList() {
     const name = z.name;
     const color = ZONE_COLORS[i % ZONE_COLORS.length];
     const isRunning = z.zone_type === 'running_water';
+    const isPooling = z.zone_type === 'pooling_water';
     const isRecordingThis = recording && recording.zone === name;
 
     if (isRecordingThis) {
@@ -8840,7 +8855,7 @@ function renderZoneList() {
     }
 
     const badge = onlineSet.has(name) ? '<span class="zc-online">&#9679; Online</span>' : '';
-    if (isRunning) {
+    if (isRunning || isPooling) {
       const otherActive = recording && recording.zone !== name;
       return `<div class="zone-card" style="--zc:${color}">
         <div class="zc-header"><div class="zc-name">${esc(name)}</div>${badge}</div>
