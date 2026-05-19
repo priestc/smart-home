@@ -363,8 +363,8 @@ def ble_relay():
     assigned = next(
         (m for m in water_chemistry_devices if m.get("node") == relay_cfg["id"]), None
     )
-    if assigned and _pool.consume_stop_request(water_chemistry_devices, assigned.get("label", "")):
-        response["ble_yc01"] = None  # tells relay to disconnect; assignment preserved for auto-reconnect
+    if assigned and assigned.get("paused"):
+        response["ble_yc01"] = None  # paused: relay stops GATT until resumed
     else:
         response["ble_yc01"] = {
             "address": assigned["address"],
@@ -7709,8 +7709,8 @@ def api_pool_relay_reading():
     assigned = next(
         (m for m in monitors if m.get("node") == relay_cfg["id"]), None
     )
-    if assigned and _pool.consume_stop_request(monitors, assigned.get("label", "")):
-        ble_yc01_resp = None  # tells relay to disconnect; assignment preserved for auto-reconnect
+    if assigned and assigned.get("paused"):
+        ble_yc01_resp = None  # paused: relay stops GATT until resumed
     else:
         ble_yc01_resp = {
             "address": assigned["address"],
@@ -7828,17 +7828,26 @@ def api_wc_zone_list():
 
 @app.post("/api/water-chemistry/stop")
 def api_wc_stop():
-    """Signal the relay to disconnect from the device on its next checkin.
-
-    The node assignment is preserved so the relay will auto-reconnect when
-    the device comes back online.
-    """
+    """Pause recording: relay keeps getting null for ble_yc01 until resumed."""
     from smart_home import pool as _pool
     data = request.get_json(silent=True) or {}
     label = (data.get("label") or "").strip()
     if not label:
         return jsonify({"error": "label required"}), 400
-    if not _pool.request_stop(label):
+    if not _pool.pause_recording(label):
+        return jsonify({"error": f"device '{label}' not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.post("/api/water-chemistry/resume")
+def api_wc_resume():
+    """Resume recording: clears the paused flag so the relay reconnects."""
+    from smart_home import pool as _pool
+    data = request.get_json(silent=True) or {}
+    label = (data.get("label") or "").strip()
+    if not label:
+        return jsonify({"error": "label required"}), 400
+    if not _pool.resume_recording(label):
         return jsonify({"error": f"device '{label}' not found"}), 404
     return jsonify({"ok": True})
 
@@ -7928,11 +7937,14 @@ def api_wc_current():
 
             addr_upper = (d["address"] or "").upper()
             zone = None
+            paused = False
             for m in monitors:
                 if m.get("label") == d["label"] or (addr_upper and m.get("address", "").upper() == addr_upper):
                     zone = m.get("current_zone")
+                    paused = bool(m.get("paused"))
                     break
             d["current_zone"] = zone
+            d["paused"] = paused
             result.append(d)
     return jsonify(result)
 
@@ -8504,6 +8516,21 @@ async function stopRecording(btn, label) {
   } catch(e) { showError('Stop failed: ' + e.message); btn.disabled = false; btn.textContent = 'Stop Recording'; }
 }
 
+async function resumeRecording(btn, label) {
+  btn.disabled = true;
+  btn.textContent = 'Resuming…';
+  try {
+    const r = await fetch('/api/water-chemistry/resume', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({label}),
+    });
+    const data = await r.json();
+    if (!r.ok) { showError(data.error || 'Resume failed'); btn.disabled = false; btn.textContent = 'Resume'; return; }
+    await loadCurrent();
+  } catch(e) { showError('Resume failed: ' + e.message); btn.disabled = false; btn.textContent = 'Resume'; }
+}
+
 async function loadCurrent() {
   try {
     const rows = await fetchJSON('/api/water-chemistry/current');
@@ -8516,7 +8543,9 @@ async function loadCurrent() {
           <span class="device-status ${r.offline ? 'offline' : 'online'}">${r.offline ? '&#9679; Offline' : '&#9679; Online'}</span>
           <span style="font-size:.75rem;color:#aabbc8">for ${dur(r.streak_start)}</span>
           <span style="font-size:.78rem;color:${r.current_zone ? '#7a90a8' : '#aabbc8'}">&rarr; ${r.current_zone ? esc(r.current_zone) : 'No zone'}</span>
-          ${!r.offline ? `<button class="stop-btn" onclick="stopRecording(this,'${esc(r.label)}')">Stop Recording</button>` : ''}
+          ${r.paused
+            ? `<button class="stop-btn" style="color:#7a90a8;border-color:#c8d5e0;background:#f5f8fa" onclick="resumeRecording(this,'${esc(r.label)}')">Resume</button>`
+            : (!r.offline ? `<button class="stop-btn" onclick="stopRecording(this,'${esc(r.label)}')">Stop Recording</button>` : '')}
         </div>
         <div class="cards" style="margin-bottom:0;gap:.75rem">
           <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '—'}<span class="metric-unit">°F</span></div></div>

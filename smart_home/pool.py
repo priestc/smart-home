@@ -69,26 +69,26 @@ def set_node(label: str, node: str) -> bool:
     return False
 
 
-def request_stop(label: str) -> bool:
-    """Set stop_requested on a monitor so the relay disconnects on next checkin.
-
-    The node assignment is preserved so the relay will auto-reconnect when the
-    device comes back online. Returns False if not found.
+def pause_recording(label: str) -> bool:
+    """Pause recording for a monitor. The relay will keep getting null for ble_yc01
+    on every checkin until resume_recording() is called, so the device goes offline.
+    Node assignment is preserved for auto-reconnect on resume. Returns False if not found.
     """
     monitors = load_config()
     for m in monitors:
         if m.get("label") == label:
-            m["stop_requested"] = True
+            m["paused"] = True
             save_config(monitors)
             return True
     return False
 
 
-def consume_stop_request(monitors: list[dict], label: str) -> bool:
-    """Clear stop_requested for a monitor if set. Saves config. Returns True if it was set."""
+def resume_recording(label: str) -> bool:
+    """Clear the paused flag so the relay resumes GATT reads. Returns False if not found."""
+    monitors = load_config()
     for m in monitors:
-        if m.get("label") == label and m.get("stop_requested"):
-            m.pop("stop_requested")
+        if m.get("label") == label:
+            m.pop("paused", None)
             save_config(monitors)
             return True
     return False
