@@ -94,6 +94,33 @@ def resume_recording(label: str) -> bool:
     return False
 
 
+def request_resume(label: str) -> bool:
+    """Clear paused and set resume_requested so the relay gets an explicit cancel-stop signal.
+
+    Use this when cancelling an in-progress shutoff (e.g. zone assigned while paused),
+    so the relay knows to actively reconnect rather than just passively receive an update.
+    Returns False if not found.
+    """
+    monitors = load_config()
+    for m in monitors:
+        if m.get("label") == label:
+            m.pop("paused", None)
+            m["resume_requested"] = True
+            save_config(monitors)
+            return True
+    return False
+
+
+def consume_resume_request(monitors: list[dict], label: str) -> bool:
+    """Clear resume_requested if set. Saves config. Returns True if it was set."""
+    for m in monitors:
+        if m.get("label") == label and m.get("resume_requested"):
+            m.pop("resume_requested")
+            save_config(monitors)
+            return True
+    return False
+
+
 def get_device_zone(label: str, address: str = "") -> str | None:
     """Return the current zone name for a monitor, matching by label or address."""
     address_upper = address.upper() if address else ""
