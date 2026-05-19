@@ -146,6 +146,41 @@ def set_device_zone(label: str, zone_name: str | None) -> bool:
     return False
 
 
+def start_one_time(label: str, zone_name: str, start_ts: str) -> bool:
+    """Begin a one-time measurement session for a running_water zone.
+
+    Sets the device zone, records session metadata, and cancels any active shutoff.
+    Returns False if no monitor with the given label is found.
+    """
+    monitors = load_config()
+    for m in monitors:
+        if m.get("label") == label:
+            m["current_zone"] = zone_name
+            m["one_time_active"] = True
+            m["one_time_zone"] = zone_name
+            m["one_time_start_ts"] = start_ts
+            was_paused = m.pop("paused", None) is not None
+            if was_paused:
+                m["cancel_shutoff_requested"] = True
+            save_config(monitors)
+            return True
+    return False
+
+
+def clear_one_time(label: str) -> bool:
+    """Clear one-time session state and zone assignment. Returns False if not found."""
+    monitors = load_config()
+    for m in monitors:
+        if m.get("label") == label:
+            m.pop("one_time_active", None)
+            m.pop("one_time_zone", None)
+            m.pop("one_time_start_ts", None)
+            m.pop("current_zone", None)
+            save_config(monitors)
+            return True
+    return False
+
+
 def set_offline_threshold(label: str, threshold_s: int) -> bool:
     """Set the offline threshold in seconds for a water chemistry device.
 

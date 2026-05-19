@@ -7741,6 +7741,44 @@ def api_pool_offline_threshold_set():
     return jsonify({"ok": True, "label": label, "threshold_s": threshold_s})
 
 
+def _wc_check_stability(conn, label: str, start_ts: str) -> bool:
+    """True if the last 3 readings since start_ts are all within stable thresholds.
+    pH must be within ±0.05; ORP within ±20 mV; chlorine within ±0.2 mg/L if available.
+    """
+    rows = conn.execute(
+        "SELECT ph, orp, chlorine FROM pool_readings WHERE label=? AND ts >= ? ORDER BY ts DESC LIMIT 3",
+        (label, start_ts),
+    ).fetchall()
+    if len(rows) < 3:
+        return False
+    phs = [r["ph"] for r in rows if r["ph"] is not None]
+    orps = [r["orp"] for r in rows if r["orp"] is not None]
+    cls = [r["chlorine"] for r in rows if r["chlorine"] is not None]
+    if len(phs) < 3 or len(orps) < 3:
+        return False
+    stable = (max(phs) - min(phs) <= 0.05 and max(orps) - min(orps) <= 20)
+    if len(cls) >= 3:
+        stable = stable and (max(cls) - min(cls) <= 0.2)
+    return stable
+
+
+def _wc_complete_one_time(conn, label: str, start_ts: str) -> None:
+    """Finalize a one-time session: keep only the last reading, clear state, trigger shutoff."""
+    from smart_home import pool as _pool
+    last_row = conn.execute(
+        "SELECT id FROM pool_readings WHERE label=? AND ts >= ? ORDER BY ts DESC LIMIT 1",
+        (label, start_ts),
+    ).fetchone()
+    if last_row:
+        conn.execute(
+            "DELETE FROM pool_readings WHERE label=? AND ts >= ? AND id != ?",
+            (label, start_ts, last_row["id"]),
+        )
+        conn.commit()
+    _pool.clear_one_time(label)
+    _pool.pause_recording(label, reason="auto")
+
+
 @app.post("/api/pool/relay-reading")
 def api_pool_relay_reading():
     """Receive a pool reading POSTed directly by a relay in persistent water-chemistry mode."""
@@ -7809,9 +7847,15 @@ def api_pool_relay_reading():
         reading.address = address
         reading.label = label
         reading.rssi = rssi
+        monitors_now = _pool.load_config()
+        monitor_now = next((m for m in monitors_now if m.get("label") == label), None)
+        one_time_active = monitor_now and monitor_now.get("one_time_active")
+        one_time_start_ts = (monitor_now or {}).get("one_time_start_ts", "")
         current_zone = _pool.get_device_zone(label)
         with _conn() as conn:
             insert_pool_reading(conn, reading, zone=current_zone)
+            if one_time_active and _wc_check_stability(conn, label, one_time_start_ts):
+                _wc_complete_one_time(conn, label, one_time_start_ts)
             conn.execute(
                 "INSERT OR REPLACE INTO relay_checkin (relay_id, ts) "
                 "VALUES (?, strftime('%Y-%m-%d %H:%M:%S','now'))",
@@ -7968,7 +8012,7 @@ def api_wc_zone_list():
     with _conn() as conn:
         rows = conn.execute(
             """
-            SELECT name FROM wc_zones
+            SELECT name, zone_type FROM wc_zones
             WHERE zone_type IN ('running_water', 'pooling_water')
             ORDER BY name
             """
@@ -7984,7 +8028,30 @@ def api_wc_zone_list():
             """
         ).fetchall()
         online_zones = {r[0] for r in online_rows}
-    return jsonify({"zones": [r[0] for r in rows], "has_unzoned": has_unzoned, "online_zones": list(online_zones)})
+    from smart_home import pool as _pool
+    monitors = _pool.load_config()
+    active = next((m for m in monitors if m.get("one_time_active")), None)
+    recording = None
+    if active:
+        start_ts = active.get("one_time_start_ts", "")
+        with _conn() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM pool_readings WHERE label=? AND ts >= ?",
+                (active["label"], start_ts),
+            ).fetchone()[0]
+            stable = _wc_check_stability(conn, active["label"], start_ts)
+        recording = {
+            "zone": active.get("one_time_zone"),
+            "label": active["label"],
+            "reading_count": count,
+            "stable": stable,
+        }
+    return jsonify({
+        "zones": [{"name": r["name"], "zone_type": r["zone_type"]} for r in rows],
+        "has_unzoned": has_unzoned,
+        "online_zones": list(online_zones),
+        "recording": recording,
+    })
 
 
 @app.post("/api/water-chemistry/stop")
@@ -8028,6 +8095,75 @@ def api_wc_zone_set_mode(zone_id):
         conn.execute("UPDATE wc_zones SET mode=? WHERE id=?", (mode, zone_id))
         conn.commit()
     return jsonify({"ok": True, "id": zone_id, "mode": mode})
+
+
+@app.post("/api/water-chemistry/zones/<path:zone_name>/record")
+def api_wc_zone_record(zone_name):
+    """Start a one-time measurement session for a running_water zone."""
+    from smart_home import pool as _pool
+    import datetime as _dt
+
+    with _conn() as conn:
+        row = conn.execute("SELECT zone_type FROM wc_zones WHERE name=?", (zone_name,)).fetchone()
+    if not row:
+        return jsonify({"error": "zone not found"}), 404
+    if row["zone_type"] != "running_water":
+        return jsonify({"error": "one-time recording is only supported for running_water zones"}), 400
+
+    monitors = _pool.load_config()
+    if not monitors:
+        return jsonify({"error": "no BLE-YC01 devices configured"}), 404
+
+    # Cancel any other active one-time session first
+    for m in monitors:
+        if m.get("one_time_active"):
+            _pool.clear_one_time(m["label"])
+
+    label = monitors[0]["label"]
+    start_ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not _pool.start_one_time(label, zone_name, start_ts):
+        return jsonify({"error": "device not found"}), 404
+    return jsonify({"ok": True, "label": label, "zone": zone_name, "start_ts": start_ts})
+
+
+@app.post("/api/water-chemistry/record/cancel")
+def api_wc_record_cancel():
+    """Cancel the active one-time measurement session."""
+    from smart_home import pool as _pool
+    monitors = _pool.load_config()
+    active = next((m for m in monitors if m.get("one_time_active")), None)
+    if not active:
+        return jsonify({"error": "no active recording session"}), 404
+    label = active["label"]
+    _pool.clear_one_time(label)
+    return jsonify({"ok": True, "label": label})
+
+
+@app.get("/api/water-chemistry/record/status")
+def api_wc_record_status():
+    """Current one-time recording session state."""
+    from smart_home import pool as _pool
+    monitors = _pool.load_config()
+    active = next((m for m in monitors if m.get("one_time_active")), None)
+    if not active:
+        return jsonify({"active": False})
+    label = active["label"]
+    start_ts = active.get("one_time_start_ts", "")
+    zone = active.get("one_time_zone", "")
+    with _conn() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM pool_readings WHERE label=? AND ts >= ?",
+            (label, start_ts),
+        ).fetchone()[0]
+        stable = _wc_check_stability(conn, label, start_ts)
+    return jsonify({
+        "active": True,
+        "label": label,
+        "zone": zone,
+        "start_ts": start_ts,
+        "reading_count": count,
+        "stable": stable,
+    })
 
 
 @app.post("/api/water-chemistry/move")
@@ -8118,6 +8254,8 @@ def api_wc_current():
                 _pool.resume_recording(monitor["label"])
                 paused = False
             d["paused"] = paused
+            d["one_time_active"] = bool(monitor.get("one_time_active")) if monitor else False
+            d["one_time_zone"] = monitor.get("one_time_zone") if monitor else None
             result.append(d)
     return jsonify(result)
 
@@ -8583,13 +8721,23 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
       transition:box-shadow .15s, transform .1s;
     }
     .zone-card:hover { box-shadow:0 3px 10px rgba(0,0,0,.13); transform:translateY(-1px); }
+    .zone-card.recording { border-left-color:#2a9d6e; cursor:default; }
     .zone-card .zc-name { font-size:1rem; font-weight:700; color:#1a2535; margin-bottom:.3rem; }
     .zone-card .zc-arrow { font-size:.85rem; color:#7a90a8; }
+    .zone-card .zc-footer { display:flex; align-items:center; justify-content:space-between; margin-top:.5rem; }
     .zone-card .zc-header { display:flex; align-items:center; gap:.5rem; }
     .zc-online { font-size:.7rem; font-weight:600; padding:.15rem .45rem; border-radius:20px; background:#eafaf1; color:#2a9d6e; }
+    .zc-recording-badge { font-size:.7rem; font-weight:600; padding:.15rem .45rem; border-radius:20px; background:#eafaf1; color:#2a9d6e; }
+    .zc-status { font-size:.78rem; color:#5a6e84; margin-top:.35rem; }
+    .zc-stable { font-size:.78rem; color:#2a9d6e; font-weight:600; margin-top:.35rem; }
     .stop-btn { font-size:.75rem; font-weight:600; padding:.25rem .7rem; border-radius:6px; border:1px solid #e0c0c0; background:#fff5f5; color:#c0392b; cursor:pointer; margin-left:auto; }
     .stop-btn:hover { background:#fde8e8; }
     .stop-btn:disabled { opacity:.5; cursor:default; }
+    .record-btn { font-size:.75rem; font-weight:600; padding:.25rem .7rem; border-radius:6px; border:1px solid #c0d8f0; background:#f0f6fd; color:#2e7dd4; cursor:pointer; }
+    .record-btn:hover { background:#ddeeff; }
+    .record-btn:disabled { opacity:.5; cursor:default; }
+    .cancel-btn { font-size:.72rem; font-weight:600; padding:.2rem .55rem; border-radius:6px; border:1px solid #d0dce8; background:#f5f8fa; color:#7a90a8; cursor:pointer; }
+    .cancel-btn:hover { background:#e8edf3; }
   </style>
 </head>
 <body>
@@ -8650,27 +8798,93 @@ function clColor(cl) {
   return '#e07820';
 }
 
+let _zoneData = null;
+
+function renderZoneList() {
+  if (!_zoneData) return;
+  const {zones, has_unzoned, online_zones, recording} = _zoneData;
+  const container = document.getElementById('zone-list');
+  const onlineSet = new Set(online_zones || []);
+
+  const cards = zones.map((z, i) => {
+    const name = z.name;
+    const color = ZONE_COLORS[i % ZONE_COLORS.length];
+    const isRunning = z.zone_type === 'running_water';
+    const isRecordingThis = recording && recording.zone === name;
+
+    if (isRecordingThis) {
+      const count = recording.reading_count;
+      const stable = recording.stable;
+      const statusLine = stable
+        ? '<div class="zc-stable">&#10003; Stable — saving&hellip;</div>'
+        : count === 0
+          ? '<div class="zc-status">Waiting for device&hellip;</div>'
+          : `<div class="zc-status">Measuring&hellip; (${count} reading${count===1?'':'s'})</div>`;
+      return `<div class="zone-card recording" style="--zc:#2a9d6e">
+        <div class="zc-header">
+          <div class="zc-name">${esc(name)}</div>
+          <span class="zc-recording-badge">&#9679; Recording</span>
+          <button class="cancel-btn" onclick="cancelRecording()" style="margin-left:auto">Cancel</button>
+        </div>
+        ${statusLine}
+      </div>`;
+    }
+
+    const badge = onlineSet.has(name) ? '<span class="zc-online">&#9679; Online</span>' : '';
+    if (isRunning) {
+      const otherActive = recording && recording.zone !== name;
+      return `<div class="zone-card" style="--zc:${color}">
+        <div class="zc-header"><div class="zc-name">${esc(name)}</div>${badge}</div>
+        <div class="zc-footer">
+          <a href="/water-chemistry/${encodeURIComponent(name)}" style="font-size:.85rem;color:#7a90a8;text-decoration:none">View chart &rarr;</a>
+          <button class="record-btn" onclick="startRecording(${JSON.stringify(name)})" ${otherActive?'disabled title="Another recording is active"':''}>Record</button>
+        </div>
+      </div>`;
+    }
+
+    return `<a class="zone-card" href="/water-chemistry/${encodeURIComponent(name)}" style="--zc:${color}">
+      <div class="zc-header"><div class="zc-name">${esc(name)}</div>${badge}</div>
+      <div class="zc-arrow">View chart &rarr;</div>
+    </a>`;
+  });
+
+  if (has_unzoned) {
+    cards.push(`<a class="zone-card" href="/water-chemistry/__unzoned__" style="--zc:${UNZONED_COLOR}">
+      <div class="zc-header"><div class="zc-name" style="color:#7a90a8">Unzoned</div></div>
+      <div class="zc-arrow">View chart &rarr;</div>
+    </a>`);
+  }
+  container.innerHTML = cards.length ? cards.join('') : '<span class="no-data">No readings yet.</span>';
+}
+
 async function loadZoneList() {
   try {
-    const data = await fetchJSON('/api/water-chemistry/zone-list');
-    const container = document.getElementById('zone-list');
-    const onlineSet = new Set(data.online_zones || []);
-    const cards = data.zones.map((name, i) => {
-      const color = ZONE_COLORS[i % ZONE_COLORS.length];
-      const badge = onlineSet.has(name) ? '<span class="zc-online">&#9679; Online</span>' : '';
-      return `<a class="zone-card" href="/water-chemistry/${encodeURIComponent(name)}" style="--zc:${color}">
-        <div class="zc-header"><div class="zc-name">${esc(name)}</div>${badge}</div>
-        <div class="zc-arrow">View chart &rarr;</div>
-      </a>`;
-    });
-    if (data.has_unzoned) {
-      cards.push(`<a class="zone-card" href="/water-chemistry/__unzoned__" style="--zc:${UNZONED_COLOR}">
-        <div class="zc-header"><div class="zc-name" style="color:#7a90a8">Unzoned</div></div>
-        <div class="zc-arrow">View chart &rarr;</div>
-      </a>`);
-    }
-    container.innerHTML = cards.length ? cards.join('') : '<span class="no-data">No readings yet.</span>';
+    _zoneData = await fetchJSON('/api/water-chemistry/zone-list');
+    renderZoneList();
   } catch(e) { showError('Failed to load zones: ' + e.message); }
+}
+
+async function startRecording(zoneName) {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  try {
+    const r = await fetch('/api/water-chemistry/zones/' + encodeURIComponent(zoneName) + '/record', {
+      method: 'POST',
+    });
+    const body = await r.json();
+    if (!r.ok) { showError(body.error || 'Failed to start recording'); btn.disabled = false; btn.textContent = 'Record'; return; }
+    await loadZoneList();
+  } catch(e) { showError('Failed to start recording: ' + e.message); btn.disabled = false; btn.textContent = 'Record'; }
+}
+
+async function cancelRecording() {
+  try {
+    const r = await fetch('/api/water-chemistry/record/cancel', {method: 'POST'});
+    const body = await r.json();
+    if (!r.ok) { showError(body.error || 'Cancel failed'); return; }
+    await loadZoneList();
+  } catch(e) { showError('Cancel failed: ' + e.message); }
 }
 
 async function stopRecording(btn, label) {
@@ -8737,6 +8951,9 @@ async function loadCurrent() {
 loadCurrent();
 loadZoneList();
 setInterval(loadCurrent, 30000);
+setInterval(() => {
+  if (_zoneData && _zoneData.recording) loadZoneList();
+}, 15000);
 </script>
 </body>
 </html>"""
