@@ -5654,7 +5654,7 @@ async function loadWcZonesForDevice(label) {
   const list = panel.querySelector(".wc-zones-list");
   let zones;
   try {
-    zones = await fetchJSON(`/api/water-chemistry/zones-for-device?label=${encodeURIComponent(label)}`);
+    zones = await fetchJSON('/api/water-chemistry/zones');
   } catch(e) {
     list.innerHTML = `<span style="font-size:.8rem;color:#c0392b">Failed to load zones: ${e.message}</span>`;
     return;
@@ -7760,7 +7760,7 @@ def api_pool_relay_reading():
 def api_wc_zones_get():
     """List all water chemistry zones."""
     with _conn() as conn:
-        rows = conn.execute("SELECT id, name, created_at FROM wc_zones ORDER BY id ASC").fetchall()
+        rows = conn.execute("SELECT id, name, mode, created_at FROM wc_zones ORDER BY id ASC").fetchall()
     return jsonify([dict(r) for r in rows])
 
 
@@ -7811,27 +7811,6 @@ def api_wc_zone_list():
         ).fetchone() is not None
     return jsonify({"zones": [r[0] for r in rows], "has_unzoned": has_unzoned})
 
-
-@app.get("/api/water-chemistry/zones-for-device")
-def api_wc_zones_for_device():
-    """Zones that have readings for a given device label, with their modes."""
-    label = request.args.get("label", "").strip()
-    if not label:
-        return jsonify({"error": "label required"}), 400
-    with _conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT z.id, z.name, z.mode
-            FROM wc_zones z
-            WHERE z.name IN (
-                SELECT DISTINCT zone FROM pool_readings
-                WHERE label = ? AND zone IS NOT NULL
-            )
-            ORDER BY z.name
-            """,
-            (label,),
-        ).fetchall()
-    return jsonify([dict(r) for r in rows])
 
 
 @app.post("/api/water-chemistry/zones/<int:zone_id>/mode")
