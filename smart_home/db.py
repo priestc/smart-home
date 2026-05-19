@@ -233,6 +233,11 @@ def open_db(path: str) -> sqlite3.Connection:
         conn.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
+    try:
+        conn.execute("ALTER TABLE wc_zones ADD COLUMN mode TEXT NOT NULL DEFAULT 'continuous'")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     return conn
 
