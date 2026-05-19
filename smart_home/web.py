@@ -5489,6 +5489,14 @@ function buildRow(type, d) {
         <option value="30">30 seconds</option>
         <option value="60">60 seconds</option>
       </select>
+      <span class="wc-ctrl-label" style="margin-left:.5rem">Offline after</span>
+      <select class="wc-select wc-offline-sel" onchange="setWcOfflineThreshold(this)">
+        <option value="60">60 seconds</option>
+        <option value="80">80 seconds</option>
+        <option value="120">2 minutes</option>
+        <option value="300">5 minutes</option>
+        <option value="600">10 minutes</option>
+      </select>
       <span class="wc-ctrl-label" style="margin-left:.5rem">Zone</span>
       <select class="wc-select wc-zone-sel" onchange="setWcZone(this)">
         <option value="">Loading…</option>
@@ -5562,6 +5570,16 @@ async function loadWaterChemistrySettings() {
       for (const opt of pollSel.options) {
         if (parseInt(opt.value) === interval) { opt.selected = true; break; }
       }
+      const offlineSel = controls.querySelector('.wc-offline-sel');
+      const threshold = info.offline_threshold_s ?? 80;
+      let matched = false;
+      for (const opt of offlineSel.options) {
+        if (parseInt(opt.value) === threshold) { opt.selected = true; matched = true; break; }
+      }
+      if (!matched) {
+        const custom = new Option(`${threshold} seconds`, threshold, true, true);
+        offlineSel.insertBefore(custom, offlineSel.firstChild);
+      }
       const zoneSel = controls.querySelector('.wc-zone-sel');
       zoneSel.innerHTML = zoneOptions;
       zoneSel.value = info.current_zone || '';
@@ -5612,6 +5630,28 @@ async function setWcPollRate(sel) {
   } catch(e) {
     msg.className = 'wc-msg err'; msg.textContent = 'Error: ' + e.message;
     showError('Failed to set poll rate: ' + e.message);
+  }
+}
+
+async function setWcOfflineThreshold(sel) {
+  const controls = sel.closest('.wc-controls');
+  const label = controls.dataset.label;
+  const threshold_s = parseInt(sel.value);
+  const msg = controls.querySelector('.wc-msg');
+  msg.className = 'wc-msg'; msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/pool/offline-threshold', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({label, threshold_s}),
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+    msg.className = 'wc-msg ok';
+    msg.textContent = 'Offline threshold saved';
+    setTimeout(() => { msg.textContent = ''; }, 4000);
+  } catch(e) {
+    msg.className = 'wc-msg err'; msg.textContent = 'Error: ' + e.message;
+    showError('Failed to set offline threshold: ' + e.message);
   }
 }
 
@@ -7576,6 +7616,7 @@ def api_pool_node_get():
         result[lbl] = {
             "node": m.get("node", "server"),
             "poll_interval_s": m.get("poll_interval_s", 60),
+            "offline_threshold_s": m.get("offline_threshold_s", 80),
             "relay_options": options,
             "current_zone": m.get("current_zone"),
         }
@@ -7613,6 +7654,20 @@ def api_pool_poll_rate_set():
     if not _pool.set_poll_interval(label, interval_s):
         return jsonify({"error": f"BLE-YC01 device '{label}' not found"}), 404
     return jsonify({"ok": True, "label": label, "interval_s": interval_s})
+
+
+@app.post("/api/pool/offline-threshold")
+def api_pool_offline_threshold_set():
+    """Set the offline threshold for a water chemistry device."""
+    from smart_home import pool as _pool
+    data = request.get_json(silent=True) or {}
+    label = data.get("label")
+    threshold_s = data.get("threshold_s")
+    if not label or not isinstance(threshold_s, int) or threshold_s < 10:
+        return jsonify({"error": "label and threshold_s (integer >= 10) required"}), 400
+    if not _pool.set_offline_threshold(label, threshold_s):
+        return jsonify({"error": f"BLE-YC01 device '{label}' not found"}), 404
+    return jsonify({"ok": True, "label": label, "threshold_s": threshold_s})
 
 
 @app.post("/api/pool/relay-reading")
@@ -7886,7 +7941,7 @@ def api_wc_move():
 def api_wc_current():
     """Latest reading for each water chemistry device, with current zone from config."""
     from smart_home import pool as _pool
-    OFFLINE_THRESHOLD = 80
+    DEFAULT_OFFLINE_THRESHOLD = 80
     now = datetime.datetime.now()
     monitors = _pool.load_config()
 
@@ -7904,10 +7959,20 @@ def api_wc_current():
         for r in rows:
             d = dict(r)
             d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
+            addr_upper = (d["address"] or "").upper()
+
+            # Look up monitor config entry for this device
+            monitor = next(
+                (m for m in monitors
+                 if m.get("label") == d["label"] or (addr_upper and m.get("address", "").upper() == addr_upper)),
+                None
+            )
+            offline_threshold = (monitor or {}).get("offline_threshold_s", DEFAULT_OFFLINE_THRESHOLD)
+
             try:
                 last_ts = datetime.datetime.strptime(d["ts"], "%Y-%m-%d %H:%M:%S")
                 age = (now - last_ts).total_seconds()
-                d["offline"] = age > OFFLINE_THRESHOLD
+                d["offline"] = age > offline_threshold
             except (ValueError, TypeError):
                 d["offline"] = True
                 last_ts = None
@@ -7924,27 +7989,17 @@ def api_wc_current():
                     ts = datetime.datetime.strptime(rec["ts"], "%Y-%m-%d %H:%M:%S")
                     gap = (prev - ts).total_seconds()
                     if d["offline"]:
-                        # Offline streak: stop when we find a reading within threshold of the next
-                        if gap <= OFFLINE_THRESHOLD:
+                        if gap <= offline_threshold:
                             break
                     else:
-                        # Online streak: stop when we find a gap (device was offline before)
-                        if gap > OFFLINE_THRESHOLD:
+                        if gap > offline_threshold:
                             break
                     streak_start = rec["ts"]
                     prev = ts
             d["streak_start"] = streak_start
 
-            addr_upper = (d["address"] or "").upper()
-            zone = None
-            paused = False
-            for m in monitors:
-                if m.get("label") == d["label"] or (addr_upper and m.get("address", "").upper() == addr_upper):
-                    zone = m.get("current_zone")
-                    paused = bool(m.get("paused"))
-                    break
-            d["current_zone"] = zone
-            d["paused"] = paused
+            d["current_zone"] = monitor.get("current_zone") if monitor else None
+            d["paused"] = bool(monitor.get("paused")) if monitor else False
             result.append(d)
     return jsonify(result)
 

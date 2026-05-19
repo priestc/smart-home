@@ -117,6 +117,20 @@ def set_device_zone(label: str, zone_name: str | None) -> bool:
     return False
 
 
+def set_offline_threshold(label: str, threshold_s: int) -> bool:
+    """Set the offline threshold in seconds for a water chemistry device.
+
+    Returns False if no monitor with the given label is found.
+    """
+    monitors = load_config()
+    for m in monitors:
+        if m.get("label") == label:
+            m["offline_threshold_s"] = threshold_s
+            save_config(monitors)
+            return True
+    return False
+
+
 def set_poll_interval(label: str, interval_s: int) -> bool:
     """Set the poll interval in seconds for a water chemistry device.
 
