@@ -7743,20 +7743,22 @@ def api_pool_offline_threshold_set():
 
 def _wc_check_stability(conn, label: str, start_ts: str) -> bool:
     """True if the last 3 readings since start_ts are all within stable thresholds.
-    pH must be within ±0.05; ORP within ±20 mV; chlorine within ±0.2 mg/L if available.
+    pH ±0.05, ORP ±20 mV, TDS ±10 ppm required; chlorine ±0.2 mg/L if available.
     """
     rows = conn.execute(
-        "SELECT ph, orp, chlorine FROM pool_readings WHERE label=? AND ts >= ? ORDER BY ts DESC LIMIT 3",
+        "SELECT ph, orp, tds, chlorine FROM pool_readings WHERE label=? AND ts >= ? ORDER BY ts DESC LIMIT 3",
         (label, start_ts),
     ).fetchall()
     if len(rows) < 3:
         return False
     phs = [r["ph"] for r in rows if r["ph"] is not None]
     orps = [r["orp"] for r in rows if r["orp"] is not None]
+    tdss = [r["tds"] for r in rows if r["tds"] is not None]
     cls = [r["chlorine"] for r in rows if r["chlorine"] is not None]
-    if len(phs) < 3 or len(orps) < 3:
+    if len(phs) < 3 or len(orps) < 3 or len(tdss) < 3:
         return False
-    stable = (max(phs) - min(phs) <= 0.05 and max(orps) - min(orps) <= 20)
+    stable = (max(phs) - min(phs) <= 0.05 and max(orps) - min(orps) <= 20
+              and max(tdss) - min(tdss) <= 10)
     if len(cls) >= 3:
         stable = stable and (max(cls) - min(cls) <= 0.2)
     return stable
