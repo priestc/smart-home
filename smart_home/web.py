@@ -7847,7 +7847,7 @@ def api_wc_current():
             SELECT label, address, temp_c, ph, ec, tds, orp, chlorine, battery, rssi, ts
             FROM pool_readings
             WHERE id IN (
-                SELECT MAX(id) FROM pool_readings GROUP BY label
+                SELECT MAX(id) FROM pool_readings GROUP BY address
             )
             ORDER BY label
         """).fetchall()
