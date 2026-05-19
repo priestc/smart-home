@@ -69,6 +69,20 @@ def set_node(label: str, node: str) -> bool:
     return False
 
 
+def clear_node(label: str) -> bool:
+    """Remove the node assignment from a monitor, causing the relay to stop recording.
+
+    Returns False if no monitor with the given label is found.
+    """
+    monitors = load_config()
+    for m in monitors:
+        if m.get("label") == label:
+            m.pop("node", None)
+            save_config(monitors)
+            return True
+    return False
+
+
 def get_device_zone(label: str, address: str = "") -> str | None:
     """Return the current zone name for a monitor, matching by label or address."""
     address_upper = address.upper() if address else ""

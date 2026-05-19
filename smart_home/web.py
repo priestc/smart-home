@@ -7822,6 +7822,18 @@ def api_wc_zone_list():
     return jsonify({"zones": [r[0] for r in rows], "has_unzoned": has_unzoned, "online_zones": list(online_zones)})
 
 
+@app.post("/api/water-chemistry/stop")
+def api_wc_stop():
+    """Stop recording by clearing the relay node assignment for a device."""
+    from smart_home import pool as _pool
+    data = request.get_json(silent=True) or {}
+    label = (data.get("label") or "").strip()
+    if not label:
+        return jsonify({"error": "label required"}), 400
+    if not _pool.clear_node(label):
+        return jsonify({"error": f"device '{label}' not found"}), 404
+    return jsonify({"ok": True})
+
 
 @app.post("/api/water-chemistry/zones/<int:zone_id>/mode")
 def api_wc_zone_set_mode(zone_id):
@@ -8382,6 +8394,9 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     .zone-card .zc-arrow { font-size:.85rem; color:#7a90a8; }
     .zone-card .zc-header { display:flex; align-items:center; gap:.5rem; }
     .zc-online { font-size:.7rem; font-weight:600; padding:.15rem .45rem; border-radius:20px; background:#eafaf1; color:#2a9d6e; }
+    .stop-btn { font-size:.75rem; font-weight:600; padding:.25rem .7rem; border-radius:6px; border:1px solid #e0c0c0; background:#fff5f5; color:#c0392b; cursor:pointer; margin-left:auto; }
+    .stop-btn:hover { background:#fde8e8; }
+    .stop-btn:disabled { opacity:.5; cursor:default; }
   </style>
 </head>
 <body>
@@ -8465,6 +8480,22 @@ async function loadZoneList() {
   } catch(e) { showError('Failed to load zones: ' + e.message); }
 }
 
+async function stopRecording(btn, label) {
+  if (!confirm(`Stop recording for ${label}? The device will go offline.`)) return;
+  btn.disabled = true;
+  btn.textContent = 'Stopping…';
+  try {
+    const r = await fetch('/api/water-chemistry/stop', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({label}),
+    });
+    const data = await r.json();
+    if (!r.ok) { showError(data.error || 'Stop failed'); btn.disabled = false; btn.textContent = 'Stop Recording'; return; }
+    await loadCurrent();
+  } catch(e) { showError('Stop failed: ' + e.message); btn.disabled = false; btn.textContent = 'Stop Recording'; }
+}
+
 async function loadCurrent() {
   try {
     const rows = await fetchJSON('/api/water-chemistry/current');
@@ -8477,6 +8508,7 @@ async function loadCurrent() {
           <span class="device-status ${r.offline ? 'offline' : 'online'}">${r.offline ? '&#9679; Offline' : '&#9679; Online'}</span>
           <span style="font-size:.75rem;color:#aabbc8">for ${dur(r.streak_start)}</span>
           <span style="font-size:.78rem;color:${r.current_zone ? '#7a90a8' : '#aabbc8'}">&rarr; ${r.current_zone ? esc(r.current_zone) : 'No zone'}</span>
+          ${!r.offline ? `<button class="stop-btn" onclick="stopRecording(this,'${esc(r.label)}')">Stop Recording</button>` : ''}
         </div>
         <div class="cards" style="margin-bottom:0;gap:.75rem">
           <div class="card"><div class="metric-label">Temperature</div><div class="metric-value temp">${r.temp_f != null ? r.temp_f.toFixed(1) : '—'}<span class="metric-unit">°F</span></div></div>
