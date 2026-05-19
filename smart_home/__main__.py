@@ -656,7 +656,7 @@ def relay_log(db):
             parts.append(click.style("*buffered", fg="cyan"))
 
         # Show server-to-relay commands
-        server_cmd = _json.loads(row["server_cmd"]) if row.get("server_cmd") else {}
+        server_cmd = _json.loads(row["server_cmd"]) if row["server_cmd"] else {}
         if server_cmd.get("ble_yc01") == "stop":
             parts.append(click.style("→ YC01: STOP", fg="red", bold=True))
         elif server_cmd.get("ble_yc01", "").startswith("assign:"):
