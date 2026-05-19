@@ -7891,6 +7891,7 @@ def api_wc_stop():
         return jsonify({"error": "label required"}), 400
     if not _pool.pause_recording(label):
         return jsonify({"error": f"device '{label}' not found"}), 404
+    _pool.set_device_zone(label, None)
     return jsonify({"ok": True})
 
 
