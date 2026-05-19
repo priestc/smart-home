@@ -7349,7 +7349,7 @@ def api_pool_current():
         d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
         try:
             age = (now - datetime.datetime.strptime(d["ts"], "%Y-%m-%d %H:%M:%S")).total_seconds()
-            d["offline"] = age > 600
+            d["offline"] = age > 80
         except (ValueError, TypeError):
             d["offline"] = True
         result.append(d)
@@ -7819,7 +7819,7 @@ def api_wc_zone_list():
             """
             SELECT DISTINCT zone FROM pool_readings
             WHERE zone IS NOT NULL
-              AND ts >= datetime('now', '-600 seconds')
+              AND ts >= datetime('now', '-80 seconds')
             """
         ).fetchall()
         online_zones = {r[0] for r in online_rows}
@@ -7886,7 +7886,7 @@ def api_wc_move():
 def api_wc_current():
     """Latest reading for each water chemistry device, with current zone from config."""
     from smart_home import pool as _pool
-    OFFLINE_THRESHOLD = 600
+    OFFLINE_THRESHOLD = 80
     now = datetime.datetime.now()
     monitors = _pool.load_config()
 
