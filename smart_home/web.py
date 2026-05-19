@@ -192,11 +192,15 @@ def ble_relay():
                         effective_window = max(0, 300 - offline_threshold)
                         # Require an unzoned reading that's already effective_window seconds old.
                         # This prevents triggering on a device that just came online.
+                        # Use Python datetimes to match pool_readings.ts which is stored via datetime.now().
+                        import datetime as _dt
+                        _now = _dt.datetime.now()
+                        _cutoff_start = (_now - _dt.timedelta(seconds=300)).strftime("%Y-%m-%d %H:%M:%S")
+                        _cutoff_end = (_now - _dt.timedelta(seconds=effective_window)).strftime("%Y-%m-%d %H:%M:%S")
                         has_old_unzoned = conn.execute(
                             "SELECT 1 FROM pool_readings WHERE label=? AND zone IS NULL"
-                            " AND ts BETWEEN datetime('now', '-300 seconds')"
-                            "           AND datetime('now', ? || ' seconds') LIMIT 1",
-                            (pool_label, f"-{effective_window}"),
+                            " AND ts BETWEEN ? AND ? LIMIT 1",
+                            (pool_label, _cutoff_start, _cutoff_end),
                         ).fetchone()
                         if has_old_unzoned:
                             _pool.pause_recording(pool_label, reason="auto")
@@ -7834,11 +7838,14 @@ def api_pool_relay_reading():
                 monitor_cfg = next((m for m in monitors_cfg if m.get("label") == label), None)
                 offline_threshold = (monitor_cfg or {}).get("offline_threshold_s", 80)
                 effective_window = max(0, 300 - offline_threshold)
+                import datetime as _dt
+                _now = _dt.datetime.now()
+                _cutoff_start = (_now - _dt.timedelta(seconds=300)).strftime("%Y-%m-%d %H:%M:%S")
+                _cutoff_end = (_now - _dt.timedelta(seconds=effective_window)).strftime("%Y-%m-%d %H:%M:%S")
                 has_old_unzoned = conn.execute(
                     "SELECT 1 FROM pool_readings WHERE label=? AND zone IS NULL"
-                    " AND ts BETWEEN datetime('now', '-300 seconds')"
-                    "           AND datetime('now', ? || ' seconds') LIMIT 1",
-                    (label, f"-{effective_window}"),
+                    " AND ts BETWEEN ? AND ? LIMIT 1",
+                    (label, _cutoff_start, _cutoff_end),
                 ).fetchone()
                 if has_old_unzoned:
                     _pool.pause_recording(label, reason="auto")
