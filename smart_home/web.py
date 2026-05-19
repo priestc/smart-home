@@ -7516,6 +7516,40 @@ def api_pool_history_year():
     return jsonify(result)
 
 
+@app.get("/api/pool/recent")
+def api_pool_recent():
+    """Most recent pool readings for a zone, newest first."""
+    zone = request.args.get("zone", "").strip()
+    try:
+        limit = min(int(request.args.get("limit", 50)), 500)
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+    if not zone:
+        return jsonify({"error": "zone required"}), 400
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT ts, temp_c, ph, ec, tds, orp, chlorine, battery
+            FROM pool_readings
+            WHERE zone = ?
+            ORDER BY ts DESC
+            LIMIT ?
+            """,
+            (zone, limit),
+        ).fetchall()
+    def to_f(c): return round(c * 9 / 5 + 32, 1) if c is not None else None
+    return jsonify([{
+        "ts": r["ts"],
+        "temp_f": to_f(r["temp_c"]),
+        "ph": r["ph"],
+        "ec": r["ec"],
+        "tds": r["tds"],
+        "orp": r["orp"],
+        "chlorine": r["chlorine"],
+        "battery": r["battery"],
+    } for r in rows])
+
+
 @app.get("/api/pool/node")
 def api_pool_node_get():
     """Return node assignment and available options for each water chemistry device."""
@@ -8411,6 +8445,114 @@ setInterval(loadCurrent, 30000);
 </html>"""
 
 
+_RUNNING_WATER_ZONE_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__ZONE_TITLE__ — Water Chemistry</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; color: #1a2535; letter-spacing: -.02em; }
+    .back { font-size: .85rem; font-weight: 500; color: #2e7dd4; text-decoration: none; margin-left: .75rem; }
+    .zone-type-label { font-size: .8rem; color: #7a90a8; margin-bottom: 1.5rem; }
+    #error-bar { display:none; background:#fde8e8; color:#c0392b; border-radius:8px; padding:.6rem 1rem; margin-bottom:1rem; font-size:.85rem; font-weight:500; }
+    .card { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); overflow: hidden; }
+    .card-header { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: #7a90a8; padding: .75rem 1.25rem; background: #f8fafc; border-bottom: 1px solid #e8edf3; display: flex; justify-content: space-between; align-items: center; }
+    .card-header .refresh-note { font-size: .7rem; color: #aabbc8; font-weight: 400; text-transform: none; letter-spacing: 0; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th { font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #7a90a8; padding: .55rem 1rem; text-align: right; border-bottom: 1px solid #e8edf3; white-space: nowrap; }
+    th:first-child { text-align: left; }
+    td { padding: .6rem 1rem; border-bottom: 1px solid #f0f4f8; text-align: right; color: #1a2535; white-space: nowrap; }
+    td:first-child { text-align: left; color: #5a6e84; font-size: .82rem; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f8fafc; }
+    .no-data { padding: 1.5rem 1.25rem; color: #aabbc8; font-size: .88rem; }
+    .val-ph { color: #2e7dd4; font-weight: 600; }
+    .val-orp { color: #7b4fb5; font-weight: 600; }
+    .val-cl { color: #2a9d6e; font-weight: 600; }
+    .val-temp { color: #e07820; font-weight: 600; }
+    .val-ec { color: #c0662b; font-weight: 600; }
+    .val-tds { color: #1a6db5; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div id="error-bar"></div>
+  <h1>__ZONE_TITLE__ <a class="back" href="/water-chemistry">&larr; Water Chemistry</a></h1>
+  <p class="zone-type-label">Running Water</p>
+  <div class="card">
+    <div class="card-header">
+      Recent Readings
+      <span class="refresh-note" id="refresh-note">Updating every 30s</span>
+    </div>
+    <div id="table-wrap">
+      <div class="no-data">Loading&hellip;</div>
+    </div>
+  </div>
+<script>
+const ZONE = __ZONE_JSON__;
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function showError(msg) {
+  const el = document.getElementById('error-bar');
+  el.textContent = msg; el.style.display = '';
+}
+
+function fmt(v, dec=2) { return v != null ? Number(v).toFixed(dec) : '—'; }
+
+function tsLabel(ts) {
+  const d = new Date(ts.replace(' ', 'T'));
+  const now = new Date();
+  const diffMs = now - d;
+  const diffMin = Math.floor(diffMs / 60000);
+  const time = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  const date = d.toLocaleDateString([], {month: 'short', day: 'numeric'});
+  const ago = diffMin < 1 ? 'just now' : diffMin < 60 ? diffMin + 'm ago' : date;
+  return `<span title="${esc(ts)}">${time} <span style="color:#aabbc8;font-size:.75rem">${ago}</span></span>`;
+}
+
+async function load() {
+  try {
+    const rows = await (await fetch('/api/pool/recent?zone=' + encodeURIComponent(ZONE) + '&limit=50')).json();
+    const wrap = document.getElementById('table-wrap');
+    if (!Array.isArray(rows) || !rows.length) {
+      wrap.innerHTML = '<div class="no-data">No readings yet for this zone.</div>';
+      return;
+    }
+    wrap.innerHTML = `<table>
+      <thead><tr>
+        <th>Time</th>
+        <th>Temp</th>
+        <th>pH</th>
+        <th>ORP</th>
+        <th>Free Cl</th>
+        <th>EC</th>
+        <th>TDS</th>
+        <th>Batt</th>
+      </tr></thead>
+      <tbody>${rows.map(r => `<tr>
+        <td>${tsLabel(r.ts)}</td>
+        <td class="val-temp">${fmt(r.temp_f, 1)}<span style="color:#aabbc8;font-size:.78rem"> °F</span></td>
+        <td class="val-ph">${fmt(r.ph)}</td>
+        <td class="val-orp">${fmt(r.orp, 0)}<span style="color:#aabbc8;font-size:.78rem"> mV</span></td>
+        <td class="val-cl">${fmt(r.chlorine)}<span style="color:#aabbc8;font-size:.78rem"> mg/L</span></td>
+        <td class="val-ec">${fmt(r.ec, 0)}<span style="color:#aabbc8;font-size:.78rem"> µS</span></td>
+        <td class="val-tds">${fmt(r.tds, 0)}<span style="color:#aabbc8;font-size:.78rem"> ppm</span></td>
+        <td>${fmt(r.battery, 0)}<span style="color:#aabbc8;font-size:.78rem"> %</span></td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  } catch(e) { showError('Failed to load readings: ' + e.message); }
+}
+
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>"""
+
+
 _WATER_CHEM_ZONE_PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8782,17 +8924,25 @@ def water_chemistry_zone_page(zone_name):
     if zone_name == '__unzoned__':
         title = 'Unzoned'
         color = UNZONED_COLOR
+        zone_type = None
     else:
         with _conn() as conn:
-            rows = conn.execute("SELECT name FROM wc_zones ORDER BY id ASC").fetchall()
+            rows = conn.execute("SELECT name, zone_type FROM wc_zones ORDER BY id ASC").fetchall()
+        zone_row = next((r for r in rows if r["name"] == zone_name), None)
         names = [r[0] for r in rows]
         idx = names.index(zone_name) if zone_name in names else 0
         title = zone_name
         color = ZONE_COLORS[idx % len(ZONE_COLORS)]
-    html = (_WATER_CHEM_ZONE_PAGE_TEMPLATE
-            .replace('__ZONE_TITLE__', title)
-            .replace('__ZONE_JSON__', _json.dumps(zone_name))
-            .replace('__ZONE_COLOR_JSON__', _json.dumps(color)))
+        zone_type = zone_row["zone_type"] if zone_row else None
+    if zone_type == 'running_water':
+        html = (_RUNNING_WATER_ZONE_PAGE_TEMPLATE
+                .replace('__ZONE_TITLE__', title)
+                .replace('__ZONE_JSON__', _json.dumps(zone_name)))
+    else:
+        html = (_WATER_CHEM_ZONE_PAGE_TEMPLATE
+                .replace('__ZONE_TITLE__', title)
+                .replace('__ZONE_JSON__', _json.dumps(zone_name))
+                .replace('__ZONE_COLOR_JSON__', _json.dumps(color)))
     return Response(html, mimetype="text/html")
 
 
