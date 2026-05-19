@@ -7759,7 +7759,7 @@ def api_pool_relay_reading():
 def api_wc_zones_get():
     """List all water chemistry zones."""
     with _conn() as conn:
-        rows = conn.execute("SELECT id, name, mode, created_at FROM wc_zones ORDER BY id ASC").fetchall()
+        rows = conn.execute("SELECT id, name, mode, zone_type, created_at FROM wc_zones ORDER BY id ASC").fetchall()
     return jsonify([dict(r) for r in rows])
 
 
@@ -7768,13 +7768,17 @@ def api_wc_zones_create():
     """Create a new water chemistry zone."""
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
+    zone_type = (data.get("zone_type") or "").strip() or None
+    valid_types = {"running_water", "pooling_water", "indoor_room", "outdoor_shade", "outdoor_sun"}
+    if zone_type and zone_type not in valid_types:
+        return jsonify({"error": f"invalid zone_type '{zone_type}'"}), 400
     if not name:
         return jsonify({"error": "name required"}), 400
     try:
         with _conn() as conn:
-            conn.execute("INSERT INTO wc_zones (name) VALUES (?)", (name,))
+            conn.execute("INSERT INTO wc_zones (name, zone_type) VALUES (?, ?)", (name, zone_type))
             conn.commit()
-            row = conn.execute("SELECT id, name, created_at FROM wc_zones WHERE name=?", (name,)).fetchone()
+            row = conn.execute("SELECT id, name, mode, zone_type, created_at FROM wc_zones WHERE name=?", (name,)).fetchone()
         return jsonify(dict(row)), 201
     except Exception as e:
         if "UNIQUE" in str(e):
@@ -8074,6 +8078,9 @@ _ZONES_PAGE = """<!DOCTYPE html>
     .zone-row:last-child { border-bottom: none; }
     .zone-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
     .zone-name { flex: 1; font-size: .95rem; font-weight: 600; color: #1a2535; }
+    .zone-type-badge { font-size: .72rem; font-weight: 600; color: #5a6e84; background: #eef2f7; border-radius: 6px; padding: .15rem .5rem; white-space: nowrap; }
+    .add-type-sel { font-size: .88rem; padding: .4rem .6rem; border: 1.5px solid #d0dce8; border-radius: 8px; background: #fff; color: #1a2535; cursor: pointer; }
+    .add-type-sel:focus { border-color: #2e7dd4; outline: none; }
     .del-btn { font-size: .8rem; color: #c0392b; background: none; border: none; cursor: pointer; padding: .3rem .6rem; border-radius: 6px; font-weight: 600; }
     .del-btn:hover { background: #fde8e8; }
     .empty { padding: 1rem 1.25rem; font-size: .88rem; color: #aabbc8; }
@@ -8093,11 +8100,26 @@ _ZONES_PAGE = """<!DOCTYPE html>
     <div class="add-row">
       <input class="add-input" id="add-input" type="text" placeholder="New zone name&hellip;"
              onkeydown="if(event.key==='Enter')addZone()">
+      <select class="add-type-sel" id="add-type">
+        <option value="">— Select type —</option>
+        <option value="running_water">Running Water</option>
+        <option value="pooling_water">Pooling Water</option>
+        <option value="indoor_room">Indoor Room</option>
+        <option value="outdoor_shade">Outdoor Shade</option>
+        <option value="outdoor_sun">Outdoor Sun</option>
+      </select>
       <button class="add-btn" onclick="addZone()">Add Zone</button>
     </div>
   </div>
 <script>
 const ZONE_COLORS = ['#2e7dd4','#e07820','#2a9d6e','#7b4fb5','#c0392b','#16a085','#d35400'];
+const ZONE_TYPE_LABELS = {
+  running_water:  'Running Water',
+  pooling_water:  'Pooling Water',
+  indoor_room:    'Indoor Room',
+  outdoor_shade:  'Outdoor Shade',
+  outdoor_sun:    'Outdoor Sun',
+};
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -8121,27 +8143,36 @@ function renderZones() {
     el.innerHTML = '<div class="empty">No zones yet. Add one below.</div>';
     return;
   }
-  el.innerHTML = zones.map((z, i) => `
+  el.innerHTML = zones.map((z, i) => {
+    const typeBadge = z.zone_type
+      ? `<span class="zone-type-badge">${esc(ZONE_TYPE_LABELS[z.zone_type] || z.zone_type)}</span>`
+      : '';
+    return `
     <div class="zone-row">
       <div class="zone-dot" style="background:${ZONE_COLORS[i % ZONE_COLORS.length]}"></div>
       <span class="zone-name">${esc(z.name)}</span>
+      ${typeBadge}
       <button class="del-btn" onclick="confirmDelete(${z.id},'${z.name.replace(/'/g,"\\\\'")}')">Delete</button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 async function addZone() {
-  const inp = document.getElementById('add-input');
+  const inp  = document.getElementById('add-input');
+  const typeSel = document.getElementById('add-type');
   const name = inp.value.trim();
   if (!name) { inp.focus(); return; }
+  const zone_type = typeSel.value || null;
   try {
     const r = await fetch('/api/water-chemistry/zones', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({name}),
+      body: JSON.stringify({name, zone_type}),
     });
     const body = await r.json();
     if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
     zones.push(body);
     inp.value = '';
+    typeSel.value = '';
     renderZones();
   } catch(e) { showError('Failed to add zone: ' + e.message); }
 }
