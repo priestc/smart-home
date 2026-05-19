@@ -49,8 +49,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.62"
-#define FIRMWARE_REV          69
+#define FIRMWARE_VERSION      "1.7.63"
+#define FIRMWARE_REV          70
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -545,9 +545,9 @@ static bool httpPost(const String& payload, bool parse_gatt) {
                             poolDisconnect();
                         }
                     } else {
-                        bool resuming = rdoc["ble_yc01"]["resume"].as<bool>();
+                        bool resuming = rdoc["ble_yc01"]["cancel_shutoff"].as<bool>();
                         if (resuming) {
-                            Serial.println("BLE-YC01: resume requested by server — reconnecting");
+                            Serial.println("BLE-YC01: cancel shutoff requested by server — reconnecting");
                         }
                         String new_addr  = rdoc["ble_yc01"]["address"].as<String>();
                         String new_label = rdoc["ble_yc01"]["label"].as<String>();

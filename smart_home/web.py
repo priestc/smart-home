@@ -386,12 +386,12 @@ def ble_relay():
     if assigned and assigned.get("paused"):
         response["ble_yc01"] = {"stop": True}  # explicit stop signal; relay disconnects gracefully
     elif assigned:
-        resuming = _pool.consume_resume_request(water_chemistry_devices, assigned.get("label", ""))
+        resuming = _pool.consume_cancel_shutoff_request(water_chemistry_devices, assigned.get("label", ""))
         response["ble_yc01"] = {
             "address": assigned["address"],
             "label": assigned.get("label", assigned["address"]),
             "poll_skip_cycles": max(0, assigned.get("poll_interval_s", 60) // 30 - 1),
-            **({"resume": True} if resuming else {}),
+            **({"cancel_shutoff": True} if resuming else {}),
         }
     else:
         response["ble_yc01"] = None
@@ -408,8 +408,8 @@ def ble_relay():
     server_cmd = {}
     if response.get("ble_yc01") and response["ble_yc01"].get("stop"):
         server_cmd["ble_yc01"] = "stop"
-    elif response.get("ble_yc01") and response["ble_yc01"].get("resume"):
-        server_cmd["ble_yc01"] = "resume"
+    elif response.get("ble_yc01") and response["ble_yc01"].get("cancel_shutoff"):
+        server_cmd["ble_yc01"] = "cancel_shutoff"
     elif response.get("ble_yc01"):
         server_cmd["ble_yc01"] = "assign:" + response["ble_yc01"].get("label", "")
     if response.get("pair_mode"):
@@ -7837,12 +7837,12 @@ def api_pool_relay_reading():
     if assigned and assigned.get("paused"):
         ble_yc01_resp = {"stop": True}  # explicit stop signal; relay disconnects gracefully
     elif assigned:
-        resuming = _pool.consume_resume_request(monitors, assigned.get("label", ""))
+        resuming = _pool.consume_cancel_shutoff_request(monitors, assigned.get("label", ""))
         ble_yc01_resp = {
             "address": assigned["address"],
             "label": assigned.get("label", assigned["address"]),
             "poll_skip_cycles": max(0, assigned.get("poll_interval_s", 60) // 30 - 1),
-            **({"resume": True} if resuming else {}),
+            **({"cancel_shutoff": True} if resuming else {}),
         }
     else:
         ble_yc01_resp = None
@@ -8024,7 +8024,7 @@ def api_wc_move():
         monitors = _pool.load_config()
         monitor = next((m for m in monitors if m.get("label") == label), None)
         if monitor and monitor.get("paused"):
-            _pool.request_resume(label)
+            _pool.request_cancel_shutoff(label)
     return jsonify({"ok": True, "label": label, "zone": zone_name})
 
 

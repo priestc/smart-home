@@ -94,8 +94,8 @@ def resume_recording(label: str) -> bool:
     return False
 
 
-def request_resume(label: str) -> bool:
-    """Clear paused and set resume_requested so the relay gets an explicit cancel-stop signal.
+def request_cancel_shutoff(label: str) -> bool:
+    """Clear paused and set cancel_shutoff_requested so the relay gets an explicit cancel signal.
 
     Use this when cancelling an in-progress shutoff (e.g. zone assigned while paused),
     so the relay knows to actively reconnect rather than just passively receive an update.
@@ -105,17 +105,17 @@ def request_resume(label: str) -> bool:
     for m in monitors:
         if m.get("label") == label:
             m.pop("paused", None)
-            m["resume_requested"] = True
+            m["cancel_shutoff_requested"] = True
             save_config(monitors)
             return True
     return False
 
 
-def consume_resume_request(monitors: list[dict], label: str) -> bool:
-    """Clear resume_requested if set. Saves config. Returns True if it was set."""
+def consume_cancel_shutoff_request(monitors: list[dict], label: str) -> bool:
+    """Clear cancel_shutoff_requested if set. Saves config. Returns True if it was set."""
     for m in monitors:
-        if m.get("label") == label and m.get("resume_requested"):
-            m.pop("resume_requested")
+        if m.get("label") == label and m.get("cancel_shutoff_requested"):
+            m.pop("cancel_shutoff_requested")
             save_config(monitors)
             return True
     return False

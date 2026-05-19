@@ -659,8 +659,8 @@ def relay_log(db):
         server_cmd = _json.loads(row["server_cmd"]) if row["server_cmd"] else {}
         if server_cmd.get("ble_yc01") == "stop":
             parts.append(click.style("→ YC01: STOP", fg="red", bold=True))
-        elif server_cmd.get("ble_yc01") == "resume":
-            parts.append(click.style("→ YC01: RESUME", fg="green", bold=True))
+        elif server_cmd.get("ble_yc01") == "cancel_shutoff":
+            parts.append(click.style("→ YC01: CANCEL SHUTOFF", fg="green", bold=True))
         elif server_cmd.get("ble_yc01", "").startswith("assign:"):
             lbl = server_cmd["ble_yc01"][len("assign:"):]
             parts.append(click.style(f"→ YC01: assign {lbl}", fg="cyan"))
