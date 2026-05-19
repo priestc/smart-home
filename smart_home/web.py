@@ -7786,6 +7786,40 @@ def api_wc_zones_create():
         return jsonify({"error": str(e)}), 500
 
 
+@app.patch("/api/water-chemistry/zones/<int:zone_id>")
+def api_wc_zones_update(zone_id):
+    """Update name and/or zone_type for a zone. Cascades name change to pool_readings."""
+    data = request.get_json(silent=True) or {}
+    new_name = (data.get("name") or "").strip() or None
+    zone_type = data.get("zone_type", "__unset__")
+    valid_types = {"running_water", "pooling_water", "indoor_room", "outdoor_shade", "outdoor_sun", "unclassified", None}
+    if zone_type != "__unset__" and zone_type not in valid_types:
+        return jsonify({"error": f"invalid zone_type '{zone_type}'"}), 400
+    with _conn() as conn:
+        row = conn.execute("SELECT id, name, mode, zone_type FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
+        if row is None:
+            return jsonify({"error": "zone not found"}), 404
+        old_name = row["name"]
+        updates, params = [], []
+        if new_name and new_name != old_name:
+            updates.append("name=?"); params.append(new_name)
+        if zone_type != "__unset__":
+            updates.append("zone_type=?"); params.append(zone_type)
+        if updates:
+            params.append(zone_id)
+            try:
+                conn.execute(f"UPDATE wc_zones SET {', '.join(updates)} WHERE id=?", params)
+            except Exception as e:
+                if "UNIQUE" in str(e):
+                    return jsonify({"error": f"zone '{new_name}' already exists"}), 409
+                return jsonify({"error": str(e)}), 500
+            if new_name and new_name != old_name:
+                conn.execute("UPDATE pool_readings SET zone=? WHERE zone=?", (new_name, old_name))
+            conn.commit()
+        row = conn.execute("SELECT id, name, mode, zone_type, created_at FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
+    return jsonify(dict(row))
+
+
 @app.delete("/api/water-chemistry/zones/<int:zone_id>")
 def api_wc_zones_delete(zone_id):
     """Delete a water chemistry zone by ID. ?purge=true also deletes all readings for that zone."""
@@ -8081,6 +8115,8 @@ _ZONES_PAGE = """<!DOCTYPE html>
     .zone-type-badge { font-size: .72rem; font-weight: 600; color: #5a6e84; background: #eef2f7; border-radius: 6px; padding: .15rem .5rem; white-space: nowrap; }
     .add-type-sel { font-size: .88rem; padding: .4rem .6rem; border: 1.5px solid #d0dce8; border-radius: 8px; background: #fff; color: #1a2535; cursor: pointer; }
     .add-type-sel:focus { border-color: #2e7dd4; outline: none; }
+    .edit-btn { font-size: .8rem; color: #2e7dd4; background: none; border: none; cursor: pointer; padding: .3rem .6rem; border-radius: 6px; font-weight: 600; }
+    .edit-btn:hover { background: #e8f1fb; }
     .del-btn { font-size: .8rem; color: #c0392b; background: none; border: none; cursor: pointer; padding: .3rem .6rem; border-radius: 6px; font-weight: 600; }
     .del-btn:hover { background: #fde8e8; }
     .empty { padding: 1rem 1.25rem; font-size: .88rem; color: #aabbc8; }
@@ -8154,6 +8190,7 @@ function renderZones() {
       <div class="zone-dot" style="background:${ZONE_COLORS[i % ZONE_COLORS.length]}"></div>
       <span class="zone-name">${esc(z.name)}</span>
       ${typeBadge}
+      <button class="edit-btn" onclick="openEditZone(${z.id})">Edit</button>
       <button class="del-btn" onclick="confirmDelete(${z.id},'${z.name.replace(/'/g,"\\\\'")}')">Delete</button>
     </div>`;
   }).join('');
@@ -8210,6 +8247,79 @@ async function doDeleteZone(id, name, purge) {
     zones = zones.filter(z => z.id !== id);
     renderZones();
   } catch(e) { showError('Failed to delete zone: ' + e.message); }
+}
+
+function openEditZone(id) {
+  const z = zones.find(z => z.id === id);
+  if (!z) return;
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:999;display:flex;align-items:center;justify-content:center;';
+  const typeOptions = [
+    ['', '— Select type —'],
+    ['running_water', 'Running Water'],
+    ['pooling_water', 'Pooling Water'],
+    ['indoor_room', 'Indoor Room'],
+    ['outdoor_shade', 'Outdoor Shade'],
+    ['outdoor_sun', 'Outdoor Sun'],
+    ['unclassified', 'Unclassified'],
+  ].map(([v, l]) => `<option value="${v}"${z.zone_type === v ? ' selected' : ''}>${l}</option>`).join('');
+
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#fff;border-radius:14px;padding:1.5rem 1.75rem;max-width:380px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.18);';
+  box.innerHTML = `
+    <div style="font-size:1rem;font-weight:700;color:#1a2535;margin-bottom:1rem">Edit Zone</div>
+    <div style="display:flex;flex-direction:column;gap:.75rem">
+      <div>
+        <label style="font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#7a90a8;display:block;margin-bottom:.3rem">Name</label>
+        <input id="ez-name" type="text" value="${esc(z.name)}"
+          style="width:100%;font-size:.95rem;padding:.4rem .75rem;border:1.5px solid #d0dce8;border-radius:8px;color:#1a2535;outline:none;box-sizing:border-box;">
+      </div>
+      <div>
+        <label style="font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#7a90a8;display:block;margin-bottom:.3rem">Type</label>
+        <select id="ez-type" style="width:100%;font-size:.9rem;padding:.4rem .6rem;border:1.5px solid #d0dce8;border-radius:8px;background:#fff;color:#1a2535;cursor:pointer;box-sizing:border-box;">${typeOptions}</select>
+      </div>
+      <div id="ez-err" style="font-size:.82rem;color:#c0392b;display:none"></div>
+      <div style="display:flex;gap:.6rem;margin-top:.25rem">
+        <button id="ez-save" style="flex:1;font-size:.88rem;font-weight:700;background:#2e7dd4;color:#fff;border:none;border-radius:8px;padding:.5rem .9rem;cursor:pointer;">Save</button>
+        <button id="ez-cancel" style="font-size:.88rem;color:#7a90a8;background:none;border:1.5px solid #d0dce8;border-radius:8px;padding:.5rem .9rem;cursor:pointer;">Cancel</button>
+      </div>
+    </div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  const close = () => document.body.removeChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  box.querySelector('#ez-cancel').onclick = close;
+
+  const nameInp = box.querySelector('#ez-name');
+  nameInp.focus(); nameInp.select();
+  nameInp.onkeydown = e => { if (e.key === 'Enter') doSave(); if (e.key === 'Escape') close(); };
+
+  async function doSave() {
+    const name = nameInp.value.trim();
+    const zone_type = box.querySelector('#ez-type').value || null;
+    const errEl = box.querySelector('#ez-err');
+    if (!name) { nameInp.focus(); return; }
+    const saveBtn = box.querySelector('#ez-save');
+    saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+    try {
+      const r = await fetch(`/api/water-chemistry/zones/${id}`, {
+        method: 'PATCH', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name, zone_type}),
+      });
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status);
+      const idx = zones.findIndex(z => z.id === id);
+      if (idx !== -1) zones[idx] = body;
+      renderZones();
+      close();
+    } catch(e) {
+      errEl.textContent = e.message; errEl.style.display = '';
+      saveBtn.disabled = false; saveBtn.textContent = 'Save';
+    }
+  }
+  box.querySelector('#ez-save').onclick = doSave;
 }
 
 async function load() {
