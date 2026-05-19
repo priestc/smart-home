@@ -179,6 +179,13 @@ def ble_relay():
                     _pool_reading_stored = True
                     if pool_rssi is not None:
                         labeled_seen[pool_label] = pool_rssi
+                    # One-time measurement: check stability and complete session if stable.
+                    monitors_ot = _pool.load_config()
+                    monitor_ot = next((m for m in monitors_ot if m.get("label") == pool_label), None)
+                    if monitor_ot and monitor_ot.get("one_time_active"):
+                        ot_start_ts = monitor_ot.get("one_time_start_ts", "")
+                        if _wc_check_stability(conn, pool_label, ot_start_ts):
+                            _wc_complete_one_time(conn, pool_label, ot_start_ts)
                     # Auto-pause if running without a zone for 5 minutes.
                     # Trigger early by the offline threshold so the device actually
                     # goes offline at the 5-minute mark, not 80s after it.
