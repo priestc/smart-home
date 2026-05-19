@@ -7811,7 +7811,15 @@ def api_wc_zone_list():
         has_unzoned = conn.execute(
             "SELECT 1 FROM pool_readings WHERE zone IS NULL LIMIT 1"
         ).fetchone() is not None
-    return jsonify({"zones": [r[0] for r in rows], "has_unzoned": has_unzoned})
+        online_rows = conn.execute(
+            """
+            SELECT DISTINCT zone FROM pool_readings
+            WHERE zone IS NOT NULL
+              AND ts >= datetime('now', '-600 seconds')
+            """
+        ).fetchall()
+        online_zones = {r[0] for r in online_rows}
+    return jsonify({"zones": [r[0] for r in rows], "has_unzoned": has_unzoned, "online_zones": list(online_zones)})
 
 
 
@@ -8372,6 +8380,8 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
     .zone-card:hover { box-shadow:0 3px 10px rgba(0,0,0,.13); transform:translateY(-1px); }
     .zone-card .zc-name { font-size:1rem; font-weight:700; color:#1a2535; margin-bottom:.3rem; }
     .zone-card .zc-arrow { font-size:.85rem; color:#7a90a8; }
+    .zone-card .zc-header { display:flex; align-items:center; gap:.5rem; }
+    .zc-online { font-size:.7rem; font-weight:600; padding:.15rem .45rem; border-radius:20px; background:#eafaf1; color:#2a9d6e; }
   </style>
 </head>
 <body>
@@ -8436,16 +8446,18 @@ async function loadZoneList() {
   try {
     const data = await fetchJSON('/api/water-chemistry/zone-list');
     const container = document.getElementById('zone-list');
+    const onlineSet = new Set(data.online_zones || []);
     const cards = data.zones.map((name, i) => {
       const color = ZONE_COLORS[i % ZONE_COLORS.length];
+      const badge = onlineSet.has(name) ? '<span class="zc-online">&#9679; Online</span>' : '';
       return `<a class="zone-card" href="/water-chemistry/${encodeURIComponent(name)}" style="--zc:${color}">
-        <div class="zc-name">${esc(name)}</div>
+        <div class="zc-header"><div class="zc-name">${esc(name)}</div>${badge}</div>
         <div class="zc-arrow">View chart &rarr;</div>
       </a>`;
     });
     if (data.has_unzoned) {
       cards.push(`<a class="zone-card" href="/water-chemistry/__unzoned__" style="--zc:${UNZONED_COLOR}">
-        <div class="zc-name" style="color:#7a90a8">Unzoned</div>
+        <div class="zc-header"><div class="zc-name" style="color:#7a90a8">Unzoned</div></div>
         <div class="zc-arrow">View chart &rarr;</div>
       </a>`);
     }
