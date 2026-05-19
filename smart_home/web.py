@@ -5343,16 +5343,6 @@ def devices_page():
     .wc-msg { font-size: .78rem; }
     .wc-msg.ok  { color: #2a9d6e; }
     .wc-msg.err { color: #c0392b; }
-    .wc-zones-panel { width: 100%; margin-top: .5rem; border-top: 1px solid #e8edf3; padding-top: .6rem; }
-    .wc-zones-header { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: #7a90a8; margin-bottom: .5rem; }
-    .wc-zone-row { display: flex; align-items: flex-start; gap: .75rem; margin-bottom: .5rem; flex-wrap: wrap; }
-    .wc-zone-name { font-size: .88rem; font-weight: 600; color: #1a2535; min-width: 8rem; padding-top: .25rem; }
-    .wc-zone-mode-wrap { display: flex; flex-direction: column; gap: .2rem; }
-    .wc-zone-mode-sel { font-size: .85rem; padding: .3rem .6rem; border: 1px solid #d0dce8; border-radius: 8px; background: #fff; color: #1a2535; cursor: pointer; }
-    .wc-zone-hint { font-size: .72rem; color: #7a90a8; max-width: 28rem; }
-    .wc-zone-msg { font-size: .72rem; margin-top: .1rem; }
-    .wc-zone-msg.ok  { color: #2a9d6e; }
-    .wc-zone-msg.err { color: #c0392b; }
     .device-row:last-child { border-bottom: none; }
     .device-name { flex: 1; font-size: .95rem; font-weight: 600; color: #1a2535; }
     .device-sub  { font-size: .78rem; color: #7a90a8; font-weight: 400; margin-top: .1rem; }
@@ -5495,12 +5485,6 @@ function buildRow(type, d) {
       </select>
       <span class="wc-msg"></span>`;
     row.appendChild(controls);
-
-    const zonesPanel = document.createElement("div");
-    zonesPanel.className = "wc-zones-panel";
-    zonesPanel.dataset.label = id;
-    zonesPanel.innerHTML = `<div class="wc-zones-header">Measurement Zones</div><div class="wc-zones-list"></div>`;
-    row.appendChild(zonesPanel);
   }
 
   return row;
@@ -5642,67 +5626,6 @@ async function setWcZone(sel) {
   }
 }
 
-const MODE_HINTS = {
-  continuous: "Best for long-lived bodies of water that are continuously monitored — pools, spas, aquariums.",
-  one_time:   "Best for measuring flowing or one-off water sources — faucets, spigots, or fill water.",
-};
-
-async function loadWcZonesForDevice(label) {
-  const panel = document.querySelector(`.wc-zones-panel[data-label="${CSS.escape(label)}"]`);
-  if (!panel) return;
-  const list = panel.querySelector(".wc-zones-list");
-  let zones;
-  try {
-    zones = await fetchJSON('/api/water-chemistry/zones');
-  } catch(e) {
-    list.innerHTML = `<span style="font-size:.8rem;color:#c0392b">Failed to load zones: ${e.message}</span>`;
-    return;
-  }
-  if (!zones.length) {
-    list.innerHTML = `<span style="font-size:.8rem;color:#aabbc8">No zones with measurements yet.</span>`;
-    return;
-  }
-  list.innerHTML = "";
-  for (const z of zones) {
-    const zrow = document.createElement("div");
-    zrow.className = "wc-zone-row";
-    const hint = MODE_HINTS[z.mode] || MODE_HINTS.continuous;
-    zrow.innerHTML = `
-      <div class="wc-zone-name">${z.name}</div>
-      <div class="wc-zone-mode-wrap">
-        <select class="wc-zone-mode-sel" data-zone-id="${z.id}" onchange="setZoneMode(this)">
-          <option value="continuous"${z.mode === "continuous" ? " selected" : ""}>Continuous measurement</option>
-          <option value="one_time"${z.mode === "one_time" ? " selected" : ""}>One-time measurement</option>
-        </select>
-        <div class="wc-zone-hint">${hint}</div>
-        <div class="wc-zone-msg"></div>
-      </div>`;
-    list.appendChild(zrow);
-  }
-}
-
-async function setZoneMode(sel) {
-  const zoneId = sel.dataset.zoneId;
-  const mode = sel.value;
-  const wrap = sel.closest(".wc-zone-mode-wrap");
-  const hint = wrap.querySelector(".wc-zone-hint");
-  const msg  = wrap.querySelector(".wc-zone-msg");
-  hint.textContent = MODE_HINTS[mode] || "";
-  msg.className = "wc-zone-msg"; msg.textContent = "Saving…";
-  try {
-    const r = await fetch(`/api/water-chemistry/zones/${zoneId}/mode`, {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({mode}),
-    });
-    const body = await r.json();
-    if (!r.ok) throw new Error(body.error || "HTTP " + r.status);
-    msg.className = "wc-zone-msg ok"; msg.textContent = "Saved";
-    setTimeout(() => { msg.textContent = ""; }, 3000);
-  } catch(e) {
-    msg.className = "wc-zone-msg err"; msg.textContent = "Error: " + e.message;
-    showError("Failed to set zone mode: " + e.message);
-  }
-}
 
 async function load() {
   let data;
@@ -5732,9 +5655,6 @@ async function load() {
   }
   if (data.water_chemistry && data.water_chemistry.length) {
     loadWaterChemistrySettings();
-    for (const d of data.water_chemistry) {
-      loadWcZonesForDevice(d.id);
-    }
   }
 }
 load();
