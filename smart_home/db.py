@@ -207,7 +207,7 @@ def open_db(path: str) -> sqlite3.Connection:
             rev           INTEGER
         )
     """)
-    for col, defn in [("labeled_json", "TEXT"), ("rev", "INTEGER")]:
+    for col, defn in [("labeled_json", "TEXT"), ("rev", "INTEGER"), ("server_cmd", "TEXT")]:
         try:
             conn.execute(f"ALTER TABLE relay_log ADD COLUMN {col} {defn}")
             conn.commit()

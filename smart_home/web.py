@@ -251,7 +251,7 @@ def ble_relay():
             labeled_seen["_pool_status"] = data["ble_yc01_status"]
         if data.get("buffered"):
             labeled_seen["_buffered"] = True
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO relay_log (ts, relay_id, batch_ts, n_adverts, n_inserted, presence_json, labeled_json, rev) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -265,6 +265,7 @@ def ble_relay():
                 data.get("rev"),
             ),
         )
+        _log_row_id = cur.lastrowid
         conn.execute(
             "DELETE FROM relay_log WHERE n_adverts >= 0 AND ("
             "  (labeled_json NOT LIKE '%\"_buffered\": true%' AND datetime(ts) < datetime('now', '-10 minutes'))"
@@ -378,6 +379,22 @@ def ble_relay():
     n = max(len(all_relays), 1)
     idx = next((i for i, r in enumerate(all_relays) if r.get("token") == token), 0)
     response["relay_offset"] = (idx * 30) // n
+
+    # Log what the server is sending back to the relay.
+    import json as _json
+    server_cmd = {}
+    if response.get("ble_yc01") and response["ble_yc01"].get("stop"):
+        server_cmd["ble_yc01"] = "stop"
+    elif response.get("ble_yc01"):
+        server_cmd["ble_yc01"] = "assign:" + response["ble_yc01"].get("label", "")
+    if response.get("pair_mode"):
+        server_cmd["pair_mode"] = response["pair_mode"].get("label", "")
+    if server_cmd:
+        with _conn() as conn:
+            conn.execute(
+                "UPDATE relay_log SET server_cmd=? WHERE id=?",
+                (_json.dumps(server_cmd), _log_row_id),
+            )
 
     return jsonify(response)
 
@@ -7782,6 +7799,16 @@ def api_pool_relay_reading():
             "label": assigned.get("label", assigned["address"]),
             "poll_skip_cycles": max(0, assigned.get("poll_interval_s", 60) // 30 - 1),
         } if assigned else None
+
+    # Log the server command alongside the reading entry.
+    if ble_yc01_resp and ble_yc01_resp.get("stop"):
+        import json as _json
+        with _conn() as conn:
+            conn.execute(
+                "UPDATE relay_log SET server_cmd=? WHERE relay_id=? ORDER BY id DESC LIMIT 1",
+                (_json.dumps({"ble_yc01": "stop"}), relay_cfg["id"]),
+            )
+
     return jsonify({"ok": True, "ble_yc01": ble_yc01_resp})
 
 

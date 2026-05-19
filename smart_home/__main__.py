@@ -646,11 +646,22 @@ def relay_log(db):
             parts.append(click.style(label, fg="yellow"))
         if labeled.get("_buffered"):
             parts.append(click.style("*buffered", fg="cyan"))
+
+        # Show server-to-relay commands
+        server_cmd = _json.loads(row["server_cmd"]) if row.get("server_cmd") else {}
+        if server_cmd.get("ble_yc01") == "stop":
+            parts.append(click.style("→ YC01: STOP", fg="red", bold=True))
+        elif server_cmd.get("ble_yc01", "").startswith("assign:"):
+            lbl = server_cmd["ble_yc01"][len("assign:"):]
+            parts.append(click.style(f"→ YC01: assign {lbl}", fg="cyan"))
+        if server_cmd.get("pair_mode"):
+            parts.append(click.style(f"→ PAIR: {server_cmd['pair_mode']}", fg="yellow", bold=True))
+
         return "  ".join(parts)
 
     # Show last 10 entries so there's immediate context on startup.
     recent = conn.execute(
-        "SELECT id, ts, relay_id, batch_ts, n_adverts, n_inserted, labeled_json, rev "
+        "SELECT id, ts, relay_id, batch_ts, n_adverts, n_inserted, labeled_json, rev, server_cmd "
         "FROM relay_log ORDER BY id DESC LIMIT 10",
     ).fetchall()
     recent = list(reversed(recent))
@@ -665,7 +676,7 @@ def relay_log(db):
     try:
         while True:
             rows = conn.execute(
-                "SELECT id, ts, relay_id, batch_ts, n_adverts, n_inserted, labeled_json, rev "
+                "SELECT id, ts, relay_id, batch_ts, n_adverts, n_inserted, labeled_json, rev, server_cmd "
                 "FROM relay_log WHERE id > ? ORDER BY id",
                 (last_id,),
             ).fetchall()
