@@ -174,10 +174,20 @@ def ble_relay():
                     reading.address = pool_address
                     reading.label = pool_label
                     reading.rssi = pool_rssi
-                    insert_pool_reading(conn, reading, zone=_pool.get_device_zone(pool_label, pool_address))
+                    current_zone = _pool.get_device_zone(pool_label, pool_address)
+                    insert_pool_reading(conn, reading, zone=current_zone)
                     _pool_reading_stored = True
                     if pool_rssi is not None:
                         labeled_seen[pool_label] = pool_rssi
+                    # Auto-pause if running without a zone for 5 minutes
+                    if current_zone is None:
+                        has_zoned = conn.execute(
+                            "SELECT 1 FROM pool_readings WHERE label=? AND zone IS NOT NULL"
+                            " AND ts >= datetime('now', '-300 seconds') LIMIT 1",
+                            (pool_label,),
+                        ).fetchone()
+                        if not has_zoned:
+                            _pool.pause_recording(pool_label)
 
         # Fire sensor_online/offline events immediately from the relay's pool state.
         # The relay detects the pool's presence in every scan, so we don't need to
