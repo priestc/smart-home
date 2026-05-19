@@ -7849,6 +7849,10 @@ def api_wc_move():
 def api_wc_current():
     """Latest reading for each water chemistry device, with current zone from config."""
     from smart_home import pool as _pool
+    OFFLINE_THRESHOLD = 600
+    now = datetime.datetime.now()
+    monitors = _pool.load_config()
+
     with _conn() as conn:
         rows = conn.execute("""
             SELECT label, address, temp_c, ph, ec, tds, orp, chlorine, battery, rssi, ts
@@ -7858,25 +7862,50 @@ def api_wc_current():
             )
             ORDER BY label
         """).fetchall()
-    now = datetime.datetime.now()
-    monitors = _pool.load_config()
-    result = []
-    for r in rows:
-        d = dict(r)
-        d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
-        try:
-            age = (now - datetime.datetime.strptime(d["ts"], "%Y-%m-%d %H:%M:%S")).total_seconds()
-            d["offline"] = age > 600
-        except (ValueError, TypeError):
-            d["offline"] = True
-        addr_upper = (d["address"] or "").upper()
-        zone = None
-        for m in monitors:
-            if m.get("label") == d["label"] or (addr_upper and m.get("address", "").upper() == addr_upper):
-                zone = m.get("current_zone")
-                break
-        d["current_zone"] = zone
-        result.append(d)
+
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
+            try:
+                last_ts = datetime.datetime.strptime(d["ts"], "%Y-%m-%d %H:%M:%S")
+                age = (now - last_ts).total_seconds()
+                d["offline"] = age > OFFLINE_THRESHOLD
+            except (ValueError, TypeError):
+                d["offline"] = True
+                last_ts = None
+
+            # Find start of current streak (online or offline) by walking back through readings
+            streak_start = d["ts"]
+            if last_ts and d["address"]:
+                recent = conn.execute(
+                    "SELECT ts FROM pool_readings WHERE address = ? ORDER BY ts DESC LIMIT 500",
+                    (d["address"],)
+                ).fetchall()
+                prev = last_ts
+                for rec in recent[1:]:
+                    ts = datetime.datetime.strptime(rec["ts"], "%Y-%m-%d %H:%M:%S")
+                    gap = (prev - ts).total_seconds()
+                    if d["offline"]:
+                        # Offline streak: stop when we find a reading within threshold of the next
+                        if gap <= OFFLINE_THRESHOLD:
+                            break
+                    else:
+                        # Online streak: stop when we find a gap (device was offline before)
+                        if gap > OFFLINE_THRESHOLD:
+                            break
+                    streak_start = rec["ts"]
+                    prev = ts
+            d["streak_start"] = streak_start
+
+            addr_upper = (d["address"] or "").upper()
+            zone = None
+            for m in monitors:
+                if m.get("label") == d["label"] or (addr_upper and m.get("address", "").upper() == addr_upper):
+                    zone = m.get("current_zone")
+                    break
+            d["current_zone"] = zone
+            result.append(d)
     return jsonify(result)
 
 
@@ -8380,6 +8409,13 @@ function ago(ts) {
   if (secs < 86400) return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm ago';
   return Math.floor(secs/86400) + 'd ago';
 }
+function dur(ts) {
+  const secs = Math.floor((Date.now() - new Date(ts.replace(' ','T')).getTime()) / 1000);
+  if (secs < 60)    return secs + 's';
+  if (secs < 3600)  return Math.floor(secs/60) + 'm';
+  if (secs < 86400) return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
+  return Math.floor(secs/86400) + 'd ' + Math.floor((secs%86400)/3600) + 'h';
+}
 function phColor(ph) {
   if (ph < 7.0 || ph > 7.8) return '#c0392b';
   if (ph >= 7.2 && ph <= 7.6) return '#2a9d6e';
@@ -8427,7 +8463,7 @@ async function loadCurrent() {
         <div class="device-header">
           <span class="device-name">BLE-YC01</span>
           <span class="device-status ${r.offline ? 'offline' : 'online'}">${r.offline ? '&#9679; Offline' : '&#9679; Online'}</span>
-          <span style="font-size:.75rem;color:#aabbc8">${ago(r.ts)}</span>
+          <span style="font-size:.75rem;color:#aabbc8">for ${dur(r.streak_start)}</span>
           <span style="font-size:.78rem;color:${r.current_zone ? '#7a90a8' : '#aabbc8'}">&rarr; ${r.current_zone ? esc(r.current_zone) : 'No zone'}</span>
         </div>
         <div class="cards" style="margin-bottom:0;gap:.75rem">
