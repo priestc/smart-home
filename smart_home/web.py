@@ -7769,7 +7769,7 @@ def api_wc_zones_create():
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     zone_type = (data.get("zone_type") or "").strip() or None
-    valid_types = {"running_water", "pooling_water", "indoor_room", "outdoor_shade", "outdoor_sun"}
+    valid_types = {"running_water", "pooling_water", "indoor_room", "outdoor_shade", "outdoor_sun", "unclassified"}
     if zone_type and zone_type not in valid_types:
         return jsonify({"error": f"invalid zone_type '{zone_type}'"}), 400
     if not name:
@@ -8107,6 +8107,7 @@ _ZONES_PAGE = """<!DOCTYPE html>
         <option value="indoor_room">Indoor Room</option>
         <option value="outdoor_shade">Outdoor Shade</option>
         <option value="outdoor_sun">Outdoor Sun</option>
+        <option value="unclassified">Unclassified</option>
       </select>
       <button class="add-btn" onclick="addZone()">Add Zone</button>
     </div>
@@ -8119,6 +8120,7 @@ const ZONE_TYPE_LABELS = {
   indoor_room:    'Indoor Room',
   outdoor_shade:  'Outdoor Shade',
   outdoor_sun:    'Outdoor Sun',
+  unclassified:   'Unclassified',
 };
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
