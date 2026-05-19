@@ -67,6 +67,20 @@ def find_relay_by_token(token: str) -> dict | None:
     return None
 
 
+def set_relay_firmware_rev(relay_id: str, rev: int | None) -> bool:
+    """Update the firmware_rev for a relay in relays.json. Returns False if not found."""
+    relays = load_relays()
+    for r in relays:
+        if r.get("id") == relay_id:
+            if rev is not None:
+                r["firmware_rev"] = rev
+            else:
+                r.pop("firmware_rev", None)
+            save_relays(relays)
+            return True
+    return False
+
+
 def generate_token() -> str:
     return secrets.token_hex(24)
 

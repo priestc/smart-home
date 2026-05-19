@@ -216,15 +216,9 @@ def open_db(path: str) -> sqlite3.Connection:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS relay_checkin (
             relay_id    TEXT PRIMARY KEY,
-            ts          TEXT NOT NULL,
-            firmware_rev INTEGER
+            ts          TEXT NOT NULL
         )
     """)
-    try:
-        conn.execute("ALTER TABLE relay_checkin ADD COLUMN firmware_rev INTEGER")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS relay_presence_sighting (
             relay_id     TEXT NOT NULL,

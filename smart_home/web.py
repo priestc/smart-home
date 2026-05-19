@@ -487,11 +487,14 @@ def relay_startup():
     except (ValueError, TypeError):
         firmware_rev = None
 
+    if firmware_rev is not None:
+        _relay.set_relay_firmware_rev(relay_cfg["id"], firmware_rev)
+
     with _conn() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO relay_checkin (relay_id, ts, firmware_rev) "
-            "VALUES (?, strftime('%Y-%m-%d %H:%M:%S','now'), ?)",
-            (relay_cfg["id"], firmware_rev),
+            "INSERT OR REPLACE INTO relay_checkin (relay_id, ts) "
+            "VALUES (?, strftime('%Y-%m-%d %H:%M:%S','now'))",
+            (relay_cfg["id"],),
         )
         conn.execute(
             "INSERT INTO relay_log (ts, relay_id, n_adverts, n_inserted, labeled_json) "

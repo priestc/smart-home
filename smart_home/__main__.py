@@ -877,14 +877,9 @@ def update_relay(relay_name):
     new_ver, new_rev = _relay.firmware_version()
     if new_ver != "?":
         click.echo(f"\nLatest firmware: v{new_ver}  (rev{new_rev})")
-        conn = open_db(DEFAULT_DB)
-        row = conn.execute(
-            "SELECT firmware_rev FROM relay_checkin WHERE relay_id = ?",
-            (relay_id,),
-        ).fetchone()
-        conn.close()
-        if row is not None and row["firmware_rev"] is not None:
-            cur_rev = row["firmware_rev"]
+        relay_config = next((r for r in unique if r["id"] == relay_id), None)
+        cur_rev = relay_config.get("firmware_rev") if relay_config else None
+        if cur_rev is not None:
             click.echo(f"Current firmware: rev{cur_rev}")
             if cur_rev == new_rev:
                 click.echo(
@@ -893,7 +888,7 @@ def update_relay(relay_name):
                 )
                 return
         else:
-            click.echo(f"No startup record found for '{relay_id}' — proceeding with flash.")
+            click.echo(f"Current firmware version unknown — proceeding with flash.")
 
     click.echo(f"\nFlashing firmware to relay '{relay_id}' at {port} ...")
     click.echo("WiFi credentials and token stored on the device will be preserved.\n")
