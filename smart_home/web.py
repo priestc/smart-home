@@ -8822,10 +8822,18 @@ function clColor(cl) {
 }
 
 let _zoneData = null;
+let _currentData = null;
 
 function renderZoneList() {
   if (!_zoneData) return;
   const {zones, has_unzoned, online_zones, recording} = _zoneData;
+
+  // Hide Record buttons while a pooling_water zone is being continuously recorded
+  const poolingNames = new Set(zones.filter(z => z.zone_type === 'pooling_water').map(z => z.name));
+  const isPoolRecording = (_currentData || []).some(
+    d => !d.offline && !d.paused && d.current_zone && poolingNames.has(d.current_zone)
+  );
+  const hideRecordButtons = isPoolRecording || !!recording;
   const container = document.getElementById('zone-list');
   const onlineSet = new Set(online_zones || []);
 
@@ -8856,12 +8864,13 @@ function renderZoneList() {
 
     const badge = onlineSet.has(name) ? '<span class="zc-online">&#9679; Online</span>' : '';
     if (isRunning || isPooling) {
-      const otherActive = recording && recording.zone !== name;
+      const recordBtn = hideRecordButtons ? '' :
+        `<button class="record-btn" data-zone="${esc(name)}" onclick="startRecording(this)">Record</button>`;
       return `<div class="zone-card" style="--zc:${color}">
         <div class="zc-header"><div class="zc-name">${esc(name)}</div>${badge}</div>
         <div class="zc-footer">
           <a href="/water-chemistry/${encodeURIComponent(name)}" style="font-size:.85rem;color:#7a90a8;text-decoration:none">View chart &rarr;</a>
-          <button class="record-btn" data-zone="${esc(name)}" onclick="startRecording(this)" ${otherActive?'disabled title="Another recording is active"':''}>Record</button>
+          ${recordBtn}
         </div>
       </div>`;
     }
@@ -8945,6 +8954,8 @@ async function resumeRecording(btn, label) {
 async function loadCurrent() {
   try {
     const rows = await fetchJSON('/api/water-chemistry/current');
+    _currentData = rows;
+    renderZoneList();
     const wrap = document.getElementById('devices-wrap');
     if (!rows.length) { wrap.innerHTML = '<span class="no-data">No devices yet.</span>'; return; }
     wrap.innerHTML = rows.map(r => `
