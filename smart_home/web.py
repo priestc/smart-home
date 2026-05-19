@@ -179,12 +179,21 @@ def ble_relay():
                     _pool_reading_stored = True
                     if pool_rssi is not None:
                         labeled_seen[pool_label] = pool_rssi
-                    # Auto-pause if running without a zone for 5 minutes
+                    # Auto-pause if running without a zone for 5 minutes.
+                    # Trigger early by the offline threshold so the device actually
+                    # goes offline at the 5-minute mark, not 80s after it.
                     if current_zone is None:
+                        monitors = _pool.load_config()
+                        monitor = next(
+                            (m for m in monitors if m.get("label") == pool_label),
+                            None,
+                        )
+                        offline_threshold = (monitor or {}).get("offline_threshold_s", 80)
+                        effective_window = max(0, 300 - offline_threshold)
                         has_zoned = conn.execute(
                             "SELECT 1 FROM pool_readings WHERE label=? AND zone IS NOT NULL"
-                            " AND ts >= datetime('now', '-300 seconds') LIMIT 1",
-                            (pool_label,),
+                            " AND ts >= datetime('now', ? || ' seconds') LIMIT 1",
+                            (pool_label, f"-{effective_window}"),
                         ).fetchone()
                         if not has_zoned:
                             _pool.pause_recording(pool_label)
@@ -8000,6 +8009,12 @@ def api_wc_move():
         return jsonify({"error": "label required"}), 400
     if not _pool.set_device_zone(label, zone_name):
         return jsonify({"error": f"device '{label}' not found"}), 404
+    # If a zone was just assigned and the device was paused, cancel the shutoff
+    if zone_name:
+        monitors = _pool.load_config()
+        monitor = next((m for m in monitors if m.get("label") == label), None)
+        if monitor and monitor.get("paused"):
+            _pool.resume_recording(label)
     return jsonify({"ok": True, "label": label, "zone": zone_name})
 
 
