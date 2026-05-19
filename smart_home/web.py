@@ -190,12 +190,15 @@ def ble_relay():
                         )
                         offline_threshold = (monitor or {}).get("offline_threshold_s", 80)
                         effective_window = max(0, 300 - offline_threshold)
-                        has_zoned = conn.execute(
-                            "SELECT 1 FROM pool_readings WHERE label=? AND zone IS NOT NULL"
-                            " AND ts >= datetime('now', ? || ' seconds') LIMIT 1",
+                        # Require an unzoned reading that's already effective_window seconds old.
+                        # This prevents triggering on a device that just came online.
+                        has_old_unzoned = conn.execute(
+                            "SELECT 1 FROM pool_readings WHERE label=? AND zone IS NULL"
+                            " AND ts BETWEEN datetime('now', '-300 seconds')"
+                            "           AND datetime('now', ? || ' seconds') LIMIT 1",
                             (pool_label, f"-{effective_window}"),
                         ).fetchone()
-                        if not has_zoned:
+                        if has_old_unzoned:
                             _pool.pause_recording(pool_label, reason="auto")
 
         # Fire sensor_online/offline events immediately from the relay's pool state.
@@ -7823,14 +7826,21 @@ def api_pool_relay_reading():
                 "  OR (labeled_json LIKE '%\"_buffered\": true%' AND datetime(ts) < datetime('now', '-60 minutes'))"
                 ")"
             )
-            # Auto-pause if device has been running without a zone for 5 minutes
+            # Auto-pause if device has been running without a zone for 5 minutes.
+            # Require an unzoned reading that's already effective_window seconds old
+            # to prevent triggering immediately when the device first comes online.
             if current_zone is None:
-                has_zoned_reading = conn.execute(
-                    "SELECT 1 FROM pool_readings WHERE label=? AND zone IS NOT NULL"
-                    " AND ts >= datetime('now', '-300 seconds') LIMIT 1",
-                    (label,),
+                monitors_cfg = _pool.load_config()
+                monitor_cfg = next((m for m in monitors_cfg if m.get("label") == label), None)
+                offline_threshold = (monitor_cfg or {}).get("offline_threshold_s", 80)
+                effective_window = max(0, 300 - offline_threshold)
+                has_old_unzoned = conn.execute(
+                    "SELECT 1 FROM pool_readings WHERE label=? AND zone IS NULL"
+                    " AND ts BETWEEN datetime('now', '-300 seconds')"
+                    "           AND datetime('now', ? || ' seconds') LIMIT 1",
+                    (label, f"-{effective_window}"),
                 ).fetchone()
-                if not has_zoned_reading:
+                if has_old_unzoned:
                     _pool.pause_recording(label, reason="auto")
 
     # Return current BLE-YC01 assignment so the relay knows if it should stop.
