@@ -364,7 +364,7 @@ def ble_relay():
         (m for m in water_chemistry_devices if m.get("node") == relay_cfg["id"]), None
     )
     if assigned and assigned.get("paused"):
-        response["ble_yc01"] = None  # paused: relay stops GATT until resumed
+        response["ble_yc01"] = {"stop": True}  # explicit stop signal; relay disconnects gracefully
     else:
         response["ble_yc01"] = {
             "address": assigned["address"],
@@ -7775,7 +7775,7 @@ def api_pool_relay_reading():
         (m for m in monitors if m.get("node") == relay_cfg["id"]), None
     )
     if assigned and assigned.get("paused"):
-        ble_yc01_resp = None  # paused: relay stops GATT until resumed
+        ble_yc01_resp = {"stop": True}  # explicit stop signal; relay disconnects gracefully
     else:
         ble_yc01_resp = {
             "address": assigned["address"],

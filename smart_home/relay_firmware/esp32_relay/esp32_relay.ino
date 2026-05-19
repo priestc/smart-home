@@ -49,8 +49,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.59"
-#define FIRMWARE_REV          66
+#define FIRMWARE_VERSION      "1.7.60"
+#define FIRMWARE_REV          67
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -534,30 +534,43 @@ static bool httpPost(const String& payload, bool parse_gatt) {
                 }
                 // Check for BLE-YC01 assignment change
                 if (!rdoc["ble_yc01"].isNull()) {
-                    String new_addr  = rdoc["ble_yc01"]["address"].as<String>();
-                    String new_label = rdoc["ble_yc01"]["label"].as<String>();
-                    if (rdoc["ble_yc01"]["poll_skip_cycles"].is<int>()) {
-                        int new_skip = rdoc["ble_yc01"]["poll_skip_cycles"].as<int>();
-                        if (new_skip != g_poll_skip_cycles) {
-                            g_poll_skip_cycles = new_skip;
-                            savePollSkipCycles(new_skip);
-                            Serial.printf("BLE-YC01: poll rate updated — skip %d cycle(s) (%ds interval)\n",
-                                          new_skip, (new_skip + 1) * 30);
+                    if (rdoc["ble_yc01"]["stop"].as<bool>()) {
+                        // Server requests graceful disconnect — clear assignment so
+                        // device can power down, will reassign automatically on next checkin.
+                        if (g_pool_addr.length() > 0) {
+                            Serial.println("BLE-YC01: stop requested by server");
+                            savePoolMonitor("", "");
+                            g_pool_addr  = "";
+                            g_pool_label = "";
+                            poolDisconnect();
+                        }
+                    } else {
+                        String new_addr  = rdoc["ble_yc01"]["address"].as<String>();
+                        String new_label = rdoc["ble_yc01"]["label"].as<String>();
+                        if (rdoc["ble_yc01"]["poll_skip_cycles"].is<int>()) {
+                            int new_skip = rdoc["ble_yc01"]["poll_skip_cycles"].as<int>();
+                            if (new_skip != g_poll_skip_cycles) {
+                                g_poll_skip_cycles = new_skip;
+                                savePollSkipCycles(new_skip);
+                                Serial.printf("BLE-YC01: poll rate updated — skip %d cycle(s) (%ds interval)\n",
+                                              new_skip, (new_skip + 1) * 30);
+                            }
+                        }
+                        if (new_addr != g_pool_addr) {
+                            Serial.printf("BLE-YC01 assigned: %s (%s)\n",
+                                          new_label.c_str(), new_addr.c_str());
+                            savePoolMonitor(new_addr, new_label);
+                            g_pool_addr  = new_addr;
+                            g_pool_label = new_label;
+                            poolDisconnect();
+                        } else if (new_label != g_pool_label) {
+                            Serial.printf("BLE-YC01 label updated: %s\n", new_label.c_str());
+                            g_pool_label = new_label;
+                            savePoolMonitor(g_pool_addr, new_label);
                         }
                     }
-                    if (new_addr != g_pool_addr) {
-                        Serial.printf("BLE-YC01 assigned: %s (%s)\n",
-                                      new_label.c_str(), new_addr.c_str());
-                        savePoolMonitor(new_addr, new_label);
-                        g_pool_addr  = new_addr;
-                        g_pool_label = new_label;
-                        poolDisconnect();
-                    } else if (new_label != g_pool_label) {
-                        Serial.printf("BLE-YC01 label updated: %s\n", new_label.c_str());
-                        g_pool_label = new_label;
-                        savePoolMonitor(g_pool_addr, new_label);
-                    }
                 } else if (g_pool_addr.length() > 0) {
+                    // Legacy null fallback — kept for compatibility with older server versions
                     Serial.println("BLE-YC01 cleared by server");
                     savePoolMonitor("", "");
                     g_pool_addr  = "";
