@@ -363,11 +363,14 @@ def ble_relay():
     assigned = next(
         (m for m in water_chemistry_devices if m.get("node") == relay_cfg["id"]), None
     )
-    response["ble_yc01"] = {
-        "address": assigned["address"],
-        "label": assigned.get("label", assigned["address"]),
-        "poll_skip_cycles": max(0, assigned.get("poll_interval_s", 60) // 30 - 1),
-    } if assigned else None
+    if assigned and _pool.consume_stop_request(water_chemistry_devices, assigned.get("label", "")):
+        response["ble_yc01"] = None  # tells relay to disconnect; assignment preserved for auto-reconnect
+    else:
+        response["ble_yc01"] = {
+            "address": assigned["address"],
+            "label": assigned.get("label", assigned["address"]),
+            "poll_skip_cycles": max(0, assigned.get("poll_interval_s", 60) // 30 - 1),
+        } if assigned else None
 
     # Compute stagger offset so relays share the 30-second period evenly.
     # relay_offset is the seconds into the 30-s window when this relay should fire.
@@ -7706,14 +7709,15 @@ def api_pool_relay_reading():
     assigned = next(
         (m for m in monitors if m.get("node") == relay_cfg["id"]), None
     )
-    return jsonify({
-        "ok": True,
-        "ble_yc01": {
+    if assigned and _pool.consume_stop_request(monitors, assigned.get("label", "")):
+        ble_yc01_resp = None  # tells relay to disconnect; assignment preserved for auto-reconnect
+    else:
+        ble_yc01_resp = {
             "address": assigned["address"],
             "label": assigned.get("label", assigned["address"]),
             "poll_skip_cycles": max(0, assigned.get("poll_interval_s", 60) // 30 - 1),
-        } if assigned else None,
-    })
+        } if assigned else None
+    return jsonify({"ok": True, "ble_yc01": ble_yc01_resp})
 
 
 @app.get("/api/water-chemistry/zones")
@@ -7824,13 +7828,17 @@ def api_wc_zone_list():
 
 @app.post("/api/water-chemistry/stop")
 def api_wc_stop():
-    """Stop recording by clearing the relay node assignment for a device."""
+    """Signal the relay to disconnect from the device on its next checkin.
+
+    The node assignment is preserved so the relay will auto-reconnect when
+    the device comes back online.
+    """
     from smart_home import pool as _pool
     data = request.get_json(silent=True) or {}
     label = (data.get("label") or "").strip()
     if not label:
         return jsonify({"error": "label required"}), 400
-    if not _pool.clear_node(label):
+    if not _pool.request_stop(label):
         return jsonify({"error": f"device '{label}' not found"}), 404
     return jsonify({"ok": True})
 
