@@ -4951,7 +4951,7 @@ def api_devices():
     ]
 
     water_chemistry_devices = [
-        {"id": m["label"], "label": m["label"], "model": "BLE-YC01", "address": m.get("address", "")}
+        {"id": m["label"], "label": m["label"], "model": "BLE-YC01", "address": m.get("address", ""), "current_zone": m.get("current_zone") or ""}
         for m in _pool.load_config()
     ]
 
@@ -5375,6 +5375,7 @@ async function fetchJSON(url) {
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return r.json();
 }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 const TYPE_LABELS = {
   ble_sensors:   "BLE Temperature Sensors",
@@ -5438,7 +5439,11 @@ function buildRow(type, d) {
 
   const nameEl = document.createElement("div");
   nameEl.className = "device-name";
-  nameEl.textContent = label;
+  if (type === "water_chemistry" && d.current_zone) {
+    nameEl.innerHTML = `${esc(label)} <span style="color:#7a90a8;font-weight:400">&rarr; ${esc(d.current_zone)}</span>`;
+  } else {
+    nameEl.textContent = label;
+  }
   if (sub) {
     const subEl = document.createElement("div");
     subEl.className = "device-sub";
