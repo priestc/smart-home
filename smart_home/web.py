@@ -5097,7 +5097,7 @@ def index():
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a>&nbsp;<a href="/devices" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Devices &#9881;</a></h1>
+  <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a>&nbsp;<a href="/devices" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Devices &#9881;</a>&nbsp;<a href="/zones" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Zones</a></h1>
 
   <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem">
     <div class="cards" id="cards" style="margin-bottom:0;flex-wrap:wrap;display:flex;gap:1rem"></div>
@@ -5121,7 +5121,6 @@ def index():
     <a href="/camera"            class="chart-link"><span class="cl-title">Cameras</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/water-chemistry"   class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Water Chemistry</span><span class="cl-arrow">&#8594;</span></a>
-    <a href="/zones"             class="chart-link"><span class="cl-title">Zones</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/rssi"              class="chart-link"><span class="cl-title">Bluetooth Signal</span><span class="cl-arrow">&#8594;</span></a>
   </div>
 
