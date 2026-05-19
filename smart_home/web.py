@@ -8479,7 +8479,7 @@ _RUNNING_WATER_ZONE_PAGE_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>__ZONE_TITLE__ <a class="back" href="/water-chemistry">&larr; Water Chemistry</a></h1>
+  <h1>__ZONE_TITLE__ <a class="back" href="/water-chemistry">&larr; Water Chemistry</a> <span id="status-badge"></span></h1>
   <p class="zone-type-label">Running Water</p>
   <div class="card">
     <div class="card-header">
@@ -8515,7 +8515,15 @@ function tsLabel(ts) {
 
 async function load() {
   try {
-    const rows = await (await fetch('/api/pool/recent?zone=' + encodeURIComponent(ZONE) + '&limit=50')).json();
+    const [rows, devices] = await Promise.all([
+      (await fetch('/api/pool/recent?zone=' + encodeURIComponent(ZONE) + '&limit=50')).json(),
+      fetchJSON('/api/water-chemistry/current'),
+    ]);
+    const monitored = devices.some(d => d.current_zone === ZONE && !d.offline);
+    const badge = document.getElementById('status-badge');
+    badge.innerHTML = monitored
+      ? '<span style="color:#2a9d6e;font-size:.8rem;font-weight:600;margin-left:.5rem">&#9679; Online</span>'
+      : '<span style="color:#aabbc8;font-size:.8rem;font-weight:600;margin-left:.5rem">&#9679; Offline</span>';
     const wrap = document.getElementById('table-wrap');
     if (!Array.isArray(rows) || !rows.length) {
       wrap.innerHTML = '<div class="no-data">No readings yet for this zone.</div>';
@@ -8600,7 +8608,7 @@ _WATER_CHEM_ZONE_PAGE_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>__ZONE_TITLE__ <a class="back" href="/water-chemistry">&larr; Water Chemistry</a></h1>
+  <h1>__ZONE_TITLE__ <a class="back" href="/water-chemistry">&larr; Water Chemistry</a> <span id="status-badge"></span></h1>
 
   <div class="res-row">
     <label for="res">Resolution</label>
@@ -8611,7 +8619,7 @@ _WATER_CHEM_ZONE_PAGE_TEMPLATE = """<!DOCTYPE html>
     </select>
     <span id="resp-size"></span>
   </div>
-  <div class="btn-group">
+  <div class="btn-group" id="recent-group">
     <div class="btn-group-label">Most Recent</div>
     <div class="range-btns" id="recent-btns">
       <button id="btn-prev" onclick="shiftView(-1)">&#8592;</button>
@@ -8900,7 +8908,30 @@ async function loadHistoryForChart() {
   } catch(e) { showError('Failed to load history: ' + e.message); }
 }
 
-loadHistoryForChart();
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+async function init() {
+  try {
+    const devices = await fetchJSON('/api/water-chemistry/current');
+    const monitored = devices.some(d => d.current_zone === ZONE && !d.offline);
+    const badge = document.getElementById('status-badge');
+    if (monitored) {
+      badge.innerHTML = '<span style="color:#2a9d6e;font-size:.8rem;font-weight:600;margin-left:.5rem">&#9679; Online</span>';
+    } else {
+      badge.innerHTML = '<span style="color:#aabbc8;font-size:.8rem;font-weight:600;margin-left:.5rem">&#9679; Offline</span>';
+      document.getElementById('recent-group').style.display = 'none';
+      const m = new Date().getMonth() + 1;
+      mode = 'month';
+      activeMonth = m;
+      document.querySelectorAll('#month-btns button').forEach(b => {
+        b.classList.toggle('active', b.textContent === MONTH_NAMES[m - 1]);
+      });
+    }
+  } catch(e) { /* keep defaults on error */ }
+  loadHistoryForChart();
+}
+
+init();
 </script>
 </body>
 </html>"""
