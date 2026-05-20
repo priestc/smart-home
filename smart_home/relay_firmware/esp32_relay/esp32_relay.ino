@@ -49,8 +49,8 @@
 #include <string>
 #include <vector>
 
-#define FIRMWARE_VERSION      "1.7.67"
-#define FIRMWARE_REV          74
+#define FIRMWARE_VERSION      "1.7.68"
+#define FIRMWARE_REV          75
 #define BAUD_RATE              115200
 #define SCAN_SECONDS           15
 #define PROVISION_TIMEOUT_MS   60000UL
@@ -958,7 +958,11 @@ static void doPoolMonitorCycle() {
             g_shutoff_skip_remaining--;
             // Use -1 sentinel after last skip so the same-cycle httpPost response
             // (which may still say "stop") cannot immediately restart the countdown.
-            if (g_shutoff_skip_remaining == 0) g_shutoff_skip_remaining = -1;
+            if (g_shutoff_skip_remaining == 0) {
+                g_shutoff_skip_remaining = -1;
+                g_pool_addr = "";   // clear address so the relay stops reporting offline
+                                    // and the server's repeated stop commands are ignored
+            }
             do_gatt = false;
             is_shutoff_skip = true;
         }
