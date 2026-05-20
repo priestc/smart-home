@@ -9159,6 +9159,22 @@ _WATER_CHEM_ZONE_PAGE_TEMPLATE = """<!DOCTYPE html>
     .res-row label { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
     .res-row select { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .3rem .7rem; font-size: .85rem; font-weight: 500; cursor: pointer; }
     #resp-size { font-size: .72rem; color: #4a6080; }
+    .readings-card { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); overflow: hidden; margin-top: 1.5rem; }
+    .readings-card-header { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: #7a90a8; padding: .75rem 1.25rem; background: #f8fafc; border-bottom: 1px solid #e8edf3; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th { font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #7a90a8; padding: .55rem 1rem; text-align: right; border-bottom: 1px solid #e8edf3; white-space: nowrap; }
+    th:first-child { text-align: left; }
+    td { padding: .6rem 1rem; border-bottom: 1px solid #f0f4f8; text-align: right; color: #1a2535; white-space: nowrap; }
+    td:first-child { text-align: left; color: #5a6e84; font-size: .82rem; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f8fafc; }
+    .no-data { padding: 1.5rem 1.25rem; color: #aabbc8; font-size: .88rem; }
+    .val-ph { color: #2e7dd4; font-weight: 600; }
+    .val-orp { color: #7b4fb5; font-weight: 600; }
+    .val-cl { color: #2a9d6e; font-weight: 600; }
+    .val-temp { color: #e07820; font-weight: 600; }
+    .val-ec { color: #c0662b; font-weight: 600; }
+    .val-tds { color: #1a6db5; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -9218,6 +9234,13 @@ _WATER_CHEM_ZONE_PAGE_TEMPLATE = """<!DOCTYPE html>
 
   <div class="chart-wrap">
     <canvas id="pool-chart"></canvas>
+  </div>
+
+  <div class="readings-card">
+    <div class="readings-card-header">Recent Readings</div>
+    <div id="readings-table-wrap">
+      <div class="no-data">Loading&hellip;</div>
+    </div>
   </div>
 
 <script>
@@ -9487,6 +9510,54 @@ async function init() {
 }
 
 init();
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmt(v, dec=2) { return v != null ? Number(v).toFixed(dec) : '—'; }
+function tsLabel(ts) {
+  const d = new Date(ts.replace(' ', 'T'));
+  const now = new Date();
+  const diffMin = Math.floor((now - d) / 60000);
+  const time = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+  const date = d.toLocaleDateString([], {month: 'short', day: 'numeric'});
+  const ago = diffMin < 1 ? 'just now' : diffMin < 60 ? diffMin + 'm ago' : date;
+  return `<span title="${esc(ts)}">${time} <span style="color:#aabbc8;font-size:.75rem">${ago}</span></span>`;
+}
+
+async function loadRecentReadings() {
+  try {
+    const rows = await fetchJSON('/api/pool/recent?zone=' + encodeURIComponent(ZONE) + '&limit=10');
+    const wrap = document.getElementById('readings-table-wrap');
+    if (!Array.isArray(rows) || !rows.length) {
+      wrap.innerHTML = '<div class="no-data">No readings yet for this zone.</div>';
+      return;
+    }
+    wrap.innerHTML = `<table>
+      <thead><tr>
+        <th>Time</th>
+        <th>Temp</th>
+        <th>pH</th>
+        <th>ORP</th>
+        <th>Free Cl</th>
+        <th>EC</th>
+        <th>TDS</th>
+        <th>Batt</th>
+      </tr></thead>
+      <tbody>${rows.map(r => `<tr>
+        <td>${tsLabel(r.ts)}</td>
+        <td class="val-temp">${fmt(r.temp_f, 1)}<span style="color:#aabbc8;font-size:.78rem"> °F</span></td>
+        <td class="val-ph">${fmt(r.ph)}</td>
+        <td class="val-orp">${fmt(r.orp, 0)}<span style="color:#aabbc8;font-size:.78rem"> mV</span></td>
+        <td class="val-cl">${fmt(r.chlorine)}<span style="color:#aabbc8;font-size:.78rem"> mg/L</span></td>
+        <td class="val-ec">${fmt(r.ec, 0)}<span style="color:#aabbc8;font-size:.78rem"> µS</span></td>
+        <td class="val-tds">${fmt(r.tds, 0)}<span style="color:#aabbc8;font-size:.78rem"> ppm</span></td>
+        <td>${fmt(r.battery, 0)}<span style="color:#aabbc8;font-size:.78rem"> %</span></td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  } catch(e) { showError('Failed to load readings: ' + e.message); }
+}
+
+loadRecentReadings();
+setInterval(loadRecentReadings, 30000);
 </script>
 </body>
 </html>"""
