@@ -12,7 +12,11 @@ def load_config() -> list[dict]:
     if _GARAGES_FILE.exists():
         try:
             with open(_GARAGES_FILE) as f:
-                return json.load(f)
+                data = json.load(f)
+            for g in data:
+                if g.get("presence_device") == "undefined":
+                    g.pop("presence_device")
+            return data
         except (json.JSONDecodeError, ValueError):
             pass
     return []
