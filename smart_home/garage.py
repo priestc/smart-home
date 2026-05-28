@@ -90,6 +90,28 @@ def discover(subnet: str | None = None) -> list[dict]:
     return asyncio.run(_scan(subnet))
 
 
+_AUTO_CLOSED_FILE = _CONFIG_DIR / "auto_closed_doors.json"
+
+
+def load_auto_closed() -> set[str]:
+    """Return the set of door names that were auto-closed on last departure."""
+    if _AUTO_CLOSED_FILE.exists():
+        try:
+            with open(_AUTO_CLOSED_FILE) as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return set(data)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return set()
+
+
+def save_auto_closed(doors: set[str]) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_AUTO_CLOSED_FILE, "w") as f:
+        json.dump(sorted(doors), f)
+
+
 def get_status(ip: str) -> dict:
     """Return combined status from Shelly.GetStatus.
 

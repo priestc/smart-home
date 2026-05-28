@@ -1470,7 +1470,14 @@ def monitor(duration, verbose, db, no_db):
 
     # Tracks which garage door names were auto-closed on departure so that only
     # those doors are re-opened on arrival (not doors the user left open manually).
-    _auto_closed_doors: set[str] = set()
+    # Persisted to disk so service restarts don't lose the state mid-trip.
+    _saved_status = _presence.load_state()
+    _anyone_away = any(
+        v.get("status") == "away" for v in _saved_status.values()
+    )
+    _auto_closed_doors: set[str] = (
+        _garage.load_auto_closed() if _anyone_away else set()
+    )
 
     # iPhone presence signal timeouts.
     # Device is "home" if either BLE or network has been seen within its timeout.
@@ -1510,6 +1517,7 @@ def monitor(duration, verbose, db, no_db):
                 if status.get("door_closed") is True:
                     await loop.run_in_executor(None, _garage.trigger, ip, pulse)
                     _auto_closed_doors.discard(gname)
+                    _garage.save_auto_closed(_auto_closed_doors)
                     log_ts = datetime.datetime.now().strftime("%H:%M:%S")
                     click.echo(f"[{log_ts}] Auto-opened garage '{gname}' ({name} arrived)")
                     _push.send_notification(
@@ -1554,16 +1562,17 @@ def monitor(duration, verbose, db, no_db):
                         click.echo(f"  service_data[{uuid}] = {svc_data.hex()}")
 
     async def _verify_and_retry_close(door_name: str, ip: str, pulse: float, device_name: str) -> None:
-        """Poll every 30s after auto-close; re-trigger if still open. Notifies when confirmed closed."""
+        """Poll every 30s after auto-close; re-trigger if still open. Gives up after 3 retries."""
         loop = asyncio.get_running_loop()
-        while True:
+        max_retries = 3
+        for attempt in range(max_retries + 1):
             await asyncio.sleep(30)
             now = datetime.datetime.now()
             is_home = _presence.load_state().get(device_name, {}).get("status") == "home"
             if is_home:
                 ts = now.strftime("%H:%M:%S")
                 click.echo(f"[{ts}] Verify-close aborted for '{door_name}' — device returned home")
-                break
+                return
             try:
                 status = await loop.run_in_executor(None, _garage.get_status, ip)
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
@@ -1573,10 +1582,16 @@ def monitor(duration, verbose, db, no_db):
                         title="Garage door closed",
                         body=f"'{door_name}' is now closed",
                     )
-                    break
-                else:
-                    click.echo(f"[{ts}] Garage '{door_name}' still open — retrying close")
+                    return
+                elif attempt < max_retries:
+                    click.echo(f"[{ts}] Garage '{door_name}' still open — retrying close ({attempt + 1}/{max_retries})")
                     await loop.run_in_executor(None, _garage.trigger, ip, pulse)
+                else:
+                    click.echo(f"[{ts}] Gave up closing '{door_name}' after {max_retries} retries")
+                    _push.send_notification(
+                        title="Garage door left open",
+                        body=f"Could not confirm '{door_name}' closed — please check manually",
+                    )
             except Exception as e:
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 click.echo(f"[{ts}] Verify-close check failed for '{door_name}': {e}")
@@ -1701,6 +1716,7 @@ def monitor(duration, verbose, db, no_db):
                                     if door_status.get("door_closed") is False:
                                         _garage.trigger(g["ip"], g.get("pulse_seconds", 0.5))
                                         _auto_closed_doors.add(g["name"])
+                                        _garage.save_auto_closed(_auto_closed_doors)
                                         click.echo(f"[{ts}] Auto-closing garage '{g['name']}' ({name} left)")
                                         asyncio.get_running_loop().create_task(
                                             _verify_and_retry_close(g["name"], g["ip"], g.get("pulse_seconds", 0.5), name)
