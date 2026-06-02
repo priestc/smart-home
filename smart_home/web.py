@@ -587,8 +587,9 @@ def bandwidth_history():
     start  = (request.args.get("start") or "").replace("T", " ") or None
     end    = (request.args.get("end")   or "").replace("T", " ") or None
     mac    = request.args.get("mac")
+    limit_raw = request.args.get("limit")
     try:
-        limit  = min(int(request.args.get("limit",  8000)), 200000)
+        limit = int(limit_raw) if limit_raw is not None else None
     except ValueError:
         return jsonify({"error": "limit must be an integer"}), 400
     try:
@@ -607,6 +608,7 @@ def bandwidth_history():
         where.append("ts <= ?")
         params.append(end)
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    limit_sql = f" LIMIT {limit}" if limit is not None else ""
 
     bucket_secs = bucket * 60
     if bucket > 1:
@@ -618,7 +620,7 @@ def bandwidth_history():
                 ROUND(AVG(up)   / 10.0 / 1024.0, 3) AS up_kbps
             FROM bandwidth_readings{where_sql}
             GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, mac
-            ORDER BY ts ASC LIMIT ?
+            ORDER BY ts ASC{limit_sql}
         """
     else:
         sql = f"""
@@ -626,9 +628,8 @@ def bandwidth_history():
                    ROUND(down / 10.0 / 1024.0, 3) AS down_kbps,
                    ROUND(up   / 10.0 / 1024.0, 3) AS up_kbps
             FROM bandwidth_readings{where_sql}
-            ORDER BY ts ASC LIMIT ?
+            ORDER BY ts ASC{limit_sql}
         """
-    params.append(limit)
     with _conn() as conn:
         rows = conn.execute(sql, params).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -816,14 +817,15 @@ def history():
       label          - filter by sensor label (optional)
       start          - ISO datetime lower bound (optional)
       end            - ISO datetime upper bound (optional)
-      limit          - max rows returned (default 1000, max 200000)
+      limit          - max rows returned (optional, no default limit)
       bucket_minutes - group readings into N-minute buckets (optional)
     """
     label = request.args.get("label")
     start = (request.args.get("start") or "").replace("T", " ") or None
     end   = (request.args.get("end")   or "").replace("T", " ") or None
+    limit_raw = request.args.get("limit")
     try:
-        limit = min(int(request.args.get("limit", 1000)), 200000)
+        limit = int(limit_raw) if limit_raw is not None else None
     except ValueError:
         return jsonify({"error": "limit must be an integer"}), 400
     try:
@@ -843,6 +845,7 @@ def history():
         params.append(end)
 
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    limit_sql = f" LIMIT {limit}" if limit is not None else ""
 
     if bucket > 1:
         bucket_secs = bucket * 60
@@ -866,18 +869,18 @@ def history():
                 ROUND(AVG(battery), 0) AS battery
             FROM pool_readings{where_sql}
             GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, label
-            ORDER BY ts ASC LIMIT ?
+            ORDER BY ts ASC{limit_sql}
         """
     else:
         sql = f"""
             SELECT ts, label, temp_f, humidity, rssi, battery FROM readings{where_sql}
             UNION ALL
             SELECT ts, label, ROUND(CASE WHEN temp_c IS NOT NULL THEN temp_c * 9.0/5.0 + 32 END, 2) AS temp_f, NULL AS humidity, rssi, battery FROM pool_readings{where_sql}
-            ORDER BY ts ASC
+            ORDER BY ts ASC{limit_sql}
         """
 
-    # params appears twice in the SQL (once per UNION branch); limit goes at the end for bucketed
-    query_params = params * 2 + ([limit] if bucket > 1 else [])
+    # params appears twice in the SQL (once per UNION branch)
+    query_params = params * 2
     with _conn() as conn:
         rows = conn.execute(sql, query_params).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -1063,14 +1066,15 @@ def plug_history():
       label          - filter by plug label (optional)
       start          - ISO datetime lower bound (optional)
       end            - ISO datetime upper bound (optional)
-      limit          - max rows returned (default 1000, max 200000)
+      limit          - max rows returned (optional, no default limit)
       bucket_minutes - group readings into N-minute buckets (optional)
     """
     label = request.args.get("label")
     start = (request.args.get("start") or "").replace("T", " ") or None
     end   = (request.args.get("end")   or "").replace("T", " ") or None
+    limit_raw = request.args.get("limit")
     try:
-        limit = min(int(request.args.get("limit", 1000)), 200000)
+        limit = int(limit_raw) if limit_raw is not None else None
     except ValueError:
         return jsonify({"error": "limit must be an integer"}), 400
     try:
@@ -1090,6 +1094,7 @@ def plug_history():
         params.append(end)
 
     where_sql = " WHERE " + " AND ".join(where)
+    limit_sql = f" LIMIT {limit}" if limit is not None else ""
 
     if bucket > 1:
         bucket_secs = bucket * 60
@@ -1103,12 +1108,10 @@ def plug_history():
                 ROUND(AVG(power_factor), 0) AS power_factor
             FROM plug_readings{where_sql}
             GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, label
-            ORDER BY ts ASC LIMIT ?
+            ORDER BY ts ASC{limit_sql}
         """
     else:
-        sql = f"SELECT ts, label, COALESCE(watts_calc, watts) AS watts, amps, volts, power_factor FROM plug_readings{where_sql} ORDER BY ts ASC LIMIT ?"
-
-    params.append(limit)
+        sql = f"SELECT ts, label, COALESCE(watts_calc, watts) AS watts, amps, volts, power_factor FROM plug_readings{where_sql} ORDER BY ts ASC{limit_sql}"
     with _conn() as conn:
         rows = conn.execute(sql, params).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -1919,7 +1922,7 @@ def _chart_page(title, canvas, js):
 _HISTORY_FETCH = """\
   const start = localISO(new Date(Date.now() - rangeDays * 86400000));
   const bucket = ({0.125:1,1:2,3:10,7:20,30:60})[rangeDays] || 1;
-  const data = await fetchJSON(`/api/history?start=${start}&limit=8000&bucket_minutes=${bucket}`);
+  const data = await fetchJSON(`/api/history?start=${start}&bucket_minutes=${bucket}`);
   const xMin = new Date(Date.now() - rangeDays * 86400000), xMax = new Date();
   const timeUnit = rangeDays >= 3 ? "day" : "hour";"""
 
@@ -2302,7 +2305,7 @@ async function loadChart() {
   if (mode === "recent") {
     const xMax = new Date(Date.now() + offsetMs);
     const xMin = new Date(xMax - rangeDays * 86400000);
-    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
+    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&bucket_minutes=${getBucket()}`;
     const [data, events] = await Promise.all([
       fetchJSON(`/api/history?${params}`),
       fetchJSON(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`),
@@ -2979,7 +2982,7 @@ async function loadChart() {
   if (mode === "recent") {
     const xMax = new Date(Date.now() + offsetMs);
     const xMin = new Date(xMax - rangeDays * 86400000);
-    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
+    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&bucket_minutes=${getBucket()}`;
     const [hist, evts] = await Promise.all([
       fetchJSONBytes(`/api/history?${params}`),
       fetchJSONBytes(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`),
@@ -3015,7 +3018,7 @@ async function loadChart() {
     const xMin = new Date(year, month - 1, day, 0, 0, 0);
     const xMax = new Date(year, month - 1, day, 23, 59, 59);
     const [hist, evts] = await Promise.all([
-      fetchJSONBytes(`/api/history?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`),
+      fetchJSONBytes(`/api/history?start=${localISO(xMin)}&end=${localISO(xMax)}&bucket_minutes=${getBucket()}`),
       fetchJSONBytes(`/api/events?start=${localISO(xMin)}&end=${localISO(xMax)}&limit=200`),
     ]);
     totalBytes = hist.bytes + evts.bytes;
@@ -3646,7 +3649,7 @@ async function loadChart() {
     const xEnd = new Date(Date.now() + offsetMs);
     const xStart = new Date(xEnd - rangeDays * 86400000);
     xMin = xStart; xMax = xEnd;
-    const params = `start=${localISO(xStart)}&end=${localISO(xEnd)}&bucket_minutes=${getBucket()}&limit=8000`;
+    const params = `start=${localISO(xStart)}&end=${localISO(xEnd)}&bucket_minutes=${getBucket()}`;
     const { data, bytes } = await fetchJSONBytes(`/api/bandwidth/history?${params}`);
     totalBytes = bytes;
     chart.data.datasets = buildDatasets(data);
@@ -4186,7 +4189,7 @@ async function loadChart() {
   if (mode === "recent") {
     xMax = new Date(Date.now() + offsetMs);
     xMin = new Date(xMax - rangeDays * 86400000);
-    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
+    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&bucket_minutes=${getBucket()}`;
     [data] = await Promise.all([
       fetchJSON(`/api/plug_history?${params}`),
     ]);
@@ -4513,7 +4516,7 @@ async function loadChart() {
   if (mode === "recent") {
     const xMax = new Date(Date.now() + offsetMs);
     const xMin = new Date(xMax - rangeDays * 86400000);
-    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
+    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&bucket_minutes=${getBucket()}`;
     data = await fetchJSON(`/api/history?${params}`);
     batteryChart.options.scales.x.min = xMin;
     batteryChart.options.scales.x.max = xMax;
@@ -4821,7 +4824,7 @@ async function loadChart() {
   if (mode === "recent") {
     const xMax = new Date(Date.now() + offsetMs);
     const xMin = new Date(xMax - rangeDays * 86400000);
-    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&limit=8000&bucket_minutes=${getBucket()}`;
+    const params = `start=${localISO(xMin)}&end=${localISO(xMax)}&bucket_minutes=${getBucket()}`;
     data = await fetchJSON(`/api/history?${params}`);
     chart.options.scales.x.min = xMin;
     chart.options.scales.x.max = xMax;
@@ -8292,10 +8295,6 @@ def api_wc_history():
     start = (request.args.get("start") or "").replace("T", " ") or None
     end   = (request.args.get("end")   or "").replace("T", " ") or None
     try:
-        limit = min(int(request.args.get("limit", 2000)), 100000)
-    except ValueError:
-        return jsonify({"error": "limit must be an integer"}), 400
-    try:
         bucket = max(1, int(request.args.get("bucket_minutes", 1)))
     except ValueError:
         return jsonify({"error": "bucket_minutes must be an integer"}), 400
@@ -8319,7 +8318,6 @@ def api_wc_history():
 
     if bucket > 1:
         bucket_secs = bucket * 60
-        params.append(limit)
         sql = f"""
             SELECT
                 strftime('%Y-%m-%d %H:%M:%S',
@@ -8335,17 +8333,16 @@ def api_wc_history():
                 ROUND(AVG(battery), 0)  AS battery
             FROM pool_readings{where_sql}
             GROUP BY CAST(strftime('%s', ts) AS INTEGER) / {bucket_secs}, zone, label
-            ORDER BY ts ASC LIMIT ?
+            ORDER BY ts ASC
         """
         with _conn() as conn:
             rows = conn.execute(sql, params).fetchall()
         return jsonify([dict(r) for r in rows])
     else:
-        params.append(limit)
         with _conn() as conn:
             rows = conn.execute(
                 f"SELECT ts, zone, label, temp_c, ph, ec, tds, orp, chlorine, battery "
-                f"FROM pool_readings{where_sql} ORDER BY ts DESC LIMIT ?",
+                f"FROM pool_readings{where_sql} ORDER BY ts ASC",
                 params,
             ).fetchall()
         result = []
@@ -8353,7 +8350,7 @@ def api_wc_history():
             d = dict(r)
             d["temp_f"] = round(d["temp_c"] * 9 / 5 + 32, 1) if d["temp_c"] is not None else None
             result.append(d)
-        return jsonify(list(reversed(result)))
+        return jsonify(result)
 
 
 @app.get("/api/water-chemistry/history/month")
@@ -9442,7 +9439,7 @@ async function fetchZoneHistory() {
   if (mode === 'recent') {
     const xMax = new Date(Date.now() + offsetMs);
     const xMin = new Date(xMax.getTime() - rangeDays * 86400000);
-    return await fetchJSON(base + '?limit=100000&bucket_minutes=' + getBucket()
+    return await fetchJSON(base + '?bucket_minutes=' + getBucket()
       + '&start=' + encodeURIComponent(localISO(xMin))
       + '&end='   + encodeURIComponent(localISO(xMax)) + zp);
   } else if (mode === 'month') {
