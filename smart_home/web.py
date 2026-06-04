@@ -5143,6 +5143,8 @@ def index():
     .card .temp  { font-size: 2.4rem; font-weight: 700; color: #e07820; margin: .2rem 0 .1rem; line-height: 1; }
     .card .hum   { font-size: 1rem; color: #2e7dd4; font-weight: 500; }
     .card .ts    { font-size: 0.72rem; color: #aabbc8; margin-top: .5rem; }
+    .card.offline { opacity: .65; }
+    .card.offline .temp { font-size: 1.4rem; color: #aabbc8; }
     .presence-cards { display: flex; gap: 1rem; margin-bottom: 2rem; flex-wrap: wrap; }
     .presence-card { background: #fff; border-radius: 12px; padding: 1rem 1.5rem; min-width: 160px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); display: flex; align-items: center; gap: .9rem; }
     .presence-dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
@@ -5252,13 +5254,19 @@ function showError(section) {
 async function loadCurrent() {
   try {
     const data = await fetchJSON("/api/current");
-    document.getElementById("cards").innerHTML = data.map(s => `
-      <div class="card">
-        <div class="label">${s.label || s.address}</div>
-        <div class="temp">${s.temp_f.toFixed(1)}&deg;F</div>
-        <div class="hum">${s.humidity.toFixed(1)}% RH</div>
-        <div class="ts">${new Date(s.ts).toLocaleString()}</div>
-      </div>`).join("");
+    const now = Date.now();
+    const OFFLINE_MS = 10 * 60 * 1000;
+    const sensors = data.filter(s => s.source === 'reading');
+    document.getElementById("cards").innerHTML = sensors.map(s => {
+      const isOnline = (now - new Date(s.ts).getTime()) < OFFLINE_MS;
+      const tsStr = `<div class="ts">${new Date(s.ts).toLocaleString()}</div>`;
+      if (isOnline) {
+        const humStr = s.humidity != null ? `<div class="hum">${s.humidity.toFixed(1)}% RH</div>` : '';
+        return `<div class="card"><div class="label">${s.label || s.address}</div><div class="temp">${s.temp_f.toFixed(1)}&deg;F</div>${humStr}${tsStr}</div>`;
+      } else {
+        return `<div class="card offline"><div class="label">${s.label || s.address}</div><div class="temp">Offline</div>${tsStr}</div>`;
+      }
+    }).join("");
   } catch(e) { showError("sensors"); }
 }
 async function loadPresence() {
