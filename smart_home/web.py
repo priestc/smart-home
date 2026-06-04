@@ -9962,7 +9962,7 @@ function loadMapsAPI(apiKey) {
     if (window.google && window.google.maps && window.google.maps.drawing) { resolve(); return; }
     window._mapsLoaded = resolve;
     const s = document.createElement('script');
-    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(apiKey) + '&libraries=drawing&callback=_mapsLoaded';
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(apiKey) + '&loading=async&libraries=drawing&callback=_mapsLoaded';
     s.async = true;
     s.defer = true;
     s.onerror = () => reject(new Error('Script load error — check your API key'));
@@ -10022,7 +10022,7 @@ function startDrawing() {
   if (pendingPolygon) { pendingPolygon.setMap(null); pendingPolygon = null; }
   document.getElementById('save-polygon-btn').disabled = true;
   document.getElementById('draw-btn').textContent = 'Click to add points — double-click to finish';
-  drawingManager.setDrawingMode(google.maps.drawing.OverlayType.POLYGON);
+  drawingManager.setDrawingMode('polygon');
 }
 
 function clearPolygon() {
