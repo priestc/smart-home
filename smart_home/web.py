@@ -5188,7 +5188,7 @@ def index():
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a>&nbsp;<a href="/devices" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Devices &#9881;</a>&nbsp;<a href="/zones" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Zones</a></h1>
+  <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a>&nbsp;<a href="/devices" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Devices &#9881;</a>&nbsp;<a href="/zones" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Zones</a>&nbsp;<a href="/map" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Map</a></h1>
 
   <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem">
     <div class="cards" id="cards" style="margin-bottom:0;flex-wrap:wrap;display:flex;gap:1rem"></div>
@@ -9769,6 +9769,374 @@ setInterval(loadRssi, 3000);
 @app.get("/rssi")
 def rssi_page():
     return Response(_RSSI_PAGE, mimetype="text/html")
+
+
+@app.get("/api/map-config")
+def api_map_config():
+    with _conn() as conn:
+        key_row = conn.execute("SELECT value FROM settings WHERE key='google_maps_api_key'").fetchone()
+        poly_row = conn.execute(
+            "SELECT polygon_json, center_lat, center_lon FROM property_polygon ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    import json as _json
+    return jsonify({
+        'api_key': key_row['value'] if key_row else None,
+        'polygon': _json.loads(poly_row['polygon_json']) if poly_row and poly_row['polygon_json'] else None,
+        'center_lat': poly_row['center_lat'] if poly_row else None,
+        'center_lon': poly_row['center_lon'] if poly_row else None,
+    })
+
+
+@app.post("/api/map-config")
+def api_map_config_save():
+    import json as _json
+    data = request.get_json(silent=True) or {}
+    with _conn() as conn:
+        if 'api_key' in data:
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('google_maps_api_key', ?)",
+                (data['api_key'],),
+            )
+        if 'polygon' in data and data['polygon'] is not None:
+            conn.execute("DELETE FROM property_polygon")
+            conn.execute(
+                "INSERT INTO property_polygon (polygon_json, center_lat, center_lon) VALUES (?, ?, ?)",
+                (_json.dumps(data['polygon']), data.get('center_lat'), data.get('center_lon')),
+            )
+        conn.commit()
+    return jsonify({'ok': True})
+
+
+@app.get("/api/sun-times")
+def api_sun_times():
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT center_lat, center_lon FROM property_polygon ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row or row['center_lat'] is None:
+        return jsonify({'error': 'No property polygon saved'}), 400
+    try:
+        from astral import LocationInfo
+        from astral.sun import sun
+        location = LocationInfo(latitude=row['center_lat'], longitude=row['center_lon'])
+        today = datetime.date.today()
+        result = []
+        for i in range(-3, 8):
+            d = today + datetime.timedelta(days=i)
+            s = sun(location.observer, date=d)
+            result.append({
+                'date': d.isoformat(),
+                'sunrise': s['sunrise'].isoformat(),
+                'sunset': s['sunset'].isoformat(),
+            })
+        return jsonify(result)
+    except ImportError:
+        return jsonify({'error': 'astral library not installed; run: pip install astral'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+_MAP_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Map — Smart Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; max-width: 920px; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 1.5rem; color: #1a2535; letter-spacing: -.02em; }
+    .card { background: #fff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); margin-bottom: 1.5rem; }
+    .section-title { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .75rem; }
+    #map { height: 520px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); margin-bottom: 1rem; display: none; }
+    #map-placeholder { height: 520px; border-radius: 12px; background: #e8eef4; display: flex; align-items: center; justify-content: center; color: #7a90a8; font-size: .95rem; margin-bottom: 1rem; text-align: center; padding: 1.5rem; }
+    .controls { display: none; gap: .75rem; margin-bottom: 1.5rem; flex-wrap: wrap; align-items: center; }
+    .btn { padding: .5rem 1.1rem; border-radius: 8px; font-size: .88rem; font-weight: 600; border: none; cursor: pointer; transition: background .15s; }
+    .btn-primary { background: #2e7dd4; color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #2568b8; }
+    .btn-primary:disabled { background: #aabbc8; cursor: default; }
+    .btn-secondary { background: #f0f4f8; color: #1a2535; border: 1px solid #dde4ec; }
+    .btn-secondary:hover { background: #e4eaf2; }
+    .key-row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+    .key-input { flex: 1; min-width: 260px; padding: .5rem .85rem; border-radius: 8px; border: 1px solid #dde4ec; font-size: .88rem; color: #1a2535; background: #fff; outline: none; font-family: monospace; }
+    .key-input:focus { border-color: #2e7dd4; box-shadow: 0 0 0 3px rgba(46,125,212,.15); }
+    .sun-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    .sun-table th { text-align: left; font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding: .4rem .75rem; border-bottom: 1px solid #edf0f4; }
+    .sun-table td { padding: .55rem .75rem; border-bottom: 1px solid #f2f4f7; }
+    .sun-table tr.today td { background: #fef9ee; font-weight: 600; }
+    .sun-table tr.past td { color: #aabbc8; }
+    .today-tag { font-size: .7rem; color: #2e7dd4; font-weight: 700; margin-left: .4rem; }
+    .saved-badge { font-size: .75rem; font-weight: 600; color: #2a9d6e; background: #e8fdf0; padding: .2rem .55rem; border-radius: 20px; }
+    .status-msg { font-size: .85rem; color: #7a90a8; font-style: italic; }
+    #_net_err { display: none; position: fixed; top: 1rem; left: 50%; transform: translateX(-50%); background: #fde8e8; color: #c0392b; border-radius: 8px; padding: .6rem 1.2rem; font-size: .85rem; font-weight: 500; z-index: 9999; box-shadow: 0 2px 8px rgba(0,0,0,.15); white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <div id="_net_err"></div>
+  <h1>Map &nbsp;<a href="/" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">&larr; Dashboard</a></h1>
+
+  <div class="card">
+    <div class="section-title">Google Maps API Key</div>
+    <div class="key-row">
+      <input type="text" id="api-key-input" class="key-input" placeholder="AIza…" autocomplete="off" spellcheck="false">
+      <button class="btn btn-primary" onclick="saveApiKey()">Save Key</button>
+    </div>
+  </div>
+
+  <div id="map-placeholder">Enter your Google Maps API key above to load the map</div>
+  <div id="map"></div>
+
+  <div class="controls" id="map-controls">
+    <button class="btn btn-secondary" id="draw-btn" onclick="startDrawing()">Draw Property Boundary</button>
+    <button class="btn btn-primary" id="save-polygon-btn" onclick="savePolygon()" disabled>Save Polygon</button>
+    <button class="btn btn-secondary" id="clear-btn" onclick="clearPolygon()" style="display:none">Clear</button>
+    <span id="polygon-status"></span>
+  </div>
+
+  <div class="card" id="sun-card" style="display:none">
+    <div class="section-title">Sunrise &amp; Sunset</div>
+    <div id="sun-content"><div class="status-msg">Loading…</div></div>
+  </div>
+
+<script>
+let map, drawingManager, savedPolygon, pendingPolygon;
+
+function showNetworkError(msg) {
+  const el = document.getElementById('_net_err');
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.style.display = 'none'; }, 6000);
+}
+
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
+
+async function init() {
+  let config;
+  try { config = await fetchJSON('/api/map-config'); } catch(e) { return; }
+
+  if (config.api_key) {
+    document.getElementById('api-key-input').value = config.api_key;
+    document.getElementById('map-placeholder').style.display = 'none';
+    document.getElementById('map').style.display = 'block';
+    document.getElementById('map-controls').style.display = 'flex';
+
+    try {
+      await loadMapsAPI(config.api_key);
+    } catch(e) {
+      document.getElementById('map').style.display = 'none';
+      document.getElementById('map-placeholder').textContent = 'Failed to load Google Maps. Check that your API key has the Maps JavaScript API and Drawing Library enabled.';
+      document.getElementById('map-placeholder').style.display = 'flex';
+      document.getElementById('map-controls').style.display = 'none';
+      return;
+    }
+
+    initMap();
+
+    if (config.polygon && config.polygon.length > 0) {
+      drawSavedPolygon(config.polygon);
+      document.getElementById('clear-btn').style.display = '';
+      document.getElementById('polygon-status').innerHTML = '<span class="saved-badge">Polygon saved</span>';
+      loadSunTimes();
+    }
+  }
+}
+
+function loadMapsAPI(apiKey) {
+  return new Promise((resolve, reject) => {
+    if (window.google && window.google.maps && window.google.maps.drawing) { resolve(); return; }
+    window._mapsLoaded = resolve;
+    const s = document.createElement('script');
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(apiKey) + '&libraries=drawing&callback=_mapsLoaded';
+    s.async = true;
+    s.defer = true;
+    s.onerror = () => reject(new Error('Script load error — check your API key'));
+    document.head.appendChild(s);
+  });
+}
+
+function initMap() {
+  map = new google.maps.Map(document.getElementById('map'), {
+    center: { lat: 37.0902, lng: -95.7129 },
+    zoom: 4,
+    mapTypeId: 'satellite',
+    tilt: 0,
+  });
+
+  drawingManager = new google.maps.drawing.DrawingManager({
+    drawingMode: null,
+    drawingControl: false,
+    polygonOptions: {
+      fillColor: '#2e7dd4',
+      fillOpacity: 0.25,
+      strokeColor: '#2e7dd4',
+      strokeWeight: 2,
+      editable: true,
+      clickable: false,
+    },
+  });
+  drawingManager.setMap(map);
+
+  google.maps.event.addListener(drawingManager, 'polygoncomplete', (poly) => {
+    if (pendingPolygon) pendingPolygon.setMap(null);
+    pendingPolygon = poly;
+    drawingManager.setDrawingMode(null);
+    document.getElementById('save-polygon-btn').disabled = false;
+    document.getElementById('draw-btn').textContent = 'Redraw';
+  });
+}
+
+function drawSavedPolygon(coords) {
+  if (savedPolygon) savedPolygon.setMap(null);
+  const path = coords.map(c => ({ lat: c[0], lng: c[1] }));
+  savedPolygon = new google.maps.Polygon({
+    paths: path,
+    fillColor: '#2e7dd4',
+    fillOpacity: 0.25,
+    strokeColor: '#2e7dd4',
+    strokeWeight: 2,
+    editable: false,
+    map,
+  });
+  const bounds = new google.maps.LatLngBounds();
+  path.forEach(p => bounds.extend(p));
+  map.fitBounds(bounds, { padding: 60 });
+}
+
+function startDrawing() {
+  if (pendingPolygon) { pendingPolygon.setMap(null); pendingPolygon = null; }
+  document.getElementById('save-polygon-btn').disabled = true;
+  document.getElementById('draw-btn').textContent = 'Click to add points — double-click to finish';
+  drawingManager.setDrawingMode(google.maps.drawing.OverlayType.POLYGON);
+}
+
+function clearPolygon() {
+  if (savedPolygon) { savedPolygon.setMap(null); savedPolygon = null; }
+  if (pendingPolygon) { pendingPolygon.setMap(null); pendingPolygon = null; }
+  document.getElementById('save-polygon-btn').disabled = true;
+  document.getElementById('clear-btn').style.display = 'none';
+  document.getElementById('draw-btn').textContent = 'Draw Property Boundary';
+  document.getElementById('polygon-status').innerHTML = '';
+  document.getElementById('sun-card').style.display = 'none';
+}
+
+function computeCentroid(coords) {
+  const lat = coords.reduce((s, c) => s + c[0], 0) / coords.length;
+  const lon = coords.reduce((s, c) => s + c[1], 0) / coords.length;
+  return [lat, lon];
+}
+
+async function savePolygon() {
+  if (!pendingPolygon) return;
+  const path = pendingPolygon.getPath().getArray();
+  const coords = path.map(p => [p.lat(), p.lng()]);
+  const [center_lat, center_lon] = computeCentroid(coords);
+  const btn = document.getElementById('save-polygon-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    await fetchJSON('/api/map-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ polygon: coords, center_lat, center_lon }),
+    });
+    if (savedPolygon) savedPolygon.setMap(null);
+    pendingPolygon.setMap(null);
+    pendingPolygon = null;
+    drawSavedPolygon(coords);
+    document.getElementById('clear-btn').style.display = '';
+    document.getElementById('draw-btn').textContent = 'Redraw';
+    document.getElementById('polygon-status').innerHTML = '<span class="saved-badge">Polygon saved</span>';
+    loadSunTimes();
+  } catch(e) {
+    // error already shown via fetchJSON
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save Polygon';
+  }
+}
+
+async function saveApiKey() {
+  const key = document.getElementById('api-key-input').value.trim();
+  if (!key) return;
+  try {
+    await fetchJSON('/api/map-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: key }),
+    });
+    await init();
+  } catch(e) {
+    // error already shown via fetchJSON
+  }
+}
+
+async function loadSunTimes() {
+  document.getElementById('sun-card').style.display = '';
+  document.getElementById('sun-content').innerHTML = '<div class="status-msg">Loading…</div>';
+  try {
+    const data = await fetchJSON('/api/sun-times');
+    renderSunTimes(data);
+  } catch(e) {
+    document.getElementById('sun-content').innerHTML = '<div class="status-msg">Could not load sun times.</div>';
+  }
+}
+
+function fmtTime(iso) {
+  return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function fmtDate(isoDate) {
+  return new Date(isoDate + 'T12:00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function renderSunTimes(rows) {
+  if (!rows || !rows.length) {
+    document.getElementById('sun-content').innerHTML = '<div class="status-msg">No data.</div>';
+    return;
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  let html = `<table class="sun-table">
+    <thead><tr><th>Date</th><th>Sunrise</th><th>Sunset</th><th>Daylight</th></tr></thead>
+    <tbody>`;
+  for (const row of rows) {
+    const isPast   = row.date < today;
+    const isToday  = row.date === today;
+    const cls      = isToday ? 'today' : isPast ? 'past' : '';
+    const sunrise  = new Date(row.sunrise);
+    const sunset   = new Date(row.sunset);
+    const mins     = Math.round((sunset - sunrise) / 60000);
+    const daylight = `${Math.floor(mins / 60)}h ${mins % 60}m`;
+    const todayTag = isToday ? '<span class="today-tag">TODAY</span>' : '';
+    html += `<tr class="${cls}">
+      <td>${fmtDate(row.date)}${todayTag}</td>
+      <td>${fmtTime(row.sunrise)}</td>
+      <td>${fmtTime(row.sunset)}</td>
+      <td>${daylight}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('sun-content').innerHTML = html;
+}
+
+init();
+</script>
+</body>
+</html>"""
+
+
+@app.get("/map")
+def map_page():
+    return Response(_MAP_PAGE, mimetype="text/html")
 
 
 def run(db_path: str, host: str, port: int, debug: bool) -> None:

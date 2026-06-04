@@ -243,6 +243,21 @@ def open_db(path: str) -> sqlite3.Connection:
         conn.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS property_polygon (
+            id           INTEGER PRIMARY KEY,
+            polygon_json TEXT,
+            center_lat   REAL,
+            center_lon   REAL,
+            updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S','now'))
+        )
+    """)
     conn.commit()
     return conn
 
