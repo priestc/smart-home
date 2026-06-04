@@ -9938,8 +9938,15 @@ async function init() {
       return;
     }
 
-    initMap();
+    let drawingReady = false;
+    try {
+      initMap();
+      drawingReady = true;
+    } catch(e) {
+      showNetworkError('Map init failed: ' + e.message);
+    }
     document.getElementById('map-controls').style.display = 'flex';
+    if (!drawingReady) document.getElementById('draw-btn').disabled = true;
 
     if (config.polygon && config.polygon.length > 0) {
       drawSavedPolygon(config.polygon);
