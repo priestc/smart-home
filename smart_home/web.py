@@ -9928,7 +9928,6 @@ async function init() {
     document.getElementById('api-key-input').value = config.api_key;
     document.getElementById('map-placeholder').style.display = 'none';
     document.getElementById('map').style.display = 'block';
-    document.getElementById('map-controls').style.display = 'flex';
 
     try {
       await loadMapsAPI(config.api_key);
@@ -9936,11 +9935,11 @@ async function init() {
       document.getElementById('map').style.display = 'none';
       document.getElementById('map-placeholder').textContent = 'Failed to load Google Maps. Check that your API key has the Maps JavaScript API and Drawing Library enabled.';
       document.getElementById('map-placeholder').style.display = 'flex';
-      document.getElementById('map-controls').style.display = 'none';
       return;
     }
 
     initMap();
+    document.getElementById('map-controls').style.display = 'flex';
 
     if (config.polygon && config.polygon.length > 0) {
       drawSavedPolygon(config.polygon);
