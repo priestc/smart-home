@@ -5411,45 +5411,30 @@ function tickSunWidget() {
   if (!_sunData) return;
   const el = document.getElementById('sun-widget');
   if (!el) return;
-  const now = new Date();
-  const todayStr     = now.toLocaleDateString('en-CA');
-  const tomorrowStr  = new Date(now.getTime() + 86400000).toLocaleDateString('en-CA');
-  const yesterdayStr = new Date(now.getTime() - 86400000).toLocaleDateString('en-CA');
-  const todayRow     = _sunData.find(r => r.date === todayStr);
-  const tomorrowRow  = _sunData.find(r => r.date === tomorrowStr);
-  const yesterdayRow = _sunData.find(r => r.date === yesterdayStr);
-  if (!todayRow) return;
-  const sunrise   = new Date(todayRow.sunrise);
-  const sunset    = new Date(todayRow.sunset);
-  const dayMid    = new Date((sunrise.getTime() + sunset.getTime()) / 2);
-  const nextSunrise  = tomorrowRow  ? new Date(tomorrowRow.sunrise)  : null;
-  const prevSunset   = yesterdayRow ? new Date(yesterdayRow.sunset)  : null;
-  const nightMidPrev = prevSunset   ? new Date((prevSunset.getTime() + sunrise.getTime()) / 2) : null;
-  const nightMidNext = nextSunrise  ? new Date((sunset.getTime() + nextSunrise.getTime()) / 2) : null;
-  const fmtEvt = d => d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+  const now = Date.now();
+  // Build a flat sorted list of all solar events; no date-string matching needed.
+  const events = [];
+  for (const row of _sunData) {
+    events.push({ type: 'sunrise', ts: new Date(row.sunrise).getTime() });
+    events.push({ type: 'sunset',  ts: new Date(row.sunset).getTime() });
+  }
+  events.sort((a, b) => a.ts - b.ts);
+  const prev = [...events].reverse().find(e => e.ts <= now);
+  const next = events.find(e => e.ts > now);
+  if (!prev || !next) return;
+  const fmtEvt = ts => new Date(ts).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+  const mid = (prev.ts + next.ts) / 2;
   let label, ms, isDay, nextEventStr;
-  if (now < sunrise) {
-    isDay = false;
-    if (nightMidPrev && now < nightMidPrev) {
-      label = 'Since Sunset'; ms = now - (prevSunset || now);
-    } else {
-      label = 'Until Sunrise'; ms = sunrise - now;
-    }
-    nextEventStr = `Sunrise at ${fmtEvt(sunrise)}`;
-  } else if (now < dayMid) {
-    isDay = true; label = 'Since Sunrise'; ms = now - sunrise;
-    nextEventStr = `Sunset at ${fmtEvt(sunset)}`;
-  } else if (now < sunset) {
-    isDay = true; label = 'Until Sunset'; ms = sunset - now;
-    nextEventStr = `Sunset at ${fmtEvt(sunset)}`;
+  if (prev.type === 'sunrise' && next.type === 'sunset') {
+    isDay = true;
+    nextEventStr = `Sunset at ${fmtEvt(next.ts)}`;
+    if (now < mid) { label = 'Since Sunrise'; ms = now - prev.ts; }
+    else           { label = 'Until Sunset';  ms = next.ts - now; }
   } else {
     isDay = false;
-    if (nightMidNext && now < nightMidNext) {
-      label = 'Since Sunset'; ms = now - sunset;
-    } else {
-      label = 'Until Sunrise'; ms = nextSunrise ? nextSunrise - now : 0;
-    }
-    nextEventStr = nextSunrise ? `Sunrise at ${fmtEvt(nextSunrise)}` : '';
+    nextEventStr = `Sunrise at ${fmtEvt(next.ts)}`;
+    if (now < mid) { label = 'Since Sunset';  ms = now - prev.ts; }
+    else           { label = 'Until Sunrise'; ms = next.ts - now; }
   }
   const totalSecs = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(totalSecs / 3600);
