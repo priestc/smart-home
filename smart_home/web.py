@@ -5145,6 +5145,7 @@ def index():
     .card .ts    { font-size: 0.72rem; color: #aabbc8; margin-top: .5rem; }
     .card.offline { opacity: .65; }
     .card.offline .temp { font-size: 1.4rem; color: #aabbc8; }
+    .sun-time { font-size: 2.4rem; font-weight: 700; margin: .2rem 0 .1rem; line-height: 1; font-variant-numeric: tabular-nums; }
     .presence-cards { display: flex; gap: 1rem; margin-bottom: 2rem; flex-wrap: wrap; }
     .presence-card { background: #fff; border-radius: 12px; padding: 1rem 1.5rem; min-width: 160px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); display: flex; align-items: center; gap: .9rem; }
     .presence-dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
@@ -5194,6 +5195,7 @@ def index():
 
   <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem">
     <div class="cards" id="cards" style="margin-bottom:0;flex-wrap:wrap;display:flex;gap:1rem"></div>
+    <div id="sun-widget"></div>
     <div class="garage-cards" id="garage-cards" style="margin-bottom:0"></div>
   </div>
   <div class="presence-cards" id="presence-cards"></div>
@@ -5404,11 +5406,72 @@ async function loadPool() {
     }).join('');
   } catch(e) { /* pool not configured — silently skip */ }
 }
+let _sunData = null;
+function tickSunWidget() {
+  if (!_sunData) return;
+  const el = document.getElementById('sun-widget');
+  if (!el) return;
+  const now = new Date();
+  const todayStr     = now.toLocaleDateString('en-CA');
+  const tomorrowStr  = new Date(now.getTime() + 86400000).toLocaleDateString('en-CA');
+  const yesterdayStr = new Date(now.getTime() - 86400000).toLocaleDateString('en-CA');
+  const todayRow     = _sunData.find(r => r.date === todayStr);
+  const tomorrowRow  = _sunData.find(r => r.date === tomorrowStr);
+  const yesterdayRow = _sunData.find(r => r.date === yesterdayStr);
+  if (!todayRow) return;
+  const sunrise   = new Date(todayRow.sunrise);
+  const sunset    = new Date(todayRow.sunset);
+  const dayMid    = new Date((sunrise.getTime() + sunset.getTime()) / 2);
+  const nextSunrise  = tomorrowRow  ? new Date(tomorrowRow.sunrise)  : null;
+  const prevSunset   = yesterdayRow ? new Date(yesterdayRow.sunset)  : null;
+  const nightMidPrev = prevSunset   ? new Date((prevSunset.getTime() + sunrise.getTime()) / 2) : null;
+  const nightMidNext = nextSunrise  ? new Date((sunset.getTime() + nextSunrise.getTime()) / 2) : null;
+  const fmtEvt = d => d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+  let label, ms, isDay, nextEventStr;
+  if (now < sunrise) {
+    isDay = false;
+    if (nightMidPrev && now < nightMidPrev) {
+      label = 'Since Sunset'; ms = now - (prevSunset || now);
+    } else {
+      label = 'Until Sunrise'; ms = sunrise - now;
+    }
+    nextEventStr = `Sunrise at ${fmtEvt(sunrise)}`;
+  } else if (now < dayMid) {
+    isDay = true; label = 'Since Sunrise'; ms = now - sunrise;
+    nextEventStr = `Sunset at ${fmtEvt(sunset)}`;
+  } else if (now < sunset) {
+    isDay = true; label = 'Until Sunset'; ms = sunset - now;
+    nextEventStr = `Sunset at ${fmtEvt(sunset)}`;
+  } else {
+    isDay = false;
+    if (nightMidNext && now < nightMidNext) {
+      label = 'Since Sunset'; ms = now - sunset;
+    } else {
+      label = 'Until Sunrise'; ms = nextSunrise ? nextSunrise - now : 0;
+    }
+    nextEventStr = nextSunrise ? `Sunrise at ${fmtEvt(nextSunrise)}` : '';
+  }
+  const totalSecs = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSecs / 3600);
+  const m = Math.floor((totalSecs % 3600) / 60);
+  const s = totalSecs % 60;
+  const timeStr = `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  const color = isDay ? '#e07820' : '#5b7fa6';
+  el.innerHTML = `<div class="card"><div class="label">${label}</div><div class="sun-time" style="color:${color}">${timeStr}</div><div class="ts">${nextEventStr}</div></div>`;
+}
+async function loadSunTimes() {
+  try {
+    _sunData = await fetchJSON('/api/sun-times');
+    tickSunWidget();
+    setInterval(tickSunWidget, 1000);
+  } catch(e) { /* property not configured — skip sun widget */ }
+}
 loadCurrent();
 loadPresence();
 loadEvents();
 loadGarage();
 loadPool();
+loadSunTimes();
 setInterval(loadCurrent, 30000);
 setInterval(loadPresence, 30000);
 setInterval(loadEvents, 60000);
