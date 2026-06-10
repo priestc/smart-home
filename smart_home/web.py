@@ -9955,7 +9955,7 @@ _MAP_PAGE = """<!DOCTYPE html>
 
 <script>
 let map, savedPolygon;
-let measMode = null, measVertices = [], measPolyline = null, measPolygon = null, measListener = null;
+let measMode = null, measVertices = [], measPolyline = null, measPolygon = null, measListener = null, measMarkers = [];
 let _cursorStyleEl = null;
 
 function setMapCursor(cursor) {
@@ -10044,7 +10044,7 @@ function drawSavedPolygon(coords) {
     paths: path,
     fillOpacity: 0,
     strokeColor: '#2e7dd4',
-    strokeWeight: 2,
+    strokeWeight: 3.5,
     editable: false,
     clickable: false,
     map,
@@ -10065,10 +10065,31 @@ async function loadSunTimes() {
   }
 }
 
+function addMeasureMarker(latLng) {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">' +
+    '<line x1="11" y1="1" x2="11" y2="21" stroke="#e05c2a" stroke-width="2"/>' +
+    '<line x1="1" y1="11" x2="21" y2="11" stroke="#e05c2a" stroke-width="2"/>' +
+    '<circle cx="11" cy="11" r="3.5" fill="#e05c2a" stroke="white" stroke-width="1.5"/>' +
+    '</svg>';
+  const marker = new google.maps.Marker({
+    position: latLng,
+    map: map,
+    icon: {
+      url: 'data:image/svg+xml,' + encodeURIComponent(svg),
+      scaledSize: new google.maps.Size(22, 22),
+      anchor: new google.maps.Point(11, 11),
+    },
+    clickable: false,
+  });
+  measMarkers.push(marker);
+}
+
 function clearMeasure() {
   if (measPolyline)  { measPolyline.setMap(null);  measPolyline = null; }
   if (measPolygon)   { measPolygon.setMap(null);   measPolygon = null; }
   if (measListener)  { google.maps.event.removeListener(measListener); measListener = null; }
+  measMarkers.forEach(m => m.setMap(null));
+  measMarkers = [];
   measVertices = [];
   measMode = null;
   if (map) map.setOptions({ draggableCursor: '' });
@@ -10095,6 +10116,7 @@ function startMeasureDistance() {
   measListener = map.addListener('click', (e) => {
     if (!e.latLng) return;
     measVertices.push(e.latLng);
+    addMeasureMarker(e.latLng);
     updateMeasureDisplay();
   });
 }
@@ -10113,6 +10135,7 @@ function startMeasureArea() {
   measListener = map.addListener('click', (e) => {
     if (!e.latLng) return;
     measVertices.push(e.latLng);
+    addMeasureMarker(e.latLng);
     updateMeasureDisplay();
   });
 }
