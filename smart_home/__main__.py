@@ -1479,6 +1479,12 @@ def monitor(duration, verbose, db, no_db):
         _garage.load_auto_closed() if _anyone_away else set()
     )
 
+    # Timestamp of when each door was last auto-opened on arrival.
+    # Auto-close is suppressed for 10 minutes after an auto-open so that a brief
+    # connectivity drop while pulling into the garage doesn't immediately close it.
+    _auto_opened_at: dict[str, datetime.datetime] = {}
+    AUTO_OPEN_LOCKOUT = datetime.timedelta(minutes=10)
+
     # iPhone presence signal timeouts.
     # Device is "home" if either BLE or network has been seen within its timeout.
     # Device is "away" only when both signals are absent.
@@ -1518,6 +1524,7 @@ def monitor(duration, verbose, db, no_db):
                     await loop.run_in_executor(None, _garage.trigger, ip, pulse)
                     _auto_closed_doors.discard(gname)
                     _garage.save_auto_closed(_auto_closed_doors)
+                    _auto_opened_at[gname] = datetime.datetime.now()
                     log_ts = datetime.datetime.now().strftime("%H:%M:%S")
                     click.echo(f"[{log_ts}] Auto-opened garage '{gname}' ({name} arrived)")
                     _push.send_notification(
@@ -1711,18 +1718,24 @@ def monitor(duration, verbose, db, no_db):
                         for g in _garage.load_config():
                             configured = g.get("presence_device")
                             if g.get("auto") and (not configured or configured == name):
+                                gname = g["name"]
+                                opened_at = _auto_opened_at.get(gname)
+                                if opened_at and (now - opened_at) < AUTO_OPEN_LOCKOUT:
+                                    remaining = int((AUTO_OPEN_LOCKOUT - (now - opened_at)).total_seconds() / 60)
+                                    click.echo(f"[{ts}] Skipping auto-close for '{gname}' — within {AUTO_OPEN_LOCKOUT.seconds // 60}min lockout after auto-open ({remaining}min remaining)")
+                                    continue
                                 try:
                                     door_status = _garage.get_status(g["ip"])
                                     if door_status.get("door_closed") is False:
                                         _garage.trigger(g["ip"], g.get("pulse_seconds", 0.5))
-                                        _auto_closed_doors.add(g["name"])
+                                        _auto_closed_doors.add(gname)
                                         _garage.save_auto_closed(_auto_closed_doors)
-                                        click.echo(f"[{ts}] Auto-closing garage '{g['name']}' ({name} left)")
+                                        click.echo(f"[{ts}] Auto-closing garage '{gname}' ({name} left)")
                                         asyncio.get_running_loop().create_task(
-                                            _verify_and_retry_close(g["name"], g["ip"], g.get("pulse_seconds", 0.5), name)
+                                            _verify_and_retry_close(gname, g["ip"], g.get("pulse_seconds", 0.5), name)
                                         )
                                 except Exception as e:
-                                    click.echo(f"[{ts}] Auto-close failed for '{g['name']}': {e}")
+                                    click.echo(f"[{ts}] Auto-close failed for '{gname}': {e}")
                     else:
                         _fire_auto_open(name)
                     _presence.append_history({
