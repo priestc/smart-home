@@ -9956,6 +9956,15 @@ _MAP_PAGE = """<!DOCTYPE html>
 <script>
 let map, savedPolygon;
 let measMode = null, measVertices = [], measPolyline = null, measPolygon = null, measListener = null;
+let _cursorStyleEl = null;
+
+function setMapCursor(cursor) {
+  if (!_cursorStyleEl) {
+    _cursorStyleEl = document.createElement('style');
+    document.head.appendChild(_cursorStyleEl);
+  }
+  _cursorStyleEl.textContent = cursor ? '#map, #map * { cursor: ' + cursor + ' !important; }' : '';
+}
 
 function showNetworkError(msg) {
   const el = document.getElementById('_net_err');
@@ -10062,6 +10071,7 @@ function clearMeasure() {
   measVertices = [];
   measMode = null;
   if (map) map.setOptions({ draggableCursor: '' });
+  setMapCursor('');
   document.getElementById('measure-dist-btn').style.display = '';
   document.getElementById('measure-area-btn').style.display = '';
   document.getElementById('cancel-measure-btn').style.display = 'none';
@@ -10074,6 +10084,7 @@ function startMeasureDistance() {
   clearMeasure();
   measMode = 'distance';
   map.setOptions({ draggableCursor: 'crosshair' });
+  setMapCursor('crosshair');
   document.getElementById('measure-dist-btn').style.display = 'none';
   document.getElementById('measure-area-btn').style.display = 'none';
   document.getElementById('cancel-measure-btn').style.display = '';
@@ -10090,6 +10101,7 @@ function startMeasureArea() {
   clearMeasure();
   measMode = 'area';
   map.setOptions({ draggableCursor: 'crosshair' });
+  setMapCursor('crosshair');
   document.getElementById('measure-dist-btn').style.display = 'none';
   document.getElementById('measure-area-btn').style.display = 'none';
   document.getElementById('cancel-measure-btn').style.display = '';
