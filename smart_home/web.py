@@ -9930,6 +9930,7 @@ _MAP_PAGE = """<!DOCTYPE html>
     .today-tag { font-size: .7rem; color: #2e7dd4; font-weight: 700; margin-left: .4rem; }
     .saved-badge { font-size: .75rem; font-weight: 600; color: #2a9d6e; background: #e8fdf0; padding: .2rem .55rem; border-radius: 20px; }
     .status-msg { font-size: .85rem; color: #7a90a8; font-style: italic; }
+    .measure-result { display: none; font-size: .88rem; font-weight: 600; color: #7a3800; background: #fff3e0; border: 1px solid #f0a855; border-radius: 8px; padding: .45rem .9rem; }
     #_net_err { display: none; position: fixed; top: 1rem; left: 50%; transform: translateX(-50%); background: #fde8e8; color: #c0392b; border-radius: 8px; padding: .6rem 1.2rem; font-size: .85rem; font-weight: 500; z-index: 9999; box-shadow: 0 2px 8px rgba(0,0,0,.15); white-space: nowrap; }
   </style>
 </head>
@@ -9955,6 +9956,11 @@ _MAP_PAGE = """<!DOCTYPE html>
     <button class="btn btn-primary" id="save-polygon-btn" onclick="savePolygon()" disabled>Save Polygon</button>
     <button class="btn btn-secondary" id="clear-btn" onclick="clearPolygon()" style="display:none">Clear</button>
     <span id="polygon-status"></span>
+    <div style="flex-basis:100%;height:0"></div>
+    <button class="btn btn-secondary" id="measure-dist-btn" onclick="startMeasureDistance()">Measure Distance</button>
+    <button class="btn btn-secondary" id="measure-area-btn" onclick="startMeasureArea()">Measure Area</button>
+    <button class="btn btn-secondary" id="cancel-measure-btn" onclick="cancelMeasure()" style="display:none">Cancel Measure</button>
+    <span id="measure-result" class="measure-result"></span>
   </div>
 
   <div class="card" id="sun-card" style="display:none">
@@ -9965,6 +9971,7 @@ _MAP_PAGE = """<!DOCTYPE html>
 <script>
 let map, savedPolygon, pendingPolygon;
 let drawVertices = [], drawPolyline = null, clickListener = null;
+let measMode = null, measVertices = [], measPolyline = null, measPolygon = null, measListener = null;
 
 function showNetworkError(msg) {
   const el = document.getElementById('_net_err');
@@ -10020,7 +10027,7 @@ function loadMapsAPI(apiKey) {
     if (window.google && window.google.maps) { resolve(); return; }
     window._mapsLoaded = resolve;
     const s = document.createElement('script');
-    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(apiKey) + '&loading=async&callback=_mapsLoaded';
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(apiKey) + '&libraries=geometry&loading=async&callback=_mapsLoaded';
     s.async = true;
     s.defer = true;
     s.onerror = () => reject(new Error('Script load error — check your API key'));
@@ -10055,6 +10062,7 @@ function drawSavedPolygon(coords) {
 }
 
 function startDrawing() {
+  clearMeasure();
   if (pendingPolygon) { pendingPolygon.setMap(null); pendingPolygon = null; }
   if (drawPolyline)   { drawPolyline.setMap(null);   drawPolyline = null; }
   drawVertices = [];
@@ -10195,6 +10203,116 @@ async function loadSunTimes() {
   } catch(e) {
     document.getElementById('sun-content').innerHTML = '<div class="status-msg">Could not load sun times.</div>';
   }
+}
+
+function clearMeasure() {
+  if (measPolyline)  { measPolyline.setMap(null);  measPolyline = null; }
+  if (measPolygon)   { measPolygon.setMap(null);   measPolygon = null; }
+  if (measListener)  { google.maps.event.removeListener(measListener); measListener = null; }
+  measVertices = [];
+  measMode = null;
+  if (map) map.setOptions({ draggableCursor: '' });
+  document.getElementById('measure-dist-btn').style.display = '';
+  document.getElementById('measure-area-btn').style.display = '';
+  document.getElementById('cancel-measure-btn').style.display = 'none';
+  const res = document.getElementById('measure-result');
+  res.style.display = 'none';
+  res.textContent = '';
+}
+
+function startMeasureDistance() {
+  clearMeasure();
+  cancelDrawing();
+  measMode = 'distance';
+  map.setOptions({ draggableCursor: 'crosshair' });
+  document.getElementById('measure-dist-btn').style.display = 'none';
+  document.getElementById('measure-area-btn').style.display = 'none';
+  document.getElementById('cancel-measure-btn').style.display = '';
+  const res = document.getElementById('measure-result');
+  res.textContent = 'Click on the map to start measuring distance';
+  res.style.display = '';
+  measListener = map.addListener('click', (e) => {
+    measVertices.push(e.latLng);
+    updateMeasureDisplay();
+  });
+}
+
+function startMeasureArea() {
+  clearMeasure();
+  cancelDrawing();
+  measMode = 'area';
+  map.setOptions({ draggableCursor: 'crosshair' });
+  document.getElementById('measure-dist-btn').style.display = 'none';
+  document.getElementById('measure-area-btn').style.display = 'none';
+  document.getElementById('cancel-measure-btn').style.display = '';
+  const res = document.getElementById('measure-result');
+  res.textContent = 'Click on the map to start measuring area (need 3+ points)';
+  res.style.display = '';
+  measListener = map.addListener('click', (e) => {
+    measVertices.push(e.latLng);
+    updateMeasureDisplay();
+  });
+}
+
+function cancelMeasure() { clearMeasure(); }
+
+function updateMeasureDisplay() {
+  const res = document.getElementById('measure-result');
+  if (measMode === 'distance') {
+    if (measPolyline) measPolyline.setMap(null);
+    measPolyline = new google.maps.Polyline({
+      path: measVertices,
+      strokeColor: '#e05c2a',
+      strokeWeight: 2.5,
+      map,
+    });
+    if (measVertices.length >= 2) {
+      let totalMeters = 0;
+      for (let i = 1; i < measVertices.length; i++) {
+        totalMeters += google.maps.geometry.spherical.computeDistanceBetween(measVertices[i-1], measVertices[i]);
+      }
+      res.textContent = 'Distance: ' + fmtDistance(totalMeters);
+    } else {
+      res.textContent = 'Click more points to measure distance';
+    }
+  } else if (measMode === 'area') {
+    if (measPolygon) measPolygon.setMap(null);
+    if (measPolyline) { measPolyline.setMap(null); measPolyline = null; }
+    if (measVertices.length >= 3) {
+      measPolygon = new google.maps.Polygon({
+        paths: measVertices,
+        fillColor: '#e05c2a',
+        fillOpacity: 0.2,
+        strokeColor: '#e05c2a',
+        strokeWeight: 2.5,
+        map,
+      });
+      const sqMeters = google.maps.geometry.spherical.computeArea(measVertices);
+      res.textContent = 'Area: ' + fmtArea(sqMeters);
+    } else {
+      measPolyline = new google.maps.Polyline({
+        path: measVertices,
+        strokeColor: '#e05c2a',
+        strokeWeight: 2.5,
+        map,
+      });
+      res.textContent = 'Click more points to measure area (need 3+)';
+    }
+  }
+}
+
+function fmtDistance(meters) {
+  const feet = meters * 3.28084;
+  if (feet < 5280) return feet.toFixed(0) + ' ft';
+  const miles = feet / 5280;
+  return miles.toFixed(2) + ' mi (' + Math.round(feet).toLocaleString() + ' ft)';
+}
+
+function fmtArea(sqMeters) {
+  const sqFt = sqMeters * 10.7639;
+  const acres = sqFt / 43560;
+  if (acres < 1) return Math.round(sqFt).toLocaleString() + ' sq ft (' + acres.toFixed(3) + ' ac)';
+  return acres.toFixed(2) + ' ac (' + Math.round(sqFt).toLocaleString() + ' sq ft)';
 }
 
 function fmtTime(iso) {
