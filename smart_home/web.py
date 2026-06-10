@@ -10042,11 +10042,11 @@ function drawSavedPolygon(coords) {
   const path = coords.map(c => ({ lat: c[0], lng: c[1] }));
   savedPolygon = new google.maps.Polygon({
     paths: path,
-    fillColor: '#2e7dd4',
-    fillOpacity: 0.25,
+    fillOpacity: 0,
     strokeColor: '#2e7dd4',
     strokeWeight: 2,
     editable: false,
+    clickable: false,
     map,
   });
   const bounds = new google.maps.LatLngBounds();
