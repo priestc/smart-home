@@ -9931,6 +9931,7 @@ _MAP_PAGE = """<!DOCTYPE html>
     .saved-badge { font-size: .75rem; font-weight: 600; color: #2a9d6e; background: #e8fdf0; padding: .2rem .55rem; border-radius: 20px; }
     .status-msg { font-size: .85rem; color: #7a90a8; font-style: italic; }
     .measure-result { display: none; font-size: .88rem; font-weight: 600; color: #7a3800; background: #fff3e0; border: 1px solid #f0a855; border-radius: 8px; padding: .45rem .9rem; }
+    .meas-units-select { padding: .45rem .7rem; border-radius: 8px; border: 1px solid #dde4ec; font-size: .85rem; color: #1a2535; background: #fff; cursor: pointer; display: none; }
     #_net_err { display: none; position: fixed; top: 1rem; left: 50%; transform: translateX(-50%); background: #fde8e8; color: #c0392b; border-radius: 8px; padding: .6rem 1.2rem; font-size: .85rem; font-weight: 500; z-index: 9999; box-shadow: 0 2px 8px rgba(0,0,0,.15); white-space: nowrap; }
   </style>
 </head>
@@ -9945,6 +9946,10 @@ _MAP_PAGE = """<!DOCTYPE html>
     <button class="btn btn-secondary" id="measure-dist-btn" onclick="startMeasureDistance()">Measure Distance</button>
     <button class="btn btn-secondary" id="measure-area-btn" onclick="startMeasureArea()">Measure Area</button>
     <button class="btn btn-secondary" id="cancel-measure-btn" onclick="cancelMeasure()" style="display:none">Cancel Measure</button>
+    <select id="meas-units" class="meas-units-select" onchange="onUnitsChange()">
+      <option value="us">US (ft / ac)</option>
+      <option value="metric">Metric (m / ha)</option>
+    </select>
     <span id="measure-result" class="measure-result"></span>
   </div>
 
@@ -9995,6 +10000,7 @@ async function init() {
 
     try {
       await loadMapsAPI(config.api_key);
+      await google.maps.importLibrary('geometry');
     } catch(e) {
       document.getElementById('map').style.display = 'none';
       document.getElementById('map-placeholder').innerHTML = 'Failed to load Google Maps. <a href="/map-settings">Check your API key</a>.';
@@ -10097,6 +10103,7 @@ function clearMeasure() {
   document.getElementById('measure-dist-btn').style.display = '';
   document.getElementById('measure-area-btn').style.display = '';
   document.getElementById('cancel-measure-btn').style.display = 'none';
+  document.getElementById('meas-units').style.display = 'none';
   const res = document.getElementById('measure-result');
   res.style.display = 'none';
   res.textContent = '';
@@ -10110,6 +10117,7 @@ function startMeasureDistance() {
   document.getElementById('measure-dist-btn').style.display = 'none';
   document.getElementById('measure-area-btn').style.display = 'none';
   document.getElementById('cancel-measure-btn').style.display = '';
+  document.getElementById('meas-units').style.display = '';
   const res = document.getElementById('measure-result');
   res.textContent = 'Click on the map to start measuring distance';
   res.style.display = '';
@@ -10129,6 +10137,7 @@ function startMeasureArea() {
   document.getElementById('measure-dist-btn').style.display = 'none';
   document.getElementById('measure-area-btn').style.display = 'none';
   document.getElementById('cancel-measure-btn').style.display = '';
+  document.getElementById('meas-units').style.display = '';
   const res = document.getElementById('measure-result');
   res.textContent = 'Click on the map to start measuring area (need 3+ points)';
   res.style.display = '';
@@ -10192,17 +10201,32 @@ function updateMeasureDisplay() {
 }
 
 function fmtDistance(meters) {
+  const units = document.getElementById('meas-units').value;
+  if (units === 'metric') {
+    if (meters < 1000) return meters.toFixed(1) + ' m';
+    return (meters / 1000).toFixed(3) + ' km (' + Math.round(meters).toLocaleString() + ' m)';
+  }
   const feet = meters * 3.28084;
-  if (feet < 5280) return feet.toFixed(0) + ' ft';
+  if (feet < 5280) return Math.round(feet).toLocaleString() + ' ft';
   const miles = feet / 5280;
   return miles.toFixed(2) + ' mi (' + Math.round(feet).toLocaleString() + ' ft)';
 }
 
 function fmtArea(sqMeters) {
+  const units = document.getElementById('meas-units').value;
+  if (units === 'metric') {
+    if (sqMeters < 10000) return Math.round(sqMeters).toLocaleString() + ' m²';
+    const ha = sqMeters / 10000;
+    return ha.toFixed(2) + ' ha (' + Math.round(sqMeters).toLocaleString() + ' m²)';
+  }
   const sqFt = sqMeters * 10.7639;
   const acres = sqFt / 43560;
   if (acres < 1) return Math.round(sqFt).toLocaleString() + ' sq ft (' + acres.toFixed(3) + ' ac)';
   return acres.toFixed(2) + ' ac (' + Math.round(sqFt).toLocaleString() + ' sq ft)';
+}
+
+function onUnitsChange() {
+  if (measMode && measVertices.length > 0) updateMeasureDisplay();
 }
 
 function fmtTime(iso) {
