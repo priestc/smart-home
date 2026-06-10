@@ -10033,6 +10033,7 @@ function initMap() {
     zoom: 4,
     mapTypeId: 'satellite',
     tilt: 0,
+    clickableIcons: false,
   });
 }
 
@@ -10092,6 +10093,7 @@ function startMeasureDistance() {
   res.textContent = 'Click on the map to start measuring distance';
   res.style.display = '';
   measListener = map.addListener('click', (e) => {
+    if (!e.latLng) return;
     measVertices.push(e.latLng);
     updateMeasureDisplay();
   });
@@ -10109,6 +10111,7 @@ function startMeasureArea() {
   res.textContent = 'Click on the map to start measuring area (need 3+ points)';
   res.style.display = '';
   measListener = map.addListener('click', (e) => {
+    if (!e.latLng) return;
     measVertices.push(e.latLng);
     updateMeasureDisplay();
   });
@@ -10118,46 +10121,50 @@ function cancelMeasure() { clearMeasure(); }
 
 function updateMeasureDisplay() {
   const res = document.getElementById('measure-result');
-  if (measMode === 'distance') {
-    if (measPolyline) measPolyline.setMap(null);
-    measPolyline = new google.maps.Polyline({
-      path: measVertices,
-      strokeColor: '#e05c2a',
-      strokeWeight: 2.5,
-      map,
-    });
-    if (measVertices.length >= 2) {
-      let totalMeters = 0;
-      for (let i = 1; i < measVertices.length; i++) {
-        totalMeters += google.maps.geometry.spherical.computeDistanceBetween(measVertices[i-1], measVertices[i]);
-      }
-      res.textContent = 'Distance: ' + fmtDistance(totalMeters);
-    } else {
-      res.textContent = 'Click more points to measure distance';
-    }
-  } else if (measMode === 'area') {
-    if (measPolygon) measPolygon.setMap(null);
-    if (measPolyline) { measPolyline.setMap(null); measPolyline = null; }
-    if (measVertices.length >= 3) {
-      measPolygon = new google.maps.Polygon({
-        paths: measVertices,
-        fillColor: '#e05c2a',
-        fillOpacity: 0.2,
-        strokeColor: '#e05c2a',
-        strokeWeight: 2.5,
-        map,
-      });
-      const sqMeters = google.maps.geometry.spherical.computeArea(measVertices);
-      res.textContent = 'Area: ' + fmtArea(sqMeters);
-    } else {
+  try {
+    if (measMode === 'distance') {
+      if (measPolyline) measPolyline.setMap(null);
       measPolyline = new google.maps.Polyline({
         path: measVertices,
         strokeColor: '#e05c2a',
         strokeWeight: 2.5,
-        map,
+        map: map,
       });
-      res.textContent = 'Click more points to measure area (need 3+)';
+      if (measVertices.length >= 2) {
+        let totalMeters = 0;
+        for (let i = 1; i < measVertices.length; i++) {
+          totalMeters += google.maps.geometry.spherical.computeDistanceBetween(measVertices[i-1], measVertices[i]);
+        }
+        res.textContent = 'Distance: ' + fmtDistance(totalMeters);
+      } else {
+        res.textContent = 'Point placed — click more to measure distance';
+      }
+    } else if (measMode === 'area') {
+      if (measPolygon) measPolygon.setMap(null);
+      if (measPolyline) { measPolyline.setMap(null); measPolyline = null; }
+      if (measVertices.length >= 3) {
+        measPolygon = new google.maps.Polygon({
+          paths: measVertices,
+          fillColor: '#e05c2a',
+          fillOpacity: 0.2,
+          strokeColor: '#e05c2a',
+          strokeWeight: 2.5,
+          map: map,
+        });
+        const sqMeters = google.maps.geometry.spherical.computeArea(measVertices);
+        res.textContent = 'Area: ' + fmtArea(sqMeters);
+      } else {
+        measPolyline = new google.maps.Polyline({
+          path: measVertices,
+          strokeColor: '#e05c2a',
+          strokeWeight: 2.5,
+          map: map,
+        });
+        res.textContent = measVertices.length + ' point(s) — need 3+ for area';
+      }
     }
+  } catch(err) {
+    showNetworkError('Measure error: ' + err.message);
   }
 }
 
