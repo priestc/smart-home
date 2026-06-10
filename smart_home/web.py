@@ -9936,27 +9936,12 @@ _MAP_PAGE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="_net_err"></div>
-  <h1>Map &nbsp;<a href="/" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">&larr; Dashboard</a></h1>
+  <h1>Map &nbsp;<a href="/" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">&larr; Dashboard</a>&nbsp;<a href="/map-settings" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Settings &#9881;</a></h1>
 
-  <div class="card">
-    <div class="section-title">Google Maps API Key</div>
-    <div class="key-row">
-      <input type="text" id="api-key-input" class="key-input" placeholder="AIza…" autocomplete="off" spellcheck="false">
-      <button class="btn btn-primary" onclick="saveApiKey()">Save Key</button>
-    </div>
-  </div>
-
-  <div id="map-placeholder">Enter your Google Maps API key above to load the map</div>
+  <div id="map-placeholder">Loading map…</div>
   <div id="map"></div>
 
   <div class="controls" id="map-controls">
-    <button class="btn btn-secondary" id="draw-btn" onclick="startDrawing()">Draw Property Boundary</button>
-    <button class="btn btn-primary" id="finish-btn" onclick="finishDrawing()" disabled style="display:none">Finish Drawing</button>
-    <button class="btn btn-secondary" id="cancel-draw-btn" onclick="cancelDrawing()" style="display:none">Cancel</button>
-    <button class="btn btn-primary" id="save-polygon-btn" onclick="savePolygon()" disabled>Save Polygon</button>
-    <button class="btn btn-secondary" id="clear-btn" onclick="clearPolygon()" style="display:none">Clear</button>
-    <span id="polygon-status"></span>
-    <div style="flex-basis:100%;height:0"></div>
     <button class="btn btn-secondary" id="measure-dist-btn" onclick="startMeasureDistance()">Measure Distance</button>
     <button class="btn btn-secondary" id="measure-area-btn" onclick="startMeasureArea()">Measure Area</button>
     <button class="btn btn-secondary" id="cancel-measure-btn" onclick="cancelMeasure()" style="display:none">Cancel Measure</button>
@@ -9969,8 +9954,7 @@ _MAP_PAGE = """<!DOCTYPE html>
   </div>
 
 <script>
-let map, savedPolygon, pendingPolygon;
-let drawVertices = [], drawPolyline = null, clickListener = null;
+let map, savedPolygon;
 let measMode = null, measVertices = [], measPolyline = null, measPolygon = null, measListener = null;
 
 function showNetworkError(msg) {
@@ -9997,7 +9981,6 @@ async function init() {
   try { config = await fetchJSON('/api/map-config'); } catch(e) { return; }
 
   if (config.api_key) {
-    document.getElementById('api-key-input').value = config.api_key;
     document.getElementById('map-placeholder').style.display = 'none';
     document.getElementById('map').style.display = 'block';
 
@@ -10005,7 +9988,7 @@ async function init() {
       await loadMapsAPI(config.api_key);
     } catch(e) {
       document.getElementById('map').style.display = 'none';
-      document.getElementById('map-placeholder').textContent = 'Failed to load Google Maps. Check that your API key has the Maps JavaScript API enabled.';
+      document.getElementById('map-placeholder').innerHTML = 'Failed to load Google Maps. <a href="/map-settings">Check your API key</a>.';
       document.getElementById('map-placeholder').style.display = 'flex';
       return;
     }
@@ -10015,10 +9998,10 @@ async function init() {
 
     if (config.polygon && config.polygon.length > 0) {
       drawSavedPolygon(config.polygon);
-      document.getElementById('clear-btn').style.display = '';
-      document.getElementById('polygon-status').innerHTML = '<span class="saved-badge">Polygon saved</span>';
       loadSunTimes();
     }
+  } else {
+    document.getElementById('map-placeholder').innerHTML = 'No API key configured. <a href="/map-settings" style="color:#2e7dd4">Go to Map Settings</a> to set one up.';
   }
 }
 
@@ -10061,139 +10044,6 @@ function drawSavedPolygon(coords) {
   map.fitBounds(bounds, { padding: 60 });
 }
 
-function startDrawing() {
-  clearMeasure();
-  if (pendingPolygon) { pendingPolygon.setMap(null); pendingPolygon = null; }
-  if (drawPolyline)   { drawPolyline.setMap(null);   drawPolyline = null; }
-  drawVertices = [];
-  if (clickListener) google.maps.event.removeListener(clickListener);
-
-  map.setOptions({ draggableCursor: 'crosshair' });
-
-  clickListener = map.addListener('click', (e) => {
-    drawVertices.push(e.latLng);
-    if (drawPolyline) drawPolyline.setMap(null);
-    drawPolyline = new google.maps.Polyline({
-      path: drawVertices.length > 2 ? [...drawVertices, drawVertices[0]] : drawVertices,
-      strokeColor: '#2e7dd4',
-      strokeWeight: 2,
-      map,
-    });
-    document.getElementById('finish-btn').disabled = drawVertices.length < 3;
-  });
-
-  document.getElementById('draw-btn').style.display = 'none';
-  document.getElementById('finish-btn').style.display = '';
-  document.getElementById('finish-btn').disabled = true;
-  document.getElementById('cancel-draw-btn').style.display = '';
-  document.getElementById('save-polygon-btn').disabled = true;
-}
-
-function finishDrawing() {
-  if (drawVertices.length < 3) return;
-  google.maps.event.removeListener(clickListener);
-  clickListener = null;
-  if (drawPolyline) { drawPolyline.setMap(null); drawPolyline = null; }
-  map.setOptions({ draggableCursor: '' });
-
-  pendingPolygon = new google.maps.Polygon({
-    paths: drawVertices,
-    fillColor: '#2e7dd4',
-    fillOpacity: 0.25,
-    strokeColor: '#2e7dd4',
-    strokeWeight: 2,
-    editable: true,
-    map,
-  });
-  drawVertices = [];
-
-  document.getElementById('draw-btn').style.display = '';
-  document.getElementById('draw-btn').textContent = 'Redraw';
-  document.getElementById('finish-btn').style.display = 'none';
-  document.getElementById('cancel-draw-btn').style.display = 'none';
-  document.getElementById('save-polygon-btn').disabled = false;
-}
-
-function cancelDrawing() {
-  if (clickListener) { google.maps.event.removeListener(clickListener); clickListener = null; }
-  if (drawPolyline)  { drawPolyline.setMap(null); drawPolyline = null; }
-  drawVertices = [];
-  map.setOptions({ draggableCursor: '' });
-
-  document.getElementById('draw-btn').style.display = '';
-  document.getElementById('finish-btn').style.display = 'none';
-  document.getElementById('cancel-draw-btn').style.display = 'none';
-}
-
-function clearPolygon() {
-  if (savedPolygon)   { savedPolygon.setMap(null);   savedPolygon = null; }
-  if (pendingPolygon) { pendingPolygon.setMap(null); pendingPolygon = null; }
-  if (drawPolyline)   { drawPolyline.setMap(null);   drawPolyline = null; }
-  if (clickListener)  { google.maps.event.removeListener(clickListener); clickListener = null; }
-  drawVertices = [];
-  map.setOptions({ draggableCursor: '' });
-
-  document.getElementById('save-polygon-btn').disabled = true;
-  document.getElementById('clear-btn').style.display = 'none';
-  document.getElementById('draw-btn').style.display = '';
-  document.getElementById('draw-btn').textContent = 'Draw Property Boundary';
-  document.getElementById('finish-btn').style.display = 'none';
-  document.getElementById('cancel-draw-btn').style.display = 'none';
-  document.getElementById('polygon-status').innerHTML = '';
-  document.getElementById('sun-card').style.display = 'none';
-}
-
-function computeCentroid(coords) {
-  const lat = coords.reduce((s, c) => s + c[0], 0) / coords.length;
-  const lon = coords.reduce((s, c) => s + c[1], 0) / coords.length;
-  return [lat, lon];
-}
-
-async function savePolygon() {
-  if (!pendingPolygon) return;
-  const path = pendingPolygon.getPath().getArray();
-  const coords = path.map(p => [p.lat(), p.lng()]);
-  const [center_lat, center_lon] = computeCentroid(coords);
-  const btn = document.getElementById('save-polygon-btn');
-  btn.disabled = true;
-  btn.textContent = 'Saving…';
-  try {
-    await fetchJSON('/api/map-config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ polygon: coords, center_lat, center_lon }),
-    });
-    if (savedPolygon) savedPolygon.setMap(null);
-    pendingPolygon.setMap(null);
-    pendingPolygon = null;
-    drawSavedPolygon(coords);
-    document.getElementById('clear-btn').style.display = '';
-    document.getElementById('draw-btn').textContent = 'Redraw';
-    document.getElementById('polygon-status').innerHTML = '<span class="saved-badge">Polygon saved</span>';
-    loadSunTimes();
-  } catch(e) {
-    // error already shown via fetchJSON
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Save Polygon';
-  }
-}
-
-async function saveApiKey() {
-  const key = document.getElementById('api-key-input').value.trim();
-  if (!key) return;
-  try {
-    await fetchJSON('/api/map-config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: key }),
-    });
-    await init();
-  } catch(e) {
-    // error already shown via fetchJSON
-  }
-}
-
 async function loadSunTimes() {
   document.getElementById('sun-card').style.display = '';
   document.getElementById('sun-content').innerHTML = '<div class="status-msg">Loading…</div>';
@@ -10222,7 +10072,6 @@ function clearMeasure() {
 
 function startMeasureDistance() {
   clearMeasure();
-  cancelDrawing();
   measMode = 'distance';
   map.setOptions({ draggableCursor: 'crosshair' });
   document.getElementById('measure-dist-btn').style.display = 'none';
@@ -10239,7 +10088,6 @@ function startMeasureDistance() {
 
 function startMeasureArea() {
   clearMeasure();
-  cancelDrawing();
   measMode = 'area';
   map.setOptions({ draggableCursor: 'crosshair' });
   document.getElementById('measure-dist-btn').style.display = 'none';
@@ -10361,6 +10209,290 @@ init();
 @app.get("/map")
 def map_page():
     return Response(_MAP_PAGE, mimetype="text/html")
+
+
+_MAP_SETTINGS_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Map Settings — Smart Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; max-width: 920px; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 1.5rem; color: #1a2535; letter-spacing: -.02em; }
+    .card { background: #fff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); margin-bottom: 1.5rem; }
+    .section-title { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .75rem; }
+    #map { height: 520px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); margin-bottom: 1rem; display: none; }
+    #map-placeholder { height: 520px; border-radius: 12px; background: #e8eef4; display: flex; align-items: center; justify-content: center; color: #7a90a8; font-size: .95rem; margin-bottom: 1rem; text-align: center; padding: 1.5rem; }
+    .controls { display: none; gap: .75rem; margin-bottom: 1.5rem; flex-wrap: wrap; align-items: center; }
+    .btn { padding: .5rem 1.1rem; border-radius: 8px; font-size: .88rem; font-weight: 600; border: none; cursor: pointer; transition: background .15s; }
+    .btn-primary { background: #2e7dd4; color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #2568b8; }
+    .btn-primary:disabled { background: #aabbc8; cursor: default; }
+    .btn-secondary { background: #f0f4f8; color: #1a2535; border: 1px solid #dde4ec; }
+    .btn-secondary:hover { background: #e4eaf2; }
+    .key-row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+    .key-input { flex: 1; min-width: 260px; padding: .5rem .85rem; border-radius: 8px; border: 1px solid #dde4ec; font-size: .88rem; color: #1a2535; background: #fff; outline: none; font-family: monospace; }
+    .key-input:focus { border-color: #2e7dd4; box-shadow: 0 0 0 3px rgba(46,125,212,.15); }
+    .saved-badge { font-size: .75rem; font-weight: 600; color: #2a9d6e; background: #e8fdf0; padding: .2rem .55rem; border-radius: 20px; }
+    #_net_err { display: none; position: fixed; top: 1rem; left: 50%; transform: translateX(-50%); background: #fde8e8; color: #c0392b; border-radius: 8px; padding: .6rem 1.2rem; font-size: .85rem; font-weight: 500; z-index: 9999; box-shadow: 0 2px 8px rgba(0,0,0,.15); white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <div id="_net_err"></div>
+  <h1>Map Settings &nbsp;<a href="/map" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">&larr; Back to Map</a></h1>
+
+  <div class="card">
+    <div class="section-title">Google Maps API Key</div>
+    <div class="key-row">
+      <input type="text" id="api-key-input" class="key-input" placeholder="AIza…" autocomplete="off" spellcheck="false">
+      <button class="btn btn-primary" onclick="saveApiKey()">Save Key</button>
+    </div>
+  </div>
+
+  <div id="map-placeholder">Enter your Google Maps API key above to load the map</div>
+  <div id="map"></div>
+
+  <div class="controls" id="map-controls">
+    <button class="btn btn-secondary" id="draw-btn" onclick="startDrawing()">Draw Property Boundary</button>
+    <button class="btn btn-primary" id="finish-btn" onclick="finishDrawing()" disabled style="display:none">Finish Drawing</button>
+    <button class="btn btn-secondary" id="cancel-draw-btn" onclick="cancelDrawing()" style="display:none">Cancel</button>
+    <button class="btn btn-primary" id="save-polygon-btn" onclick="savePolygon()" disabled>Save Polygon</button>
+    <button class="btn btn-secondary" id="clear-btn" onclick="clearPolygon()" style="display:none">Clear</button>
+    <span id="polygon-status"></span>
+  </div>
+
+<script>
+let map, savedPolygon, pendingPolygon;
+let drawVertices = [], drawPolyline = null, clickListener = null;
+
+function showNetworkError(msg) {
+  const el = document.getElementById('_net_err');
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.style.display = 'none'; }, 6000);
+}
+
+async function fetchJSON(url, opts) {
+  try {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+    return await r.json();
+  } catch(e) {
+    showNetworkError(e.message);
+    throw e;
+  }
+}
+
+async function init() {
+  let config;
+  try { config = await fetchJSON('/api/map-config'); } catch(e) { return; }
+
+  if (config.api_key) {
+    document.getElementById('api-key-input').value = config.api_key;
+    document.getElementById('map-placeholder').style.display = 'none';
+    document.getElementById('map').style.display = 'block';
+
+    try {
+      await loadMapsAPI(config.api_key);
+    } catch(e) {
+      document.getElementById('map').style.display = 'none';
+      document.getElementById('map-placeholder').textContent = 'Failed to load Google Maps. Check that your API key has the Maps JavaScript API enabled.';
+      document.getElementById('map-placeholder').style.display = 'flex';
+      return;
+    }
+
+    initMap();
+    document.getElementById('map-controls').style.display = 'flex';
+
+    if (config.polygon && config.polygon.length > 0) {
+      drawSavedPolygon(config.polygon);
+      document.getElementById('clear-btn').style.display = '';
+      document.getElementById('polygon-status').innerHTML = '<span class="saved-badge">Polygon saved</span>';
+    }
+  }
+}
+
+function loadMapsAPI(apiKey) {
+  return new Promise((resolve, reject) => {
+    if (window.google && window.google.maps) { resolve(); return; }
+    window._mapsLoaded = resolve;
+    const s = document.createElement('script');
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(apiKey) + '&loading=async&callback=_mapsLoaded';
+    s.async = true;
+    s.defer = true;
+    s.onerror = () => reject(new Error('Script load error — check your API key'));
+    document.head.appendChild(s);
+  });
+}
+
+function initMap() {
+  map = new google.maps.Map(document.getElementById('map'), {
+    center: { lat: 37.0902, lng: -95.7129 },
+    zoom: 4,
+    mapTypeId: 'satellite',
+    tilt: 0,
+  });
+}
+
+function drawSavedPolygon(coords) {
+  if (savedPolygon) savedPolygon.setMap(null);
+  const path = coords.map(c => ({ lat: c[0], lng: c[1] }));
+  savedPolygon = new google.maps.Polygon({
+    paths: path,
+    fillColor: '#2e7dd4',
+    fillOpacity: 0.25,
+    strokeColor: '#2e7dd4',
+    strokeWeight: 2,
+    editable: false,
+    map,
+  });
+  const bounds = new google.maps.LatLngBounds();
+  path.forEach(p => bounds.extend(p));
+  map.fitBounds(bounds, { padding: 60 });
+}
+
+function startDrawing() {
+  if (pendingPolygon) { pendingPolygon.setMap(null); pendingPolygon = null; }
+  if (drawPolyline)   { drawPolyline.setMap(null);   drawPolyline = null; }
+  drawVertices = [];
+  if (clickListener) google.maps.event.removeListener(clickListener);
+
+  map.setOptions({ draggableCursor: 'crosshair' });
+
+  clickListener = map.addListener('click', (e) => {
+    drawVertices.push(e.latLng);
+    if (drawPolyline) drawPolyline.setMap(null);
+    drawPolyline = new google.maps.Polyline({
+      path: drawVertices.length > 2 ? [...drawVertices, drawVertices[0]] : drawVertices,
+      strokeColor: '#2e7dd4',
+      strokeWeight: 2,
+      map,
+    });
+    document.getElementById('finish-btn').disabled = drawVertices.length < 3;
+  });
+
+  document.getElementById('draw-btn').style.display = 'none';
+  document.getElementById('finish-btn').style.display = '';
+  document.getElementById('finish-btn').disabled = true;
+  document.getElementById('cancel-draw-btn').style.display = '';
+  document.getElementById('save-polygon-btn').disabled = true;
+}
+
+function finishDrawing() {
+  if (drawVertices.length < 3) return;
+  google.maps.event.removeListener(clickListener);
+  clickListener = null;
+  if (drawPolyline) { drawPolyline.setMap(null); drawPolyline = null; }
+  map.setOptions({ draggableCursor: '' });
+
+  pendingPolygon = new google.maps.Polygon({
+    paths: drawVertices,
+    fillColor: '#2e7dd4',
+    fillOpacity: 0.25,
+    strokeColor: '#2e7dd4',
+    strokeWeight: 2,
+    editable: true,
+    map,
+  });
+  drawVertices = [];
+
+  document.getElementById('draw-btn').style.display = '';
+  document.getElementById('draw-btn').textContent = 'Redraw';
+  document.getElementById('finish-btn').style.display = 'none';
+  document.getElementById('cancel-draw-btn').style.display = 'none';
+  document.getElementById('save-polygon-btn').disabled = false;
+}
+
+function cancelDrawing() {
+  if (clickListener) { google.maps.event.removeListener(clickListener); clickListener = null; }
+  if (drawPolyline)  { drawPolyline.setMap(null); drawPolyline = null; }
+  drawVertices = [];
+  map.setOptions({ draggableCursor: '' });
+
+  document.getElementById('draw-btn').style.display = '';
+  document.getElementById('finish-btn').style.display = 'none';
+  document.getElementById('cancel-draw-btn').style.display = 'none';
+}
+
+function clearPolygon() {
+  if (savedPolygon)   { savedPolygon.setMap(null);   savedPolygon = null; }
+  if (pendingPolygon) { pendingPolygon.setMap(null); pendingPolygon = null; }
+  if (drawPolyline)   { drawPolyline.setMap(null);   drawPolyline = null; }
+  if (clickListener)  { google.maps.event.removeListener(clickListener); clickListener = null; }
+  drawVertices = [];
+  map.setOptions({ draggableCursor: '' });
+
+  document.getElementById('save-polygon-btn').disabled = true;
+  document.getElementById('clear-btn').style.display = 'none';
+  document.getElementById('draw-btn').style.display = '';
+  document.getElementById('draw-btn').textContent = 'Draw Property Boundary';
+  document.getElementById('finish-btn').style.display = 'none';
+  document.getElementById('cancel-draw-btn').style.display = 'none';
+  document.getElementById('polygon-status').innerHTML = '';
+}
+
+function computeCentroid(coords) {
+  const lat = coords.reduce((s, c) => s + c[0], 0) / coords.length;
+  const lon = coords.reduce((s, c) => s + c[1], 0) / coords.length;
+  return [lat, lon];
+}
+
+async function savePolygon() {
+  if (!pendingPolygon) return;
+  const path = pendingPolygon.getPath().getArray();
+  const coords = path.map(p => [p.lat(), p.lng()]);
+  const [center_lat, center_lon] = computeCentroid(coords);
+  const btn = document.getElementById('save-polygon-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    await fetchJSON('/api/map-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ polygon: coords, center_lat, center_lon }),
+    });
+    if (savedPolygon) savedPolygon.setMap(null);
+    pendingPolygon.setMap(null);
+    pendingPolygon = null;
+    drawSavedPolygon(coords);
+    document.getElementById('clear-btn').style.display = '';
+    document.getElementById('draw-btn').textContent = 'Redraw';
+    document.getElementById('polygon-status').innerHTML = '<span class="saved-badge">Polygon saved</span>';
+  } catch(e) {
+    // error already shown via fetchJSON
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save Polygon';
+  }
+}
+
+async function saveApiKey() {
+  const key = document.getElementById('api-key-input').value.trim();
+  if (!key) return;
+  try {
+    await fetchJSON('/api/map-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: key }),
+    });
+    await init();
+  } catch(e) {
+    // error already shown via fetchJSON
+  }
+}
+
+init();
+</script>
+</body>
+</html>"""
+
+
+@app.get("/map-settings")
+def map_settings_page():
+    return Response(_MAP_SETTINGS_PAGE, mimetype="text/html")
 
 
 def run(db_path: str, host: str, port: int, debug: bool) -> None:
