@@ -4165,13 +4165,19 @@ function renderStatsTable() {
   const showRate = rate > 0;
   const thead = document.getElementById('stats-thead');
   const tbody = document.getElementById('stats-tbody');
-  const costCols = showRate ? '<th>Cost/hr (on)</th><th>Cost/hr (off)</th>' : '';
+  const costCols = showRate ? '<th>Cost/hr (on)</th><th>Cost/hr (off)</th><th>Total Cost</th>' : '';
   thead.innerHTML = `<th>Device</th><th>On Time</th><th>Off Time</th><th>Avg W (on)</th><th>Avg W (off)</th>${costCols}`;
   tbody.innerHTML = '';
   for (const row of lastStatsRaw) {
     const costOnStr  = showRate && row.avg_watts_on  != null ? '$' + (row.avg_watts_on  / 1000 * rate).toFixed(4) : '';
     const costOffStr = showRate && row.avg_watts_off != null ? '$' + (row.avg_watts_off / 1000 * rate).toFixed(4) : '';
-    const costCells = showRate ? `<td class="on-cell">${costOnStr || '—'}</td><td class="off-cell">${costOffStr || '—'}</td>` : '';
+    const totalCost = showRate
+      ? ((row.on_hours  != null && row.avg_watts_on  != null ? row.on_hours  * row.avg_watts_on  : 0)
+       + (row.off_hours != null && row.avg_watts_off != null ? row.off_hours * row.avg_watts_off : 0))
+        / 1000 * rate
+      : null;
+    const totalCostStr = totalCost != null ? '$' + totalCost.toFixed(2) : '—';
+    const costCells = showRate ? `<td class="on-cell">${costOnStr || '—'}</td><td class="off-cell">${costOffStr || '—'}</td><td><strong>${totalCostStr}</strong></td>` : '';
     const dot = colorMap[row.label] ? `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${colorMap[row.label]};margin-right:5px;vertical-align:middle;"></span>` : '';
     tbody.innerHTML += `<tr>
       <td class="device-cell">${dot}${row.label}</td>
