@@ -10120,7 +10120,7 @@ function startMeasureDistance() {
   document.getElementById('meas-units').style.display = '';
   const res = document.getElementById('measure-result');
   res.textContent = 'Click on the map to start measuring distance';
-  res.style.display = '';
+  res.style.display = 'inline';
   measListener = map.addListener('click', (e) => {
     if (!e.latLng) return;
     measVertices.push(e.latLng);
@@ -10140,7 +10140,7 @@ function startMeasureArea() {
   document.getElementById('meas-units').style.display = '';
   const res = document.getElementById('measure-result');
   res.textContent = 'Click on the map to start measuring area (need 3+ points)';
-  res.style.display = '';
+  res.style.display = 'inline';
   measListener = map.addListener('click', (e) => {
     if (!e.latLng) return;
     measVertices.push(e.latLng);
@@ -10196,7 +10196,8 @@ function updateMeasureDisplay() {
       }
     }
   } catch(err) {
-    showNetworkError('Measure error: ' + err.message);
+    res.textContent = 'Error: ' + err.message;
+    res.style.display = 'inline';
   }
 }
 
