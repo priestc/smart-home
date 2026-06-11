@@ -10000,7 +10000,10 @@ async function init() {
 
     try {
       await loadMapsAPI(config.api_key);
-      await google.maps.importLibrary('geometry');
+      await Promise.all([
+        google.maps.importLibrary('geometry'),
+        google.maps.importLibrary('marker'),
+      ]);
     } catch(e) {
       document.getElementById('map').style.display = 'none';
       document.getElementById('map-placeholder').innerHTML = 'Failed to load Google Maps. <a href="/map-settings">Check your API key</a>.';
@@ -10040,6 +10043,7 @@ function initMap() {
     mapTypeId: 'satellite',
     tilt: 0,
     clickableIcons: false,
+    mapId: 'DEMO_MAP_ID',
   });
 }
 
@@ -10072,20 +10076,19 @@ async function loadSunTimes() {
 }
 
 function addMeasureMarker(latLng) {
-  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">' +
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('width', '22');
+  svg.setAttribute('height', '22');
+  svg.setAttribute('viewBox', '0 0 22 22');
+  svg.style.display = 'block';
+  svg.innerHTML =
     '<line x1="11" y1="1" x2="11" y2="21" stroke="#e05c2a" stroke-width="2"/>' +
     '<line x1="1" y1="11" x2="21" y2="11" stroke="#e05c2a" stroke-width="2"/>' +
-    '<circle cx="11" cy="11" r="3.5" fill="#e05c2a" stroke="white" stroke-width="1.5"/>' +
-    '</svg>';
-  const marker = new google.maps.Marker({
+    '<circle cx="11" cy="11" r="3.5" fill="#e05c2a" stroke="white" stroke-width="1.5"/>';
+  const marker = new google.maps.marker.AdvancedMarkerElement({
     position: latLng,
     map: map,
-    icon: {
-      url: 'data:image/svg+xml,' + encodeURIComponent(svg),
-      scaledSize: new google.maps.Size(22, 22),
-      anchor: new google.maps.Point(11, 11),
-    },
-    clickable: false,
+    content: svg,
   });
   measMarkers.push(marker);
 }
@@ -10094,7 +10097,7 @@ function clearMeasure() {
   if (measPolyline)  { measPolyline.setMap(null);  measPolyline = null; }
   if (measPolygon)   { measPolygon.setMap(null);   measPolygon = null; }
   if (measListener)  { google.maps.event.removeListener(measListener); measListener = null; }
-  measMarkers.forEach(m => m.setMap(null));
+  measMarkers.forEach(m => { m.map = null; });
   measMarkers = [];
   measVertices = [];
   measMode = null;
