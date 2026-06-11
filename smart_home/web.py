@@ -10081,14 +10081,27 @@ function addMeasureMarker(latLng) {
   svg.setAttribute('height', '22');
   svg.setAttribute('viewBox', '0 0 22 22');
   svg.style.display = 'block';
+  svg.style.cursor = 'grab';
   svg.innerHTML =
     '<line x1="11" y1="1" x2="11" y2="21" stroke="#e05c2a" stroke-width="2"/>' +
     '<line x1="1" y1="11" x2="21" y2="11" stroke="#e05c2a" stroke-width="2"/>' +
     '<circle cx="11" cy="11" r="3.5" fill="#e05c2a" stroke="white" stroke-width="1.5"/>';
+  const idx = measMarkers.length;
   const marker = new google.maps.marker.AdvancedMarkerElement({
     position: latLng,
     map: map,
     content: svg,
+    gmpDraggable: true,
+  });
+  marker.addListener('drag', (e) => {
+    if (!e.latLng) return;
+    measVertices[idx] = e.latLng;
+    updateMeasureDisplay();
+  });
+  marker.addListener('dragend', (e) => {
+    if (!e.latLng) return;
+    measVertices[idx] = e.latLng;
+    updateMeasureDisplay();
   });
   measMarkers.push(marker);
 }
