@@ -10082,6 +10082,7 @@ function addMeasureMarker(latLng) {
   svg.setAttribute('viewBox', '0 0 22 22');
   svg.style.display = 'block';
   svg.style.cursor = 'grab';
+  svg.style.transform = 'translateY(50%)';
   svg.innerHTML =
     '<line x1="11" y1="1" x2="11" y2="21" stroke="#e05c2a" stroke-width="2"/>' +
     '<line x1="1" y1="11" x2="21" y2="11" stroke="#e05c2a" stroke-width="2"/>' +
