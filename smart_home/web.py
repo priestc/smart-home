@@ -1383,11 +1383,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -1604,11 +1610,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -1871,11 +1883,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -2022,11 +2040,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -2463,11 +2487,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -2971,7 +3001,9 @@ async function fetchJSONBytes(url) {
     const cl = r.headers.get('content-length');
     const text = await r.text();
     const bytes = cl !== null ? parseInt(cl) : new TextEncoder().encode(text).length;
-    return { data: JSON.parse(text), bytes };
+    const data = JSON.parse(text);
+    clearNetworkError();
+    return { data, bytes };
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -3149,11 +3181,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url) {
   try {
     const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -3166,7 +3204,9 @@ async function fetchJSONBytes(url) {
     const cl = r.headers.get('content-length');
     const text = await r.text();
     const bytes = cl !== null ? parseInt(cl) : new TextEncoder().encode(text).length;
-    return { data: JSON.parse(text), bytes };
+    const data = JSON.parse(text);
+    clearNetworkError();
+    return { data, bytes };
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -3482,11 +3522,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url) {
   try {
     const r = await fetch(url);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) { showNetworkError(e.message); throw e; }
 }
 async function fetchJSONBytes(url) {
@@ -3496,7 +3542,9 @@ async function fetchJSONBytes(url) {
     const cl = r.headers.get('content-length');
     const text = await r.text();
     const bytes = cl !== null ? parseInt(cl) : new TextEncoder().encode(text).length;
-    return { data: JSON.parse(text), bytes };
+    const data = JSON.parse(text);
+    clearNetworkError();
+    return { data, bytes };
   } catch(e) { showNetworkError(e.message); throw e; }
 }
 const COLORS = ["#e07820","#2e7dd4","#2a9d6e","#9b4dca","#c0392b","#16a085","#d35400","#8e44ad","#27ae60","#2980b9","#e74c3c","#f39c12"];
@@ -3840,11 +3888,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -4360,11 +4414,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -4666,11 +4726,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -4960,11 +5026,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -5232,11 +5304,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -5913,11 +5991,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -6116,11 +6200,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -6518,11 +6608,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -6792,11 +6888,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -7272,11 +7374,17 @@ function showNetworkError(msg) {
   }
   el.textContent = '\u26a0 Network error: ' + msg;
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -9949,12 +10057,18 @@ function showNetworkError(msg) {
   clearTimeout(el._t);
   el._t = setTimeout(() => { el.style.display = 'none'; }, 6000);
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.style.display = 'none';
+}
 
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
@@ -10329,12 +10443,18 @@ function showNetworkError(msg) {
   clearTimeout(el._t);
   el._t = setTimeout(() => { el.style.display = 'none'; }, 6000);
 }
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.style.display = 'none';
+}
 
 async function fetchJSON(url, opts) {
   try {
     const r = await fetch(url, opts);
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    return await r.json();
+    const data = await r.json();
+    clearNetworkError();
+    return data;
   } catch(e) {
     showNetworkError(e.message);
     throw e;
