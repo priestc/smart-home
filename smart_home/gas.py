@@ -32,6 +32,9 @@ DAILY_FETCH_HOUR = 7                # first daily fetch happens at/after this lo
 MAX_FAILED_RUNS_PER_DAY = 3
 
 AREA_SETTINGS_KEY = "gas_area"
+# Separate key for server-side Places calls: the Maps key used by the browser
+# is typically locked to HTTP referrers, which server requests don't send.
+SERVER_KEY_SETTINGS_KEY = "google_places_server_key"
 FUEL_TYPES = ("REGULAR_UNLEADED", "MIDGRADE", "PREMIUM", "DIESEL")
 
 _fetch_lock = threading.Lock()
@@ -44,8 +47,22 @@ class GasFetchError(Exception):
 # ── Settings ────────────────────────────────────────────────────────────────
 
 def get_api_key(conn: sqlite3.Connection) -> str | None:
+    """Browser Maps JavaScript API key."""
     row = conn.execute("SELECT value FROM settings WHERE key='google_maps_api_key'").fetchone()
     return row[0] if row and row[0] else None
+
+
+def get_server_api_key(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (SERVER_KEY_SETTINGS_KEY,)).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def set_server_api_key(conn: sqlite3.Connection, key: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+        (SERVER_KEY_SETTINGS_KEY, key or None),
+    )
+    conn.commit()
 
 
 def get_area(conn: sqlite3.Connection) -> dict | None:
@@ -149,7 +166,10 @@ def _search_tile(client: httpx.Client, api_key: str, tile, budget: list[int]) ->
                 msg = resp.json().get("error", {}).get("message") or resp.text
             except ValueError:
                 msg = resp.text
-            raise GasFetchError(f"Places API HTTP {resp.status_code}: {msg[:300]}")
+            if "referer" in msg.lower():
+                msg += (" — this key is restricted to websites; set a server API key"
+                        " (IP-restricted or API-restricted to Places API (New)) on the Gas page")
+            raise GasFetchError(f"Places API HTTP {resp.status_code}: {msg[:400]}")
         data = resp.json()
         places.extend(data.get("places") or [])
         page_token = data.get("nextPageToken")
@@ -222,9 +242,9 @@ def run_fetch(db_path: str) -> dict:
         fetch_date = ts[:10]
         n_requests = None
         try:
-            api_key = get_api_key(conn)
+            api_key = get_server_api_key(conn)
             if not api_key:
-                raise GasFetchError("No Google Maps API key configured (set one on /map-settings)")
+                raise GasFetchError("No server API key configured for Places (set one on the Gas page)")
             area = get_area(conn)
             if not area:
                 raise GasFetchError("No gas area drawn yet")
@@ -270,7 +290,7 @@ def daily_fetch_due(conn: sqlite3.Connection, now: datetime.datetime | None = No
     now = now or datetime.datetime.now()
     if now.hour < DAILY_FETCH_HOUR:
         return False
-    if not get_area(conn) or not get_api_key(conn):
+    if not get_area(conn) or not get_server_api_key(conn):
         return False
     today = now.strftime("%Y-%m-%d")
     ok, failed = conn.execute(

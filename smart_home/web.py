@@ -10699,6 +10699,7 @@ def api_gas_config():
         ).fetchone()
         return jsonify({
             'api_key': _gas.get_api_key(conn),
+            'has_server_key': _gas.get_server_api_key(conn) is not None,
             'area': _gas.get_area(conn),
             'home': {'lat': home['center_lat'], 'lon': home['center_lon']} if home and home['center_lat'] is not None else None,
             'fuel_types': list(_gas.FUEL_TYPES),
@@ -10723,6 +10724,18 @@ def api_gas_area_save():
     with _conn() as conn:
         area = _gas.set_area(conn, lat, lon, radius_m)
     return jsonify({'ok': True, 'area': area})
+
+
+@app.post("/api/gas/server-key")
+def api_gas_server_key_save():
+    from smart_home import gas as _gas
+    data = request.get_json(silent=True) or {}
+    key = (data.get('api_key') or '').strip()
+    if not key:
+        return jsonify({'error': 'api_key is required'}), 400
+    with _conn() as conn:
+        _gas.set_server_api_key(conn, key)
+    return jsonify({'ok': True})
 
 
 @app.post("/api/gas/fetch")
@@ -10868,7 +10881,19 @@ _GAS_PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
   <div id="_net_err"></div>
-  <h1>Gas Prices &nbsp;<a href="/">&larr; Dashboard</a>&nbsp;<a href="/map" style="color:#7a90a8">Map</a></h1>
+  <h1>Gas Prices &nbsp;<a href="/">&larr; Dashboard</a>&nbsp;<a href="/map" style="color:#7a90a8">Map</a>&nbsp;<a href="#" style="color:#7a90a8" onclick="toggleKeyCard(); return false">Server Key &#9881;</a></h1>
+
+  <div class="card" id="key-card" style="display:none">
+    <div class="section-title">Places API Server Key</div>
+    <div class="status" style="margin-bottom:.75rem">Daily price fetches run on the server, which sends no HTTP referrer, so a website-restricted Maps key is rejected.
+      Create a separate key in Google Cloud Console restricted to <b>Places API (New)</b> (and optionally to this server's public IP), and paste it here.
+      <span id="key-state"></span></div>
+    <div style="display:flex;gap:.6rem;flex-wrap:wrap">
+      <input type="password" id="server-key" placeholder="AIza…" autocomplete="off" spellcheck="false"
+        style="flex:1;min-width:260px;padding:.5rem .85rem;border-radius:8px;border:1px solid #dde4ec;font-family:monospace;font-size:.88rem">
+      <button class="btn btn-primary" onclick="saveServerKey()">Save Key</button>
+    </div>
+  </div>
 
   <div class="toolbar">
     <select id="fuel" onchange="onFuelChange()"></select>
@@ -11148,6 +11173,29 @@ async function saveArea() {
   }
 }
 
+// ── Server key ─────────────────────────────────────────────────────────────
+
+function toggleKeyCard(show) {
+  const el = document.getElementById('key-card');
+  el.style.display = (show ?? el.style.display === 'none') ? '' : 'none';
+  document.getElementById('key-state').textContent = config.has_server_key ? 'A server key is saved; saving replaces it.' : 'No server key saved yet.';
+}
+
+async function saveServerKey() {
+  const input = document.getElementById('server-key');
+  const key = input.value.trim();
+  if (!key) { showNetworkError('Enter a key first'); return; }
+  try {
+    await fetchJSON('/api/gas/server-key', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ api_key: key }),
+    });
+  } catch (e) { return; }
+  input.value = '';
+  await refreshConfig();
+  toggleKeyCard(false);
+  document.getElementById('status').textContent = 'Server key saved. Click "Fetch Prices Now" to try it.';
+}
+
 // ── Fetch now ──────────────────────────────────────────────────────────────
 
 async function fetchNow() {
@@ -11295,6 +11343,7 @@ async function init() {
   });
 
   loadData();
+  if (!config.has_server_key) toggleKeyCard(true);
 
   if (!config.api_key) {
     document.getElementById('map-placeholder').innerHTML = 'No Google Maps API key configured. <a href="/map-settings">Go to Map Settings</a> to set one up.';
