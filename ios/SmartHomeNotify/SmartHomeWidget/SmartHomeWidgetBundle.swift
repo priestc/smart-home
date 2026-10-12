@@ -12,6 +12,7 @@ import SwiftUI
 struct SmartHomeWidgetBundle: WidgetBundle {
     var body: some Widget {
         SmartHomeWidget()
+        GasPriceWidget()
         SmartHomeWidgetControl()
         SmartHomeWidgetLiveActivity()
     }

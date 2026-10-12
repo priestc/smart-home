@@ -5223,6 +5223,9 @@ def index():
     .card .ts    { font-size: 0.72rem; color: #aabbc8; margin-top: .5rem; }
     .card.offline { opacity: .65; }
     .card.offline .temp { font-size: 1.4rem; color: #aabbc8; }
+    .gas-card { text-decoration: none; color: inherit; display: block; }
+    .gas-card .gas-price { font-size: 2.4rem; font-weight: 700; margin: .2rem 0 .1rem; line-height: 1; font-variant-numeric: tabular-nums; }
+    .gas-card .gas-cmp { font-size: .9rem; font-weight: 600; }
     .sun-time { font-size: 2.4rem; font-weight: 700; margin: .2rem 0 .1rem; line-height: 1; font-variant-numeric: tabular-nums; }
     .section-title { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .75rem; }
     .events-list { display: flex; flex-direction: column; gap: .4rem; margin-bottom: 2rem; }
@@ -5267,6 +5270,7 @@ def index():
     <div class="cards" id="cards" style="margin-bottom:0;flex-wrap:wrap;display:flex;gap:1rem"></div>
     <div id="sun-widget"></div>
     <div class="garage-cards" id="garage-cards" style="margin-bottom:0"></div>
+    <div id="gas-widget"></div>
   </div>
   <div class="pool-cards"    id="pool-cards"    style="display:none"></div>
 
@@ -5508,11 +5512,40 @@ async function loadSunTimes() {
     setInterval(tickSunWidget, 1000);
   } catch(e) { /* property not configured — skip sun widget */ }
 }
+async function loadGas() {
+  const el = document.getElementById('gas-widget');
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let r, data;
+  try {
+    r = await fetch('/api/gas/summary?fuel=REGULAR_UNLEADED');
+    data = await r.json();
+  } catch (e) {
+    showError('gas prices');
+    return;
+  }
+  if (!r.ok) {
+    // 404 = gas area or prices not set up yet; anything else is a real failure
+    el.innerHTML = `<a class="card gas-card" href="/gas"><div class="label">Gas Prices</div>
+      <div class="ts" style="font-size:.85rem;color:${r.status === 404 ? '#7a90a8' : '#c0392b'}">${esc(data.error || 'HTTP ' + r.status)}</div></a>`;
+    return;
+  }
+  const color = data.trend === 'cheaper' ? '#2a9d6e' : data.trend === 'pricier' ? '#c0392b' : '#7a90a8';
+  const arrow = data.trend === 'cheaper' ? '&#9660;' : data.trend === 'pricier' ? '&#9650;' : '&#9644;';
+  const days = data.avg_30d_days < 30 ? ` (${data.avg_30d_days}d so far)` : '';
+  const warn = data.last_run_error ? `<div class="ts" style="color:#c0392b">&#9888; ${esc(data.last_run_error)}</div>` : '';
+  el.innerHTML = `<a class="card gas-card" href="/gas" title="Average ${data.fuel_label} price across ${data.n_stations} stations in your gas area">
+    <div class="label">Gas &middot; ${data.fuel_label} avg</div>
+    <div class="gas-price" style="color:${color}">$${data.current_avg.toFixed(2)}</div>
+    <div class="gas-cmp" style="color:${color}">${arrow} $${Math.abs(data.diff).toFixed(2)} vs 30-day avg $${data.avg_30d.toFixed(2)}${days}</div>
+    <div class="ts">Cheapest $${data.current_min.toFixed(2)} &middot; ${esc(data.cheapest_name)}</div>${warn}</a>`;
+}
 loadCurrent();
 loadEvents();
 loadGarage();
 loadPool();
 loadSunTimes();
+loadGas();
+setInterval(loadGas, 15 * 60 * 1000);
 setInterval(loadCurrent, 30000);
 setInterval(loadEvents, 60000);
 setInterval(loadGarage, 15000);
@@ -10808,28 +10841,76 @@ def api_gas_station_history(place_id):
     return jsonify({'station': dict(st), 'history': history})
 
 
-@app.get("/api/gas/area-history")
-def api_gas_area_history():
+def _gas_area_daily(conn, fuel: str, days: int) -> list[dict]:
     """Per-day min / average / max price across stations currently inside the gas area."""
     from smart_home import gas as _gas
+    area = _gas.get_area(conn)
+    rows = conn.execute("""
+        SELECT p.fetch_date, p.price, s.name, s.lat, s.lon FROM gas_prices p
+        JOIN gas_stations s ON s.place_id = p.place_id
+        WHERE p.fuel_type = ? AND p.fetch_date >= date('now', 'localtime', ?)
+        ORDER BY p.fetch_date
+    """, (fuel, f'-{days} days')).fetchall()
+    by_day: dict[str, list] = {}
+    for r in rows:
+        if _gas_in_area(area, r['lat'], r['lon']):
+            by_day.setdefault(r['fetch_date'], []).append((r['price'], r['name']))
+    out = []
+    for d, v in by_day.items():
+        prices = [p for p, _ in v]
+        cheapest = min(v)
+        out.append({'date': d, 'min': min(prices), 'avg': round(sum(prices) / len(prices), 3),
+                    'max': max(prices), 'n': len(prices), 'cheapest_name': cheapest[1]})
+    return out
+
+
+@app.get("/api/gas/area-history")
+def api_gas_area_history():
     fuel = _gas_fuel_arg()
     days = min(max(request.args.get('days', 365, type=int), 1), 3650)
     with _conn() as conn:
+        daily = _gas_area_daily(conn, fuel, days)
+    return jsonify({'fuel': fuel, 'days': [{k: d[k] for k in ('date', 'min', 'avg', 'max', 'n')} for d in daily]})
+
+
+@app.get("/api/gas/summary")
+def api_gas_summary():
+    """Latest area-average price vs. the 30-day rolling average of daily area averages.
+
+    Used by the dashboard card and the iOS widget.
+    """
+    from smart_home import gas as _gas
+    fuel = _gas_fuel_arg()
+    with _conn() as conn:
         area = _gas.get_area(conn)
-        rows = conn.execute("""
-            SELECT p.fetch_date, p.price, s.lat, s.lon FROM gas_prices p
-            JOIN gas_stations s ON s.place_id = p.place_id
-            WHERE p.fuel_type = ? AND p.fetch_date >= date('now', 'localtime', ?)
-            ORDER BY p.fetch_date
-        """, (fuel, f'-{days} days')).fetchall()
-    by_day: dict[str, list[float]] = {}
-    for r in rows:
-        if _gas_in_area(area, r['lat'], r['lon']):
-            by_day.setdefault(r['fetch_date'], []).append(r['price'])
-    return jsonify({'fuel': fuel, 'days': [
-        {'date': d, 'min': min(v), 'avg': round(sum(v) / len(v), 3), 'max': max(v), 'n': len(v)}
-        for d, v in by_day.items()
-    ]})
+        last_run = conn.execute(
+            "SELECT ts, ok, error FROM gas_fetch_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        daily = _gas_area_daily(conn, fuel, 40)
+    if not area:
+        return jsonify({'error': 'No gas area drawn yet'}), 404
+    if not daily:
+        return jsonify({'error': 'No gas prices fetched yet'}), 404
+    latest = daily[-1]
+    cutoff = (datetime.date.fromisoformat(latest['date']) - datetime.timedelta(days=29)).isoformat()
+    window = [d['avg'] for d in daily if d['date'] >= cutoff]
+    avg_30d = round(sum(window) / len(window), 3)
+    diff = round(latest['avg'] - avg_30d, 3)
+    return jsonify({
+        'fuel': fuel,
+        'fuel_label': {'REGULAR_UNLEADED': 'Regular', 'MIDGRADE': 'Midgrade',
+                       'PREMIUM': 'Premium', 'DIESEL': 'Diesel'}[fuel],
+        'date': latest['date'],
+        'current_avg': latest['avg'],
+        'current_min': latest['min'],
+        'cheapest_name': latest['cheapest_name'],
+        'n_stations': latest['n'],
+        'avg_30d': avg_30d,
+        'avg_30d_days': len(window),
+        'diff': diff,
+        'trend': 'cheaper' if diff <= -0.005 else 'pricier' if diff >= 0.005 else 'same',
+        'last_run_error': last_run['error'] if last_run and last_run['error'] else None,
+    })
 
 
 _GAS_PAGE = r"""<!DOCTYPE html>
