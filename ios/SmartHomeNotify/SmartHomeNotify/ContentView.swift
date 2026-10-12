@@ -12,6 +12,10 @@ struct ContentView: View {
                 .tabItem {
                     Label("Garage Doors", systemImage: "door.garage.closed")
                 }
+            GasPricesView()
+                .tabItem {
+                    Label("Gas", systemImage: "fuelpump")
+                }
             SettingsView()
                 .tabItem {
                     Label("Settings", systemImage: "gear")

@@ -5261,7 +5261,7 @@ def index():
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a>&nbsp;<a href="/devices" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Devices &#9881;</a>&nbsp;<a href="/zones" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Zones</a>&nbsp;<a href="/map" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Map</a></h1>
+  <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a>&nbsp;<a href="/devices" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Devices &#9881;</a>&nbsp;<a href="/zones" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Zones</a>&nbsp;<a href="/map" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Map</a>&nbsp;<a href="/gas" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Gas</a></h1>
 
   <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem">
     <div class="cards" id="cards" style="margin-bottom:0;flex-wrap:wrap;display:flex;gap:1rem"></div>
@@ -10668,6 +10668,664 @@ init();
 @app.get("/map-settings")
 def map_settings_page():
     return Response(_MAP_SETTINGS_PAGE, mimetype="text/html")
+
+
+# ── Gas prices ──────────────────────────────────────────────────────────────
+
+def _gas_fuel_arg() -> str:
+    from smart_home import gas as _gas
+    fuel = request.args.get('fuel', 'REGULAR_UNLEADED')
+    return fuel if fuel in _gas.FUEL_TYPES else 'REGULAR_UNLEADED'
+
+
+def _gas_in_area(area: dict | None, lat: float, lon: float) -> bool:
+    from smart_home import gas as _gas
+    return area is not None and _gas.haversine_m(area['lat'], area['lon'], lat, lon) <= area['radius_m']
+
+
+@app.get("/api/gas/config")
+def api_gas_config():
+    from smart_home import gas as _gas
+    with _conn() as conn:
+        home = conn.execute(
+            "SELECT center_lat, center_lon FROM property_polygon ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        runs = conn.execute(
+            "SELECT ts, fetch_date, ok, n_requests, n_stations, n_prices, error "
+            "FROM gas_fetch_runs ORDER BY id DESC LIMIT 1"
+        ).fetchall()
+        last_ok = conn.execute(
+            "SELECT ts, n_stations, n_prices FROM gas_fetch_runs WHERE ok=1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return jsonify({
+            'api_key': _gas.get_api_key(conn),
+            'area': _gas.get_area(conn),
+            'home': {'lat': home['center_lat'], 'lon': home['center_lon']} if home and home['center_lat'] is not None else None,
+            'fuel_types': list(_gas.FUEL_TYPES),
+            'running': _gas.is_fetch_running(),
+            'last_run': dict(runs[0]) if runs else None,
+            'last_success': dict(last_ok) if last_ok else None,
+        })
+
+
+@app.post("/api/gas/area")
+def api_gas_area_save():
+    from smart_home import gas as _gas
+    data = request.get_json(silent=True) or {}
+    try:
+        lat, lon, radius_m = float(data['lat']), float(data['lon']), float(data['radius_m'])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({'error': 'lat, lon and radius_m are required numbers'}), 400
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return jsonify({'error': 'lat/lon out of range'}), 400
+    if not (200 <= radius_m <= 80_000):
+        return jsonify({'error': 'radius must be between 200 m and 80 km'}), 400
+    with _conn() as conn:
+        area = _gas.set_area(conn, lat, lon, radius_m)
+    return jsonify({'ok': True, 'area': area})
+
+
+@app.post("/api/gas/fetch")
+def api_gas_fetch():
+    import threading
+    from smart_home import gas as _gas
+    if _gas.is_fetch_running():
+        return jsonify({'error': 'A gas price fetch is already running'}), 409
+    db_path = _db_path
+
+    def _bg():
+        try:
+            _gas.run_fetch(db_path)
+        except Exception as e:
+            # Also recorded in gas_fetch_runs and shown on the page via /api/gas/config
+            print(f"Gas price fetch failed: {e}", flush=True)
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return jsonify({'ok': True, 'started': True}), 202
+
+
+@app.get("/api/gas/stations")
+def api_gas_stations():
+    """Latest price per station inside the gas area, with the previous fetch's price."""
+    from smart_home import gas as _gas
+    fuel = _gas_fuel_arg()
+    with _conn() as conn:
+        area = _gas.get_area(conn)
+        rows = conn.execute("""
+            WITH latest AS (
+                SELECT place_id, MAX(fetch_date) AS d FROM gas_prices
+                WHERE fuel_type = ? GROUP BY place_id
+            )
+            SELECT s.place_id, s.name, s.address, s.city, s.lat, s.lon, s.last_seen,
+                   p.price, p.price_updated, p.fetch_date,
+                   (SELECT p2.price FROM gas_prices p2
+                     WHERE p2.place_id = s.place_id AND p2.fuel_type = ? AND p2.fetch_date < p.fetch_date
+                     ORDER BY p2.fetch_date DESC LIMIT 1) AS prev_price
+            FROM latest
+            JOIN gas_prices p ON p.place_id = latest.place_id AND p.fuel_type = ? AND p.fetch_date = latest.d
+            JOIN gas_stations s ON s.place_id = latest.place_id
+            WHERE latest.d >= date('now', 'localtime', '-7 days')
+            ORDER BY p.price
+        """, (fuel, fuel, fuel)).fetchall()
+    out = []
+    for r in rows:
+        if not _gas_in_area(area, r['lat'], r['lon']):
+            continue
+        d = dict(r)
+        d['distance_m'] = round(_gas.haversine_m(area['lat'], area['lon'], r['lat'], r['lon']))
+        out.append(d)
+    return jsonify({'fuel': fuel, 'stations': out})
+
+
+@app.get("/api/gas/station/<place_id>/history")
+def api_gas_station_history(place_id):
+    with _conn() as conn:
+        st = conn.execute("SELECT * FROM gas_stations WHERE place_id=?", (place_id,)).fetchone()
+        if not st:
+            return jsonify({'error': 'Unknown station'}), 404
+        rows = conn.execute(
+            "SELECT fetch_date, fuel_type, price, price_updated FROM gas_prices "
+            "WHERE place_id=? ORDER BY fetch_date", (place_id,)
+        ).fetchall()
+    history: dict[str, list] = {}
+    for r in rows:
+        history.setdefault(r['fuel_type'], []).append(
+            {'date': r['fetch_date'], 'price': r['price'], 'price_updated': r['price_updated']})
+    return jsonify({'station': dict(st), 'history': history})
+
+
+@app.get("/api/gas/area-history")
+def api_gas_area_history():
+    """Per-day min / average / max price across stations currently inside the gas area."""
+    from smart_home import gas as _gas
+    fuel = _gas_fuel_arg()
+    days = min(max(request.args.get('days', 365, type=int), 1), 3650)
+    with _conn() as conn:
+        area = _gas.get_area(conn)
+        rows = conn.execute("""
+            SELECT p.fetch_date, p.price, s.lat, s.lon FROM gas_prices p
+            JOIN gas_stations s ON s.place_id = p.place_id
+            WHERE p.fuel_type = ? AND p.fetch_date >= date('now', 'localtime', ?)
+            ORDER BY p.fetch_date
+        """, (fuel, f'-{days} days')).fetchall()
+    by_day: dict[str, list[float]] = {}
+    for r in rows:
+        if _gas_in_area(area, r['lat'], r['lon']):
+            by_day.setdefault(r['fetch_date'], []).append(r['price'])
+    return jsonify({'fuel': fuel, 'days': [
+        {'date': d, 'min': min(v), 'avg': round(sum(v) / len(v), 3), 'max': max(v), 'n': len(v)}
+        for d, v in by_day.items()
+    ]})
+
+
+_GAS_PAGE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gas Prices — Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; max-width: 1100px; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 1rem; color: #1a2535; letter-spacing: -.02em; }
+    h1 a { font-size: .85rem; font-weight: 500; color: #2e7dd4; text-decoration: none; }
+    .card { background: #fff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); margin-bottom: 1.5rem; }
+    .section-title { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .75rem; }
+    #map { height: 560px; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); margin-bottom: 1rem; display: none; }
+    #map-placeholder { height: 560px; border-radius: 12px; background: #e8eef4; display: flex; align-items: center; justify-content: center; color: #7a90a8; font-size: .95rem; margin-bottom: 1rem; text-align: center; padding: 1.5rem; }
+    #map-placeholder a { color: #2e7dd4; }
+    .toolbar { display: flex; gap: .6rem; margin-bottom: 1rem; flex-wrap: wrap; align-items: center; }
+    .btn { padding: .5rem 1.1rem; border-radius: 8px; font-size: .88rem; font-weight: 600; border: none; cursor: pointer; transition: background .15s; }
+    .btn-primary { background: #2e7dd4; color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #2568b8; }
+    .btn-primary:disabled, .btn-secondary:disabled { opacity: .5; cursor: default; }
+    .btn-secondary { background: #fff; color: #1a2535; border: 1px solid #dde4ec; }
+    .btn-secondary:hover:not(:disabled) { background: #e4eaf2; }
+    select { padding: .45rem .7rem; border-radius: 8px; border: 1px solid #dde4ec; font-size: .88rem; background: #fff; color: #1a2535; }
+    .status { font-size: .85rem; color: #7a90a8; }
+    .status.err { color: #c0392b; font-weight: 600; }
+    .hint { font-size: .85rem; color: #7a3800; background: #fff3e0; border: 1px solid #f0a855; border-radius: 8px; padding: .45rem .9rem; display: none; }
+    .stats { display: flex; gap: 2rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .stat .v { font-size: 1.6rem; font-weight: 700; }
+    .stat .l { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th { text-align: left; font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding: .4rem .6rem; border-bottom: 1px solid #edf0f4; }
+    td { padding: .5rem .6rem; border-bottom: 1px solid #f2f4f7; }
+    tr.st-row { cursor: pointer; }
+    tr.st-row:hover td { background: #f6f9fc; }
+    tr.st-row.sel td { background: #eaf3fd; }
+    .price { font-weight: 700; font-variant-numeric: tabular-nums; }
+    .up { color: #c0392b; } .down { color: #2a9d6e; } .muted { color: #aabbc8; }
+    .pin { padding: 2px 6px; border-radius: 6px; font: 700 12px system-ui, sans-serif; color: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.7); white-space: nowrap; }
+    .pin.sel { outline: 3px solid #1a2535; }
+    .home-pin { font-size: 22px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.4)); }
+    #_net_err { display: none; position: fixed; top: 1rem; left: 50%; transform: translateX(-50%); background: #fde8e8; color: #c0392b; border-radius: 8px; padding: .6rem 1.2rem; font-size: .85rem; font-weight: 500; z-index: 9999; box-shadow: 0 2px 8px rgba(0,0,0,.15); max-width: 90vw; }
+    .chart-wrap { position: relative; height: 260px; }
+    .empty { color: #7a90a8; font-style: italic; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <div id="_net_err"></div>
+  <h1>Gas Prices &nbsp;<a href="/">&larr; Dashboard</a>&nbsp;<a href="/map" style="color:#7a90a8">Map</a></h1>
+
+  <div class="toolbar">
+    <select id="fuel" onchange="onFuelChange()"></select>
+    <button class="btn btn-secondary" id="draw-btn" onclick="startDraw()" disabled>Draw Gas Area</button>
+    <button class="btn btn-secondary" id="edit-btn" onclick="startEdit()" style="display:none">Edit Area</button>
+    <button class="btn btn-primary" id="save-btn" onclick="saveArea()" style="display:none">Save Area</button>
+    <button class="btn btn-secondary" id="cancel-btn" onclick="cancelEdit()" style="display:none">Cancel</button>
+    <button class="btn btn-secondary" id="fetch-btn" onclick="fetchNow()" disabled>Fetch Prices Now</button>
+    <span class="hint" id="hint"></span>
+    <span class="status" id="status"></span>
+  </div>
+
+  <div id="map-placeholder">Loading map…</div>
+  <div id="map"></div>
+
+  <div class="card">
+    <div class="section-title">Area Prices</div>
+    <div class="stats" id="stats"></div>
+    <div class="chart-wrap"><canvas id="area-chart"></canvas></div>
+    <div class="empty" id="area-empty" style="display:none">No price history yet — prices are fetched once a day.</div>
+  </div>
+
+  <div class="card" id="station-card" style="display:none">
+    <div class="section-title" id="station-title"></div>
+    <div class="status" id="station-addr" style="margin-bottom:.75rem"></div>
+    <div class="chart-wrap"><canvas id="station-chart"></canvas></div>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Stations in Area</div>
+    <div id="stations"><div class="empty">Loading…</div></div>
+  </div>
+
+<script>
+const FUEL_LABELS = { REGULAR_UNLEADED: 'Regular', MIDGRADE: 'Midgrade', PREMIUM: 'Premium', DIESEL: 'Diesel' };
+const FUEL_COLORS = { REGULAR_UNLEADED: '#2e7dd4', MIDGRADE: '#8e5bd4', PREMIUM: '#d4802e', DIESEL: '#2a9d6e' };
+const MI = 1609.344;
+
+let config = null, map = null, areaCircle = null, homeMarker = null;
+let stations = [], markers = {}, selectedId = null;
+let mode = null;            // null | 'draw-center' | 'draw-radius' | 'edit'
+let drawListeners = [], previousArea = null;
+let areaChart = null, stationChart = null, pollTimer = null;
+
+function showNetworkError(msg) {
+  const el = document.getElementById('_net_err');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+function clearNetworkError() {
+  document.getElementById('_net_err').style.display = 'none';
+}
+async function fetchJSON(url, opts) {
+  let r;
+  try {
+    r = await fetch(url, opts);
+  } catch (e) {
+    showNetworkError('Network error: ' + e.message);
+    throw e;
+  }
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* non-JSON body handled below */ }
+  if (!r.ok) {
+    const msg = (data && data.error) ? data.error : `HTTP ${r.status} ${r.statusText}`;
+    showNetworkError(msg);
+    throw new Error(msg);
+  }
+  clearNetworkError();
+  return data;
+}
+
+function fuel() { return document.getElementById('fuel').value; }
+function fmtPrice(p) { return p == null ? '—' : '$' + p.toFixed(2); }
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function ago(iso) {
+  if (!iso) return '—';
+  const h = (Date.now() - new Date(iso).getTime()) / 3.6e6;
+  if (h < 1) return 'just now';
+  if (h < 48) return Math.round(h) + 'h ago';
+  return Math.round(h / 24) + 'd ago';
+}
+function priceColor(p, lo, hi) {
+  // green (cheap) -> amber -> red (expensive)
+  const t = hi > lo ? (p - lo) / (hi - lo) : 0;
+  const hue = 130 - 130 * t;
+  return `hsl(${hue}, 65%, 40%)`;
+}
+
+// ── Status / config ────────────────────────────────────────────────────────
+
+function renderStatus() {
+  const el = document.getElementById('status');
+  const lr = config.last_run;
+  el.className = 'status';
+  if (config.running) {
+    el.textContent = 'Fetching prices…';
+  } else if (!config.area) {
+    el.textContent = 'Draw your gas area to start tracking prices.';
+  } else if (lr && !lr.ok) {
+    el.className = 'status err';
+    el.textContent = `Last fetch failed (${lr.ts}): ${lr.error}`;
+  } else if (config.last_success) {
+    const s = config.last_success;
+    el.textContent = `Last fetched ${s.ts} · ${s.n_stations} stations`;
+  } else {
+    el.textContent = 'No prices fetched yet.';
+  }
+  document.getElementById('fetch-btn').disabled = !config.area || config.running || !!mode;
+}
+
+async function refreshConfig() {
+  config = await fetchJSON('/api/gas/config');
+  renderStatus();
+  return config;
+}
+
+// ── Map ────────────────────────────────────────────────────────────────────
+
+function loadMapsAPI(apiKey) {
+  return new Promise((resolve, reject) => {
+    if (window.google && window.google.maps) { resolve(); return; }
+    window._mapsLoaded = resolve;
+    const s = document.createElement('script');
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(apiKey) + '&libraries=geometry,marker&loading=async&callback=_mapsLoaded';
+    s.async = true;
+    s.onerror = () => reject(new Error('Script load error — check your API key'));
+    document.head.appendChild(s);
+  });
+}
+
+function areaCenter() {
+  if (config.area) return { lat: config.area.lat, lng: config.area.lon };
+  if (config.home) return { lat: config.home.lat, lng: config.home.lon };
+  return { lat: 37.0902, lng: -95.7129 };
+}
+
+function initMap() {
+  map = new google.maps.Map(document.getElementById('map'), {
+    center: areaCenter(),
+    zoom: config.area || config.home ? 11 : 4,
+    clickableIcons: false,
+    mapId: 'DEMO_MAP_ID',
+    streetViewControl: false,
+  });
+  if (config.home) {
+    const el = document.createElement('div');
+    el.className = 'home-pin';
+    el.textContent = '🏠';
+    homeMarker = new google.maps.marker.AdvancedMarkerElement({
+      map, position: { lat: config.home.lat, lng: config.home.lon }, content: el, title: 'Home', zIndex: 1000,
+    });
+  }
+  if (config.area) {
+    drawAreaCircle(config.area);
+    map.fitBounds(areaCircle.getBounds());
+  }
+}
+
+function drawAreaCircle(area) {
+  if (areaCircle) areaCircle.setMap(null);
+  areaCircle = new google.maps.Circle({
+    map,
+    center: { lat: area.lat, lng: area.lon },
+    radius: area.radius_m,
+    strokeColor: '#2e7dd4', strokeWeight: 2, strokeOpacity: .9,
+    fillColor: '#2e7dd4', fillOpacity: .06,
+    clickable: false,
+  });
+  areaCircle.addListener('radius_changed', updateHint);
+}
+
+function renderMarkers() {
+  Object.values(markers).forEach(m => m.map = null);
+  markers = {};
+  if (!map || !stations.length) return;
+  const prices = stations.map(s => s.price);
+  const lo = Math.min(...prices), hi = Math.max(...prices);
+  stations.forEach((s, i) => {
+    const el = document.createElement('div');
+    el.className = 'pin' + (s.place_id === selectedId ? ' sel' : '');
+    el.style.background = priceColor(s.price, lo, hi);
+    el.textContent = s.price.toFixed(2);
+    const m = new google.maps.marker.AdvancedMarkerElement({
+      map, position: { lat: s.lat, lng: s.lon }, content: el,
+      title: `${s.name} — ${fmtPrice(s.price)}`,
+      zIndex: stations.length - i,   // cheapest on top
+    });
+    m.addListener('click', () => selectStation(s.place_id, false));
+    markers[s.place_id] = m;
+  });
+}
+
+// ── Drawing the gas area ───────────────────────────────────────────────────
+
+function setMode(m) {
+  mode = m;
+  const editing = !!m;
+  document.getElementById('draw-btn').style.display = editing ? 'none' : '';
+  document.getElementById('edit-btn').style.display = !editing && config.area ? '' : 'none';
+  document.getElementById('save-btn').style.display = m === 'edit' ? '' : 'none';
+  document.getElementById('cancel-btn').style.display = editing ? '' : 'none';
+  document.getElementById('draw-btn').textContent = config.area ? 'Redraw Area' : 'Draw Gas Area';
+  map.setOptions({ draggableCursor: (m === 'draw-center' || m === 'draw-radius') ? 'crosshair' : null });
+  Object.values(markers).forEach(mk => mk.map = editing ? null : map);
+  renderStatus();
+  updateHint();
+}
+
+function updateHint() {
+  const el = document.getElementById('hint');
+  let txt = '';
+  if (mode === 'draw-center') txt = 'Click the center of your gas area.';
+  else if (mode === 'draw-radius') txt = `Move to size the circle, click to finish · ${(areaCircle.getRadius() / MI).toFixed(1)} mi`;
+  else if (mode === 'edit') txt = `Drag the center or edge to adjust · radius ${(areaCircle.getRadius() / MI).toFixed(1)} mi`;
+  el.textContent = txt;
+  el.style.display = txt ? 'inline-block' : 'none';
+}
+
+function clearDrawListeners() {
+  drawListeners.forEach(l => google.maps.event.removeListener(l));
+  drawListeners = [];
+}
+
+function startDraw() {
+  previousArea = config.area;
+  if (areaCircle) { areaCircle.setMap(null); areaCircle = null; }
+  setMode('draw-center');
+  drawListeners.push(map.addListener('click', e => {
+    if (mode === 'draw-center') {
+      drawAreaCircle({ lat: e.latLng.lat(), lon: e.latLng.lng(), radius_m: 100 });
+      setMode('draw-radius');
+    } else if (mode === 'draw-radius') {
+      clearDrawListeners();
+      areaCircle.setOptions({ editable: true, draggable: true, clickable: true });
+      setMode('edit');
+    }
+  }));
+  drawListeners.push(map.addListener('mousemove', e => {
+    if (mode !== 'draw-radius') return;
+    areaCircle.setRadius(Math.max(200, google.maps.geometry.spherical.computeDistanceBetween(areaCircle.getCenter(), e.latLng)));
+  }));
+}
+
+function startEdit() {
+  previousArea = config.area;
+  areaCircle.setOptions({ editable: true, draggable: true, clickable: true });
+  setMode('edit');
+}
+
+function cancelEdit() {
+  clearDrawListeners();
+  if (areaCircle) { areaCircle.setMap(null); areaCircle = null; }
+  if (previousArea) drawAreaCircle(previousArea);
+  setMode(null);
+}
+
+async function saveArea() {
+  const c = areaCircle.getCenter();
+  const body = { lat: c.lat(), lon: c.lng(), radius_m: Math.round(areaCircle.getRadius()) };
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true;
+  try {
+    const res = await fetchJSON('/api/gas/area', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    config.area = res.area;
+    areaCircle.setOptions({ editable: false, draggable: false, clickable: false });
+    setMode(null);
+    await Promise.all([refreshConfig(), loadData()]);
+    if (!config.last_success) {
+      document.getElementById('status').textContent = 'Area saved. Click "Fetch Prices Now" to get today\'s prices.';
+    }
+  } catch (e) {
+    // error banner already shown; stay in edit mode so the user can retry
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Fetch now ──────────────────────────────────────────────────────────────
+
+async function fetchNow() {
+  try {
+    await fetchJSON('/api/gas/fetch', { method: 'POST' });
+  } catch (e) { return; }
+  config.running = true;
+  renderStatus();
+  pollUntilDone();
+}
+
+function pollUntilDone() {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try { await refreshConfig(); } catch (e) { return; }
+    if (!config.running) {
+      clearInterval(pollTimer);
+      if (config.last_run && !config.last_run.ok) showNetworkError('Gas price fetch failed: ' + config.last_run.error);
+      loadData();
+    }
+  }, 2000);
+}
+
+// ── Data ───────────────────────────────────────────────────────────────────
+
+function onFuelChange() {
+  loadData();
+  if (selectedId) selectStation(selectedId, false);
+}
+
+async function loadData() {
+  await Promise.all([loadStations(), loadAreaHistory()]);
+}
+
+async function loadStations() {
+  let data;
+  try { data = await fetchJSON('/api/gas/stations?fuel=' + fuel()); }
+  catch (e) {
+    document.getElementById('stations').innerHTML = `<div class="status err">Failed to load stations: ${esc(e.message)}</div>`;
+    return;
+  }
+  stations = data.stations;
+  if (!mode) renderMarkers();
+  renderTable();
+  renderStats();
+}
+
+function renderStats() {
+  const el = document.getElementById('stats');
+  if (!stations.length) { el.innerHTML = ''; return; }
+  const prices = stations.map(s => s.price);
+  const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
+  const cheapest = stations[0];
+  el.innerHTML = `
+    <div class="stat"><div class="v down">${fmtPrice(cheapest.price)}</div><div class="l">Cheapest · ${esc(cheapest.name)}</div></div>
+    <div class="stat"><div class="v">${fmtPrice(avg)}</div><div class="l">Average</div></div>
+    <div class="stat"><div class="v up">${fmtPrice(Math.max(...prices))}</div><div class="l">Highest</div></div>
+    <div class="stat"><div class="v">${stations.length}</div><div class="l">Stations</div></div>`;
+}
+
+function renderTable() {
+  const el = document.getElementById('stations');
+  if (!config.area) { el.innerHTML = '<div class="empty">Draw a gas area on the map first.</div>'; return; }
+  if (!stations.length) { el.innerHTML = `<div class="empty">No ${FUEL_LABELS[fuel()]} prices for stations in this area yet.</div>`; return; }
+  const rows = stations.map(s => {
+    let chg = '<span class="muted">—</span>';
+    if (s.prev_price != null) {
+      const d = s.price - s.prev_price;
+      chg = Math.abs(d) < 0.005 ? '<span class="muted">0.00</span>'
+          : `<span class="${d > 0 ? 'up' : 'down'}">${d > 0 ? '▲' : '▼'} ${Math.abs(d).toFixed(2)}</span>`;
+    }
+    return `<tr class="st-row${s.place_id === selectedId ? ' sel' : ''}" onclick="selectStation('${esc(s.place_id)}', true)">
+      <td>${esc(s.name)}</td><td>${esc(s.city || '')}</td>
+      <td class="price">${fmtPrice(s.price)}</td><td>${chg}</td>
+      <td>${(s.distance_m / MI).toFixed(1)} mi</td><td class="muted">${ago(s.price_updated)}</td></tr>`;
+  }).join('');
+  el.innerHTML = `<table><thead><tr><th>Station</th><th>City</th><th>${FUEL_LABELS[fuel()]}</th><th>vs prev day</th><th>From center</th><th>Reported</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+async function loadAreaHistory() {
+  let data;
+  try { data = await fetchJSON('/api/gas/area-history?fuel=' + fuel()); } catch (e) { return; }
+  const empty = data.days.length === 0;
+  document.getElementById('area-empty').style.display = empty ? '' : 'none';
+  document.querySelector('#area-chart').parentElement.style.display = empty ? 'none' : '';
+  if (areaChart) areaChart.destroy();
+  if (empty) return;
+  const pts = k => data.days.map(d => ({ x: d.date, y: d[k] }));
+  areaChart = new Chart(document.getElementById('area-chart'), {
+    type: 'line',
+    data: { datasets: [
+      { label: 'Max', data: pts('max'), borderColor: '#e07a6a', backgroundColor: 'rgba(224,122,106,.08)', fill: '+2', pointRadius: 2, tension: .2 },
+      { label: 'Average', data: pts('avg'), borderColor: '#2e7dd4', pointRadius: 2, tension: .2, borderWidth: 2.5 },
+      { label: 'Min', data: pts('min'), borderColor: '#2a9d6e', pointRadius: 2, tension: .2 },
+    ]},
+    options: chartOptions(),
+  });
+}
+
+function chartOptions() {
+  return {
+    responsive: true, maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: { type: 'time', time: { unit: 'day', tooltipFormat: 'MMM d, yyyy' }, grid: { display: false } },
+      y: { ticks: { callback: v => '$' + v.toFixed(2) } },
+    },
+    plugins: { tooltip: { callbacks: { label: c => `${c.dataset.label}: $${c.parsed.y.toFixed(3)}` } } },
+  };
+}
+
+async function selectStation(placeId, pan) {
+  selectedId = placeId;
+  const s = stations.find(x => x.place_id === placeId);
+  if (pan && s && map) map.panTo({ lat: s.lat, lng: s.lon });
+  renderTable();
+  Object.entries(markers).forEach(([id, m]) => m.content.classList.toggle('sel', id === placeId));
+  let data;
+  try { data = await fetchJSON('/api/gas/station/' + encodeURIComponent(placeId) + '/history'); } catch (e) { return; }
+  const card = document.getElementById('station-card');
+  card.style.display = '';
+  document.getElementById('station-title').textContent = data.station.name;
+  document.getElementById('station-addr').textContent = data.station.address || '';
+  if (stationChart) stationChart.destroy();
+  const datasets = Object.entries(data.history).map(([ft, pts]) => ({
+    label: FUEL_LABELS[ft] || ft,
+    data: pts.map(p => ({ x: p.date, y: p.price })),
+    borderColor: FUEL_COLORS[ft] || '#7a90a8',
+    borderWidth: ft === fuel() ? 3 : 1.5,
+    pointRadius: 2, stepped: true,
+  }));
+  stationChart = new Chart(document.getElementById('station-chart'), { type: 'line', data: { datasets }, options: chartOptions() });
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+
+async function init() {
+  try { await refreshConfig(); } catch (e) { document.getElementById('map-placeholder').textContent = 'Failed to load gas config.'; return; }
+
+  const sel = document.getElementById('fuel');
+  config.fuel_types.forEach(ft => {
+    const o = document.createElement('option');
+    o.value = ft; o.textContent = FUEL_LABELS[ft] || ft;
+    sel.appendChild(o);
+  });
+
+  loadData();
+
+  if (!config.api_key) {
+    document.getElementById('map-placeholder').innerHTML = 'No Google Maps API key configured. <a href="/map-settings">Go to Map Settings</a> to set one up.';
+    return;
+  }
+  try {
+    await loadMapsAPI(config.api_key);
+    await Promise.all([google.maps.importLibrary('geometry'), google.maps.importLibrary('marker')]);
+  } catch (e) {
+    document.getElementById('map-placeholder').innerHTML = 'Failed to load Google Maps: ' + esc(e.message) + '. <a href="/map-settings">Check your API key</a>.';
+    return;
+  }
+  document.getElementById('map-placeholder').style.display = 'none';
+  document.getElementById('map').style.display = 'block';
+  initMap();
+  document.getElementById('draw-btn').disabled = false;
+  setMode(null);
+  renderMarkers();
+  if (config.running) pollUntilDone();
+}
+
+init();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/gas")
+def gas_page():
+    return Response(_GAS_PAGE, mimetype="text/html")
 
 
 def run(db_path: str, host: str, port: int, debug: bool) -> None:

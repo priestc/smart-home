@@ -21,6 +21,7 @@ from smart_home import garage as _garage
 from smart_home import smart_plug as _smart_plug
 from smart_home import pool as _pool
 from smart_home import relay as _relay_mod
+from smart_home import gas as _gas
 from smart_home.battery import dump_gatt
 from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading, insert_plug_reading, insert_pool_reading
 
@@ -703,6 +704,19 @@ def relay_log(db):
             time.sleep(1)
     except KeyboardInterrupt:
         click.echo("\033[0m", nl=False)  # reset any partial ANSI colour sequence
+
+
+@main.command("fetch-gas-prices")
+@click.option("--db", default=DEFAULT_DB, show_default=True, help="SQLite database path.")
+def fetch_gas_prices(db):
+    """Fetch today's gas prices for the configured gas area now."""
+    open_db(db).close()
+    try:
+        result = _gas.run_fetch(db)
+    except Exception as e:
+        raise click.ClickException(str(e))
+    click.echo(f"Stored {result['n_prices']} prices from {result['n_stations']} stations "
+               f"({result['n_requests']} API requests).")
 
 
 @main.command("firmware-dir")
@@ -2173,6 +2187,25 @@ def monitor(duration, verbose, db, no_db):
                 )
             conn.commit()
 
+    async def gas_price_loop():
+        """Once a day, fetch gas prices for every station inside the gas area."""
+        while True:
+            await asyncio.sleep(60)
+            if not conn:
+                continue
+            try:
+                if not _gas.daily_fetch_due(conn):
+                    await asyncio.sleep(3540)
+                    continue
+                result = await asyncio.to_thread(_gas.run_fetch, db)
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                click.echo(f"[{ts}] Gas prices: {result['n_stations']} stations, "
+                           f"{result['n_prices']} prices ({result['n_requests']} API requests)")
+            except Exception as e:
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                click.echo(f"[{ts}] Gas price fetch failed: {e}")
+            await asyncio.sleep(3540)
+
     BLE_STALL_THRESHOLD = datetime.timedelta(minutes=10)
 
     async def ble_watchdog_loop():
@@ -2687,7 +2720,7 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
-        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), check_iphone_network(), check_iphone_bluetooth(), check_iphone_presence(), ble_watchdog_loop()]
+        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), gas_price_loop(), check_iphone_network(), check_iphone_bluetooth(), check_iphone_presence(), ble_watchdog_loop()]
         if cameras_cfg:
             extra.append(camera_watch_loop())
             extra.append(camera_vitals_loop())

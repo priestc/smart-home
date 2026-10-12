@@ -258,6 +258,46 @@ def open_db(path: str) -> sqlite3.Connection:
             updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S','now'))
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gas_stations (
+            place_id   TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            address    TEXT,
+            city       TEXT,
+            lat        REAL NOT NULL,
+            lon        REAL NOT NULL,
+            first_seen TEXT NOT NULL,
+            last_seen  TEXT NOT NULL
+        )
+    """)
+    # One row per station / fuel type / fetch day. price_updated is Google's
+    # own timestamp for when the price was last reported, which can lag the
+    # fetch date by days for less-trafficked stations.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gas_prices (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            fetch_date    TEXT NOT NULL,
+            place_id      TEXT NOT NULL,
+            fuel_type     TEXT NOT NULL,
+            price         REAL NOT NULL,
+            price_updated TEXT,
+            UNIQUE(fetch_date, place_id, fuel_type)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS gas_prices_place_type_date ON gas_prices (place_id, fuel_type, fetch_date DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS gas_prices_date_type ON gas_prices (fetch_date, fuel_type)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gas_fetch_runs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts         TEXT NOT NULL,
+            fetch_date TEXT NOT NULL,
+            ok         INTEGER NOT NULL,
+            n_requests INTEGER,
+            n_stations INTEGER,
+            n_prices   INTEGER,
+            error      TEXT
+        )
+    """)
     conn.commit()
     return conn
 
