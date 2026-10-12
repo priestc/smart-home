@@ -8,7 +8,11 @@ the RoadtripApp project's /api/places/gas-search route.
 Text Search returns at most 60 results (3 pages of 20) per query, so the
 circle's bounding box is searched as a quadtree: any tile that comes back
 saturated is split into four and searched again, until every tile is under
-the cap or the per-run request budget is spent.
+the cap or the request budget is spent.
+
+Spending is capped per calendar month (see MONTHLY_REQUEST_CAP): each run may
+use at most an even share of what's left of the month's budget, so a dense
+area degrades to partial coverage rather than running up the bill.
 """
 from __future__ import annotations
 import datetime
@@ -27,7 +31,16 @@ FIELD_MASK = (
 PAGE_SIZE = 20
 MAX_PAGES = 3                       # Text Search hard limit: 60 results per query
 MAX_DEPTH = 4                       # quadtree depth; 4 => tiles 1/16 the width of the circle
-MAX_REQUESTS_PER_RUN = 80           # cost guard (Text Search w/ fuelOptions is a billed Enterprise SKU)
+MAX_REQUESTS_PER_RUN = 80
+
+# Cost guard. fuelOptions bills every request (each page counts) as
+# "Text Search Enterprise + Atmosphere": $40 / 1000 after 1000 free per month.
+# Note the free allowance is per billing account, so other apps on the same
+# account (e.g. RoadtripApp) eat into it too.
+GOOGLE_FREE_REQUESTS_PER_MONTH = 1000
+PRICE_PER_1000_USD = 40.0
+MONTHLY_COST_CAP_USD = 10.0
+MONTHLY_REQUEST_CAP = GOOGLE_FREE_REQUESTS_PER_MONTH + int(MONTHLY_COST_CAP_USD / PRICE_PER_1000_USD * 1000)
 DAILY_FETCH_HOUR = 7                # first daily fetch happens at/after this local hour
 MAX_FAILED_RUNS_PER_DAY = 3
 
@@ -41,6 +54,10 @@ _fetch_lock = threading.Lock()
 
 
 class GasFetchError(Exception):
+    pass
+
+
+class _BudgetExhausted(Exception):
     pass
 
 
@@ -135,13 +152,14 @@ def _extract_city(components: list[dict] | None) -> str | None:
 
 
 def _search_tile(client: httpx.Client, api_key: str, tile, budget: list[int]) -> tuple[list[dict], bool]:
+    """budget is [remaining, spent], updated in place."""
     """Search one rectangle. Returns (places, saturated)."""
     s, w, n, e = tile
     places: list[dict] = []
     page_token = None
     for _ in range(MAX_PAGES):
         if budget[0] <= 0:
-            raise GasFetchError(f"Request budget of {MAX_REQUESTS_PER_RUN} exhausted; shrink the gas area")
+            raise _BudgetExhausted()
         body = {
             "textQuery": "gas station",
             "includedType": "gas_station",
@@ -155,6 +173,7 @@ def _search_tile(client: httpx.Client, api_key: str, tile, budget: list[int]) ->
         if page_token:
             body["pageToken"] = page_token
         budget[0] -= 1
+        budget[1] += 1
         resp = client.post(
             SEARCH_URL,
             json=body,
@@ -180,15 +199,25 @@ def _search_tile(client: httpx.Client, api_key: str, tile, budget: list[int]) ->
     return places, len(places) >= MAX_PAGES * PAGE_SIZE
 
 
-def fetch_area_stations(api_key: str, lat: float, lon: float, radius_m: float) -> tuple[list[dict], int]:
-    """Return (stations, n_requests) for every gas station inside the circle."""
-    budget = [MAX_REQUESTS_PER_RUN]
+def fetch_area_stations(api_key: str, lat: float, lon: float, radius_m: float,
+                        budget: list[int]) -> tuple[list[dict], bool]:
+    """Return (stations, truncated) for every gas station inside the circle.
+
+    budget is [remaining, spent] and is updated in place, so the caller knows
+    how many billed requests were made even if this raises. truncated is True
+    when the budget ran out before the whole area was covered.
+    """
     found: dict[str, dict] = {}
     queue = [(_bbox(lat, lon, radius_m), 0)]
+    truncated = False
     with httpx.Client() as client:
         while queue:
             tile, depth = queue.pop(0)
-            places, saturated = _search_tile(client, api_key, tile, budget)
+            try:
+                places, saturated = _search_tile(client, api_key, tile, budget)
+            except _BudgetExhausted:
+                truncated = True
+                break
             for p in places:
                 found[p["id"]] = p
             if saturated and depth < MAX_DEPTH:
@@ -218,13 +247,44 @@ def fetch_area_stations(api_key: str, lat: float, lon: float, radius_m: float) -
             "lon": plon,
             "prices": prices,
         })
-    return stations, MAX_REQUESTS_PER_RUN - budget[0]
+    return stations, truncated
 
 
 # ── Fetch run ───────────────────────────────────────────────────────────────
 
 def _now() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def requests_used(conn: sqlite3.Connection, since_date: str) -> int:
+    return conn.execute(
+        "SELECT COALESCE(SUM(n_requests), 0) FROM gas_fetch_runs WHERE fetch_date >= ?", (since_date,)
+    ).fetchone()[0]
+
+
+def budget_status(conn: sqlite3.Connection, now: datetime.datetime | None = None) -> dict:
+    """This month's request usage and how many requests a run may make today.
+
+    Today's allowance is an even split of what was left at the start of today
+    across the remaining days of the month (minus anything already used today),
+    so early-month manual fetches can't starve the rest of the month.
+    """
+    now = now or datetime.datetime.now()
+    month_start = now.strftime("%Y-%m-01")
+    today = now.strftime("%Y-%m-%d")
+    used_month = requests_used(conn, month_start)
+    used_today = requests_used(conn, today)
+    next_month = (now.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+    days_left = (next_month.date() - now.date()).days
+    left_at_day_start = MONTHLY_REQUEST_CAP - (used_month - used_today)
+    today_allowance = max(0, left_at_day_start // days_left - used_today)
+    return {
+        "month_cap": MONTHLY_REQUEST_CAP,
+        "month_used": used_month,
+        "cost_cap_usd": MONTHLY_COST_CAP_USD,
+        "est_cost_usd": round(max(0, used_month - GOOGLE_FREE_REQUESTS_PER_MONTH) * PRICE_PER_1000_USD / 1000, 2),
+        "run_allowance": min(MAX_REQUESTS_PER_RUN, today_allowance),
+    }
 
 
 def is_fetch_running() -> bool:
@@ -240,7 +300,7 @@ def run_fetch(db_path: str) -> dict:
     try:
         ts = _now()
         fetch_date = ts[:10]
-        n_requests = None
+        budget = [0, 0]   # [remaining, spent]
         try:
             api_key = get_server_api_key(conn)
             if not api_key:
@@ -248,11 +308,18 @@ def run_fetch(db_path: str) -> dict:
             area = get_area(conn)
             if not area:
                 raise GasFetchError("No gas area drawn yet")
-            stations, n_requests = fetch_area_stations(api_key, area["lat"], area["lon"], area["radius_m"])
+            bs = budget_status(conn)
+            if bs["run_allowance"] <= 0:
+                raise GasFetchError(
+                    f"Request cap reached ({bs['month_used']} of {bs['month_cap']} this month, "
+                    f"~${bs['cost_cap_usd']:.0f}/mo limit); no requests left for today"
+                )
+            budget[0] = bs["run_allowance"]
+            stations, truncated = fetch_area_stations(api_key, area["lat"], area["lon"], area["radius_m"], budget)
         except Exception as e:
             conn.execute(
                 "INSERT INTO gas_fetch_runs (ts, fetch_date, ok, n_requests, error) VALUES (?,?,0,?,?)",
-                (ts, fetch_date, n_requests, f"{type(e).__name__}: {e}" if not isinstance(e, GasFetchError) else str(e)),
+                (ts, fetch_date, budget[1], f"{type(e).__name__}: {e}" if not isinstance(e, GasFetchError) else str(e)),
             )
             conn.commit()
             raise
@@ -274,12 +341,20 @@ def run_fetch(db_path: str) -> dict:
                     (fetch_date, st["place_id"], pr["fuel_type"], pr["price"], pr["updated"]),
                 )
                 n_prices += 1
+        n_requests = budget[1]
+        # A truncated run still stores what it found, but records a warning
+        # so the UI can say the area wasn't fully covered.
+        warning = (f"Only part of the gas area was covered: hit today's request allowance "
+                   f"({n_requests} requests) under the ${MONTHLY_COST_CAP_USD:.0f}/month cap. "
+                   f"Shrink the circle for full coverage.") if truncated else None
         conn.execute(
-            "INSERT INTO gas_fetch_runs (ts, fetch_date, ok, n_requests, n_stations, n_prices) VALUES (?,?,1,?,?,?)",
-            (ts, fetch_date, n_requests, len(stations), n_prices),
+            "INSERT INTO gas_fetch_runs (ts, fetch_date, ok, n_requests, n_stations, n_prices, error) "
+            "VALUES (?,?,1,?,?,?,?)",
+            (ts, fetch_date, n_requests, len(stations), n_prices, warning),
         )
         conn.commit()
-        return {"ok": True, "ts": ts, "n_requests": n_requests, "n_stations": len(stations), "n_prices": n_prices}
+        return {"ok": True, "ts": ts, "n_requests": n_requests, "n_stations": len(stations),
+                "n_prices": n_prices, "warning": warning}
     finally:
         conn.close()
         _fetch_lock.release()
@@ -297,4 +372,4 @@ def daily_fetch_due(conn: sqlite3.Connection, now: datetime.datetime | None = No
         "SELECT COALESCE(SUM(ok), 0), COALESCE(SUM(1 - ok), 0) FROM gas_fetch_runs WHERE fetch_date=?",
         (today,),
     ).fetchone()
-    return ok == 0 and failed < MAX_FAILED_RUNS_PER_DAY
+    return ok == 0 and failed < MAX_FAILED_RUNS_PER_DAY and budget_status(conn, now)["run_allowance"] > 0

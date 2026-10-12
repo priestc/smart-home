@@ -717,6 +717,8 @@ def fetch_gas_prices(db):
         raise click.ClickException(str(e))
     click.echo(f"Stored {result['n_prices']} prices from {result['n_stations']} stations "
                f"({result['n_requests']} API requests).")
+    if result.get("warning"):
+        click.echo(f"Warning: {result['warning']}")
 
 
 @main.command("firmware-dir")
@@ -2201,6 +2203,8 @@ def monitor(duration, verbose, db, no_db):
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 click.echo(f"[{ts}] Gas prices: {result['n_stations']} stations, "
                            f"{result['n_prices']} prices ({result['n_requests']} API requests)")
+                if result.get("warning"):
+                    click.echo(f"[{ts}] Gas prices warning: {result['warning']}")
             except Exception as e:
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 click.echo(f"[{ts}] Gas price fetch failed: {e}")

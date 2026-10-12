@@ -10704,6 +10704,7 @@ def api_gas_config():
             'home': {'lat': home['center_lat'], 'lon': home['center_lon']} if home and home['center_lat'] is not None else None,
             'fuel_types': list(_gas.FUEL_TYPES),
             'running': _gas.is_fetch_running(),
+            'budget': _gas.budget_status(conn),
             'last_run': dict(runs[0]) if runs else None,
             'last_success': dict(last_ok) if last_ok else None,
         })
@@ -10995,13 +10996,19 @@ function renderStatus() {
   } else if (lr && !lr.ok) {
     el.className = 'status err';
     el.textContent = `Last fetch failed (${lr.ts}): ${lr.error}`;
+  } else if (lr && lr.error) {
+    el.className = 'status err';
+    el.textContent = `Fetched ${lr.ts} · ${lr.n_stations} stations — ${lr.error}`;
   } else if (config.last_success) {
     const s = config.last_success;
     el.textContent = `Last fetched ${s.ts} · ${s.n_stations} stations`;
   } else {
     el.textContent = 'No prices fetched yet.';
   }
-  document.getElementById('fetch-btn').disabled = !config.area || config.running || !!mode;
+  const b = config.budget;
+  el.textContent += ` · ${b.month_used} / ${b.month_cap} API requests this month (est. $${b.est_cost_usd.toFixed(2)}, cap $${b.cost_cap_usd.toFixed(0)})`;
+  document.getElementById('fetch-btn').disabled = !config.area || config.running || !!mode || b.run_allowance <= 0;
+  document.getElementById('fetch-btn').title = b.run_allowance <= 0 ? "No API requests left in today's allowance" : '';
 }
 
 async function refreshConfig() {

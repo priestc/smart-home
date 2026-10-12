@@ -24,11 +24,21 @@ struct GasHome: Codable {
 struct GasRun: Codable {
     let ts: String
     let ok: Int?
+    let n_requests: Int?
     let n_stations: Int?
     let error: String?
 }
 
+struct GasBudget: Codable {
+    let month_cap: Int
+    let month_used: Int
+    let cost_cap_usd: Double
+    let est_cost_usd: Double
+    let run_allowance: Int
+}
+
 struct GasConfig: Codable {
+    let budget: GasBudget?
     let area: GasArea?
     let home: GasHome?
     let fuel_types: [String]
@@ -188,6 +198,8 @@ final class GasPricesStore: ObservableObject {
             try await loadPrices()
             if let run = config?.last_run, run.ok == 0 {
                 errorMessage = "Last price fetch failed: \(run.error ?? "unknown error")"
+            } else if let warning = config?.last_run?.error {
+                errorMessage = warning
             } else {
                 errorMessage = nil
             }
@@ -248,9 +260,16 @@ final class GasPricesStore: ObservableObject {
         guard let config else { return "" }
         if isFetching { return "Fetching prices…" }
         if config.area == nil { return "Draw your gas area on the map to start tracking prices." }
-        if let s = config.last_success { return "Last fetched \(s.ts) · \(s.n_stations ?? 0) stations" }
-        return "No prices fetched yet."
+        var text = "No prices fetched yet."
+        if let s = config.last_success { text = "Last fetched \(s.ts) · \(s.n_stations ?? 0) stations" }
+        if let b = config.budget {
+            text += String(format: "\n%d / %d API requests this month (est. $%.2f, cap $%.0f)",
+                           b.month_used, b.month_cap, b.est_cost_usd, b.cost_cap_usd)
+        }
+        return text
     }
+
+    var canFetch: Bool { config?.area != nil && (config?.budget?.run_allowance ?? 1) > 0 }
 }
 
 // MARK: - Tab root
@@ -317,7 +336,7 @@ struct GasPricesView: View {
                         } label: {
                             Image(systemName: "arrow.down.circle")
                         }
-                        .disabled(store.config?.area == nil)
+                        .disabled(!store.canFetch)
                         .accessibilityLabel("Fetch prices now")
                     }
                 }
