@@ -5226,6 +5226,10 @@ def index():
     .gas-card { text-decoration: none; color: inherit; display: block; }
     .gas-card .gas-price { font-size: 2.4rem; font-weight: 700; margin: .2rem 0 .1rem; line-height: 1; font-variant-numeric: tabular-nums; }
     .gas-card .gas-cmp { font-size: .9rem; font-weight: 600; }
+    .gpu-card .gpu-temps { display: flex; gap: 1.1rem; margin: .3rem 0 .2rem; }
+    .gpu-card .gpu-t { font-size: 1.6rem; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+    .gpu-card .gpu-tl { font-size: .7rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-top: .2rem; }
+    .gpu-card .gpu-stats { font-size: .85rem; color: #1a2535; font-weight: 500; }
     .sun-time { font-size: 2.4rem; font-weight: 700; margin: .2rem 0 .1rem; line-height: 1; font-variant-numeric: tabular-nums; }
     .section-title { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .75rem; }
     .events-list { display: flex; flex-direction: column; gap: .4rem; margin-bottom: 2rem; }
@@ -5271,6 +5275,7 @@ def index():
     <div id="sun-widget"></div>
     <div class="garage-cards" id="garage-cards" style="margin-bottom:0"></div>
     <div id="gas-widget"></div>
+    <div id="gpu-widget" style="display:flex;gap:1rem;flex-wrap:wrap"></div>
   </div>
   <div class="pool-cards"    id="pool-cards"    style="display:none"></div>
 
@@ -5539,6 +5544,41 @@ async function loadGas() {
     <div class="gas-cmp" style="color:${color}">${arrow} $${Math.abs(data.diff).toFixed(2)} vs 30-day avg $${data.avg_30d.toFixed(2)}${days}</div>
     <div class="ts">Cheapest $${data.current_min.toFixed(2)} &middot; ${esc(data.cheapest_name)}</div>${warn}</a>`;
 }
+async function loadGpu() {
+  const el = document.getElementById('gpu-widget');
+  let r, data;
+  try {
+    r = await fetch('/api/gpu');
+    data = await r.json();
+  } catch (e) {
+    showError('GPU temperature');
+    return;
+  }
+  if (!r.ok) {
+    el.innerHTML = `<div class="card gpu-card"><div class="label">GPU</div>
+      <div class="ts" style="font-size:.85rem;color:#c0392b">${data.error || 'HTTP ' + r.status}</div></div>`;
+    return;
+  }
+  // Red within 10°C of the critical limit, orange within 25°C
+  const tempColor = t => {
+    const crit = t.crit_c ?? 100;
+    return t.c >= crit - 10 ? '#c0392b' : t.c >= crit - 25 ? '#e07820' : '#2a9d6e';
+  };
+  el.innerHTML = data.gpus.map(g => {
+    const temps = g.temps.filter(t => t.c != null).map(t => `<div title="Critical at ${t.crit_c ?? '?'}&deg;C">
+        <div class="gpu-t" style="color:${tempColor(t)}">${Math.round(t.c)}&deg;</div>
+        <div class="gpu-tl">${t.label}</div></div>`).join('');
+    const stats = [
+      g.busy_pct != null ? `${g.busy_pct}% load` : null,
+      g.power_w != null ? `${Math.round(g.power_w)}${g.power_cap_w ? '/' + Math.round(g.power_cap_w) : ''} W` : null,
+      g.fan_rpm != null ? `Fan ${g.fan_rpm} rpm` : null,
+    ].filter(Boolean).join(' &middot; ');
+    return `<div class="card gpu-card"><div class="label">GPU &middot; ${g.card}</div>
+      <div class="gpu-temps">${temps}</div>
+      <div class="gpu-stats">${stats}</div>
+      <div class="ts">${new Date().toLocaleTimeString()}</div></div>`;
+  }).join('');
+}
 loadCurrent();
 loadEvents();
 loadGarage();
@@ -5546,6 +5586,8 @@ loadPool();
 loadSunTimes();
 loadGas();
 setInterval(loadGas, 15 * 60 * 1000);
+loadGpu();
+setInterval(loadGpu, 10000);
 setInterval(loadCurrent, 30000);
 setInterval(loadEvents, 60000);
 setInterval(loadGarage, 15000);
@@ -10911,6 +10953,53 @@ def api_gas_summary():
         'trend': 'cheaper' if diff <= -0.005 else 'pricier' if diff >= 0.005 else 'same',
         'last_run_error': last_run['error'] if last_run and last_run['error'] else None,
     })
+
+
+@app.get("/api/gpu")
+def api_gpu():
+    """Live GPU temperatures, fan, power and load read from the amdgpu hwmon sysfs interface."""
+    import glob
+    import os
+
+    def _read(path, scale=1):
+        try:
+            with open(path) as f:
+                return int(f.read().strip()) / scale
+        except FileNotFoundError:
+            return None
+
+    gpus = []
+    for card in sorted(glob.glob('/sys/class/drm/card[0-9]*/device')):
+        if '-' in os.path.basename(os.path.dirname(card)):
+            continue  # connector entries like card1-DP-1 point at the same device
+        hwmons = glob.glob(f'{card}/hwmon/hwmon*')
+        if not hwmons:
+            continue
+        hw = hwmons[0]
+        with open(f'{hw}/name') as f:
+            driver = f.read().strip()
+        temps = []
+        for inp in sorted(glob.glob(f'{hw}/temp*_input')):
+            base = inp[:-len('_input')]
+            label_path = f'{base}_label'
+            label = open(label_path).read().strip() if os.path.exists(label_path) else os.path.basename(base)
+            temps.append({'label': label, 'c': _read(inp, 1000), 'crit_c': _read(f'{base}_crit', 1000)})
+        power = _read(f'{hw}/power1_average', 1e6)
+        if power is None:
+            power = _read(f'{hw}/power1_input', 1e6)
+        gpus.append({
+            'card': os.path.basename(os.path.dirname(card)),
+            'driver': driver,
+            'temps': temps,
+            'fan_rpm': _read(f'{hw}/fan1_input'),
+            'fan_max_rpm': _read(f'{hw}/fan1_max'),
+            'power_w': power,
+            'power_cap_w': _read(f'{hw}/power1_cap', 1e6),
+            'busy_pct': _read(f'{card}/gpu_busy_percent'),
+        })
+    if not gpus:
+        return jsonify({'error': 'No GPU with hwmon sensors found'}), 404
+    return jsonify({'gpus': gpus})
 
 
 _GAS_PAGE = r"""<!DOCTYPE html>
