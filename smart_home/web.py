@@ -10969,34 +10969,40 @@ def api_gpu():
             return None
 
     gpus = []
-    for card in sorted(glob.glob('/sys/class/drm/card[0-9]*/device')):
-        if '-' in os.path.basename(os.path.dirname(card)):
-            continue  # connector entries like card1-DP-1 point at the same device
-        hwmons = glob.glob(f'{card}/hwmon/hwmon*')
-        if not hwmons:
-            continue
-        hw = hwmons[0]
-        with open(f'{hw}/name') as f:
-            driver = f.read().strip()
-        temps = []
-        for inp in sorted(glob.glob(f'{hw}/temp*_input')):
-            base = inp[:-len('_input')]
-            label_path = f'{base}_label'
-            label = open(label_path).read().strip() if os.path.exists(label_path) else os.path.basename(base)
-            temps.append({'label': label, 'c': _read(inp, 1000), 'crit_c': _read(f'{base}_crit', 1000)})
-        power = _read(f'{hw}/power1_average', 1e6)
-        if power is None:
-            power = _read(f'{hw}/power1_input', 1e6)
-        gpus.append({
-            'card': os.path.basename(os.path.dirname(card)),
-            'driver': driver,
-            'temps': temps,
-            'fan_rpm': _read(f'{hw}/fan1_input'),
-            'fan_max_rpm': _read(f'{hw}/fan1_max'),
-            'power_w': power,
-            'power_cap_w': _read(f'{hw}/power1_cap', 1e6),
-            'busy_pct': _read(f'{card}/gpu_busy_percent'),
-        })
+    try:
+        for card in sorted(glob.glob('/sys/class/drm/card[0-9]*/device')):
+            if '-' in os.path.basename(os.path.dirname(card)):
+                continue  # connector entries like card1-DP-1 point at the same device
+            hwmons = glob.glob(f'{card}/hwmon/hwmon*')
+            if not hwmons:
+                continue
+            hw = hwmons[0]
+            with open(f'{hw}/name') as f:
+                driver = f.read().strip()
+            temps = []
+            for inp in sorted(glob.glob(f'{hw}/temp*_input')):
+                base = inp[:-len('_input')]
+                label_path = f'{base}_label'
+                label = open(label_path).read().strip() if os.path.exists(label_path) else os.path.basename(base)
+                temps.append({'label': label, 'c': _read(inp, 1000), 'crit_c': _read(f'{base}_crit', 1000)})
+            power = _read(f'{hw}/power1_average', 1e6)
+            if power is None:
+                power = _read(f'{hw}/power1_input', 1e6)
+            gpus.append({
+                'card': os.path.basename(os.path.dirname(card)),
+                'driver': driver,
+                'temps': temps,
+                'fan_rpm': _read(f'{hw}/fan1_input'),
+                'fan_max_rpm': _read(f'{hw}/fan1_max'),
+                'power_w': power,
+                'power_cap_w': _read(f'{hw}/power1_cap', 1e6),
+                'busy_pct': _read(f'{card}/gpu_busy_percent'),
+            })
+    except OSError as e:
+        # amdgpu returns EBUSY on every sensor while the device is stuck in a runtime-PM transition
+        pm = ', '.join(f"{p.split('/')[4]} {open(p).read().strip()}"
+                       for p in glob.glob('/sys/class/drm/card[0-9]/device/power/runtime_status'))
+        return jsonify({'error': f'GPU sensors unreadable: {e.strerror} (runtime PM: {pm or "unknown"})'}), 503
     if not gpus:
         return jsonify({'error': 'No GPU with hwmon sensors found'}), 404
     return jsonify({'gpus': gpus})
