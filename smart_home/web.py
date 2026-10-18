@@ -5564,19 +5564,28 @@ async function loadGpu() {
     const crit = t.crit_c ?? 100;
     return t.c >= crit - 10 ? '#c0392b' : t.c >= crit - 25 ? '#e07820' : '#2a9d6e';
   };
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   el.innerHTML = data.gpus.map(g => {
+    const label = `<div class="label" title="${esc(g.card)}">${esc(g.name)}</div>`;
+    const ts = `<div class="ts">${new Date().toLocaleTimeString()}</div>`;
+    if (g.suspended) {
+      return `<div class="card gpu-card offline">${label}
+        <div class="gpu-t" style="color:#aabbc8;margin:.3rem 0 .2rem">Idle</div>
+        <div class="gpu-stats" style="color:#aabbc8">Powered down</div>${ts}</div>`;
+    }
+    // Greyed out while idle (0% load); otherwise colored by distance to the critical limit
+    const idle = g.busy_pct === 0;
     const temps = g.temps.filter(t => t.c != null).map(t => `<div title="Critical at ${t.crit_c ?? '?'}&deg;C">
-        <div class="gpu-t" style="color:${tempColor(t)}">${Math.round(t.c)}&deg;</div>
-        <div class="gpu-tl">${t.label}</div></div>`).join('');
+        <div class="gpu-t" style="color:${idle ? '#aabbc8' : tempColor(t)}">${Math.round(t.c)}&deg;</div>
+        <div class="gpu-tl">${esc(t.label)}</div></div>`).join('');
     const stats = [
-      g.busy_pct != null ? `${g.busy_pct}% load` : null,
+      g.busy_pct != null ? (idle ? 'Idle' : `${g.busy_pct}% load`) : null,
       g.power_w != null ? `${Math.round(g.power_w)}${g.power_cap_w ? '/' + Math.round(g.power_cap_w) : ''} W` : null,
       g.fan_rpm != null ? `Fan ${g.fan_rpm} rpm` : null,
     ].filter(Boolean).join(' &middot; ');
-    return `<div class="card gpu-card"><div class="label">GPU &middot; ${g.card}</div>
+    return `<div class="card gpu-card${idle ? ' offline' : ''}">${label}
       <div class="gpu-temps">${temps}</div>
-      <div class="gpu-stats">${stats}</div>
-      <div class="ts">${new Date().toLocaleTimeString()}</div></div>`;
+      <div class="gpu-stats"${idle ? ' style="color:#aabbc8"' : ''}>${stats}</div>${ts}</div>`;
   }).join('');
 }
 loadCurrent();
@@ -10955,9 +10964,62 @@ def api_gas_summary():
     })
 
 
+_GPU_VENDORS = {'0x1002': 'AMD', '0x10de': 'NVIDIA', '0x8086': 'Intel'}
+
+
+def _gpu_model_name(dev: str) -> str:
+    """Marketing name from pci.ids, e.g. 'AMD RX 5700 XT RAW II'.
+
+    Prefers the board (subsystem) name since the chip name covers several cards
+    ('Navi 10 [Radeon RX 5600 OEM/5600 XT / 5700/5700 XT]').
+    """
+    def _id(name):
+        with open(f'{dev}/{name}') as f:
+            return f.read().strip()
+
+    vendor, device = _id('vendor'), _id('device')
+    sub = f"{_id('subsystem_vendor')[2:]} {_id('subsystem_device')[2:]}"
+    prefix = _GPU_VENDORS.get(vendor, vendor)
+    chip = sub_name = None
+    for path in ('/usr/share/hwdata/pci.ids', '/usr/share/misc/pci.ids'):
+        try:
+            f = open(path, encoding='utf-8', errors='replace')
+        except FileNotFoundError:
+            continue
+        with f:
+            in_vendor = in_device = False
+            for line in f:
+                if not line.strip() or line.startswith('#'):
+                    continue
+                if not line.startswith('\t'):
+                    if in_vendor:
+                        break
+                    in_vendor = line.startswith(vendor[2:] + ' ')
+                elif in_vendor and not line.startswith('\t\t'):
+                    if in_device:
+                        break
+                    in_device = line[1:].startswith(device[2:] + ' ')
+                    if in_device:
+                        chip = line[1:].split(' ', 1)[1].strip()
+                elif in_device and line[2:].startswith(sub + ' '):
+                    sub_name = line[2:].split('  ', 1)[1].strip()
+                    break
+        break
+    if sub_name:
+        return f'{prefix} {sub_name}'
+    if chip:
+        # 'Navi 10 [Radeon RX 5700]' -> 'AMD Radeon RX 5700'
+        return f"{prefix} {chip.split('[', 1)[1].rstrip(']') if '[' in chip else chip}"
+    return f'{prefix} GPU {device}'
+
+
 @app.get("/api/gpu")
 def api_gpu():
-    """Live GPU temperatures, fan, power and load read from the amdgpu hwmon sysfs interface."""
+    """Live GPU temperatures, fan, power and load read from the amdgpu hwmon sysfs interface.
+
+    A runtime-suspended GPU is reported as idle: amdgpu answers every hwmon read with
+    EBUSY while powered down rather than waking the card.
+    """
     import glob
     import os
 
@@ -10968,17 +11030,26 @@ def api_gpu():
         except FileNotFoundError:
             return None
 
+    def _pm_status(dev):
+        try:
+            with open(f'{dev}/power/runtime_status') as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            return None
+
     gpus = []
-    try:
-        for card in sorted(glob.glob('/sys/class/drm/card[0-9]*/device')):
-            if '-' in os.path.basename(os.path.dirname(card)):
-                continue  # connector entries like card1-DP-1 point at the same device
-            hwmons = glob.glob(f'{card}/hwmon/hwmon*')
-            if not hwmons:
-                continue
-            hw = hwmons[0]
-            with open(f'{hw}/name') as f:
-                driver = f.read().strip()
+    for card in sorted(glob.glob('/sys/class/drm/card[0-9]*/device')):
+        if '-' in os.path.basename(os.path.dirname(card)):
+            continue  # connector entries like card1-DP-1 point at the same device
+        hwmons = glob.glob(f'{card}/hwmon/hwmon*')
+        if not hwmons:
+            continue
+        hw = hwmons[0]
+        info = {'card': os.path.basename(os.path.dirname(card)), 'name': _gpu_model_name(card)}
+        if _pm_status(card) in ('suspended', 'suspending'):
+            gpus.append({**info, 'suspended': True})
+            continue
+        try:
             temps = []
             for inp in sorted(glob.glob(f'{hw}/temp*_input')):
                 base = inp[:-len('_input')]
@@ -10989,8 +11060,8 @@ def api_gpu():
             if power is None:
                 power = _read(f'{hw}/power1_input', 1e6)
             gpus.append({
-                'card': os.path.basename(os.path.dirname(card)),
-                'driver': driver,
+                **info,
+                'suspended': False,
                 'temps': temps,
                 'fan_rpm': _read(f'{hw}/fan1_input'),
                 'fan_max_rpm': _read(f'{hw}/fan1_max'),
@@ -10998,11 +11069,12 @@ def api_gpu():
                 'power_cap_w': _read(f'{hw}/power1_cap', 1e6),
                 'busy_pct': _read(f'{card}/gpu_busy_percent'),
             })
-    except OSError as e:
-        # amdgpu returns EBUSY on every sensor while the device is stuck in a runtime-PM transition
-        pm = ', '.join(f"{p.split('/')[4]} {open(p).read().strip()}"
-                       for p in glob.glob('/sys/class/drm/card[0-9]/device/power/runtime_status'))
-        return jsonify({'error': f'GPU sensors unreadable: {e.strerror} (runtime PM: {pm or "unknown"})'}), 503
+        except OSError as e:
+            pm = _pm_status(card)
+            if pm in ('suspended', 'suspending'):
+                gpus.append({**info, 'suspended': True})  # powered down mid-read
+                continue
+            return jsonify({'error': f"{info['name']} sensors unreadable: {e.strerror} (runtime PM: {pm or 'unknown'})"}), 503
     if not gpus:
         return jsonify({'error': 'No GPU with hwmon sensors found'}), 404
     return jsonify({'gpus': gpus})
