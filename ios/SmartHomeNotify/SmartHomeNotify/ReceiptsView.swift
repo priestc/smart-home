@@ -562,8 +562,15 @@ struct ReceiptDetailView: View {
         }
         .sheet(isPresented: $showImage) {
             if let image {
-                ScrollView([.vertical, .horizontal]) {
-                    Image(uiImage: image).resizable().scaledToFit()
+                NavigationStack {
+                    ScrollView([.vertical, .horizontal]) {
+                        Image(uiImage: image).resizable().scaledToFit()
+                    }
+                    .navigationTitle("Photo")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) { Button("Done") { showImage = false } }
+                    }
                 }
             }
         }
