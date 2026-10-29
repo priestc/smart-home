@@ -333,7 +333,7 @@ def open_db(path: str) -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS receipt_items_receipt ON receipt_items (receipt_id)")
     # raw_text and item_code are the line as printed (e.g. Walmart's 12-digit
     # item number); name_key is derived from them and links the item to a
-    # human-friendly name in receipt_item_names. NULL for hand-added items.
+    # human-friendly name in receipt_known_items. NULL for hand-added items.
     for col in ("raw_text TEXT", "item_code TEXT", "name_key TEXT"):
         try:
             conn.execute(f"ALTER TABLE receipt_items ADD COLUMN {col}")
@@ -341,13 +341,32 @@ def open_db(path: str) -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass  # column already exists
     conn.execute("CREATE INDEX IF NOT EXISTS receipt_items_name_key ON receipt_items (name_key)")
+    # A line's quantity is an amount of product in `unit` ('ea', 'oz' or 'lb'),
+    # set when the receipt prints a weight or count, or entered by hand. It
+    # overrides the item's default quantity in receipt_known_items.
+    try:
+        conn.execute("ALTER TABLE receipt_items ADD COLUMN unit TEXT")
+        # Earlier readings put a guessed count of 1 on nearly every line
+        conn.execute("UPDATE receipt_items SET quantity=NULL WHERE quantity=1")
+        conn.execute("UPDATE receipt_items SET unit='ea' WHERE quantity IS NOT NULL")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    # Per-item settings keyed by receipt_items.name_key: a friendly name and a
+    # default quantity (e.g. a frozen pizza is 21.7 oz). Either may be NULL.
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS receipt_item_names (
+        CREATE TABLE IF NOT EXISTS receipt_known_items (
             name_key   TEXT PRIMARY KEY,
-            name       TEXT NOT NULL,
+            name       TEXT,
+            quantity   REAL,
+            unit       TEXT,
             updated_at TEXT NOT NULL
         )
     """)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_item_names'").fetchone():
+        conn.execute("INSERT OR IGNORE INTO receipt_known_items (name_key, name, updated_at) "
+                     "SELECT name_key, name, updated_at FROM receipt_item_names")
+        conn.execute("DROP TABLE receipt_item_names")
     conn.commit()
     return conn
 

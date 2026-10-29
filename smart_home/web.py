@@ -11704,9 +11704,13 @@ def api_receipt_detail(rid):
         if row is None:
             return jsonify({'error': 'Receipt not found'}), 404
         r = _receipt_json(conn, row)
+        # default_quantity/default_unit come from the item's settings and apply
+        # when the line has no quantity of its own
         r['items'] = [dict(i) for i in conn.execute(
-            "SELECT id, description, quantity, total_price, category, raw_text, item_code FROM receipt_items "
-            "WHERE receipt_id=? ORDER BY position", (rid,)
+            "SELECT i.id, i.description, i.quantity, i.unit, i.total_price, i.category, i.raw_text, i.item_code, "
+            "i.name_key, k.quantity AS default_quantity, k.unit AS default_unit "
+            "FROM receipt_items i LEFT JOIN receipt_known_items k ON k.name_key = i.name_key "
+            "WHERE i.receipt_id=? ORDER BY i.position", (rid,)
         ).fetchall()]
         return jsonify(r)
 
@@ -11752,6 +11756,23 @@ def api_receipt_delete(rid):
     return jsonify({'ok': True})
 
 
+def _quantity_fields(data: dict) -> tuple[dict, str | None]:
+    """quantity + unit from a request body; both null clears it. Returns (fields, error)."""
+    from smart_home import receipts as _receipts
+    q, unit = data.get('quantity'), data.get('unit')
+    if q in (None, ''):
+        return {'quantity': None, 'unit': None}, None
+    try:
+        q = float(q)
+    except (TypeError, ValueError):
+        return {}, 'quantity must be a number'
+    if q <= 0:
+        return {}, 'quantity must be more than zero'
+    if unit not in _receipts.UNITS:
+        return {}, f'unit must be one of: {", ".join(_receipts.UNITS)}'
+    return {'quantity': q, 'unit': unit}, None
+
+
 def _receipt_item_fields(data: dict, partial: bool) -> tuple[dict, str | None]:
     """Validate item fields from a request body. Returns (fields, error)."""
     from smart_home import receipts as _receipts
@@ -11766,12 +11787,11 @@ def _receipt_item_fields(data: dict, partial: bool) -> tuple[dict, str | None]:
             out['total_price'] = round(float(data.get('total_price')), 2)
         except (TypeError, ValueError):
             return {}, 'total_price must be a number'
-    if 'quantity' in data:
-        q = data.get('quantity')
-        try:
-            out['quantity'] = None if q in (None, '') else float(q)
-        except (TypeError, ValueError):
-            return {}, 'quantity must be a number'
+    if 'quantity' in data or 'unit' in data:
+        qty, err = _quantity_fields(data)
+        if err:
+            return {}, err
+        out.update(qty)
     if 'category' in data or not partial:
         category = data.get('category', 'Other' if not partial else None)
         if category not in _receipts.CATEGORIES:
@@ -11830,9 +11850,10 @@ def api_receipt_item_add(rid):
             "SELECT COALESCE(MAX(position), -1) + 1 FROM receipt_items WHERE receipt_id=?", (rid,)
         ).fetchone()[0]
         cur = conn.execute(
-            "INSERT INTO receipt_items (receipt_id, position, description, quantity, total_price, category) "
-            "VALUES (?,?,?,?,?,?)",
-            (rid, pos, fields['description'], fields.get('quantity'), fields['total_price'], fields['category']),
+            "INSERT INTO receipt_items (receipt_id, position, description, quantity, unit, total_price, category) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (rid, pos, fields['description'], fields.get('quantity'), fields.get('unit'),
+             fields['total_price'], fields['category']),
         )
     return jsonify({'ok': True, 'id': cur.lastrowid}), 201
 
@@ -12091,6 +12112,9 @@ _RECEIPT_DETAIL_PAGE = """\\
     .actions { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
     td input[data-f=description] { width: 100%; min-width: 14rem; }
     td input.qty { width: 4.5rem; }
+    td select.unit { margin-left: .25rem; }
+    .qty-cell { white-space: nowrap; }
+    .unit-price { font-size: .74rem; color: #7a90a8; margin-top: .2rem; }
     td input.price { width: 6rem; text-align: right; }
     .printed { font-family: ui-monospace, Menlo, monospace; font-size: .76rem; color: #7a90a8; margin-top: .2rem; }
     .row-status { font-size: .75rem; white-space: nowrap; }
@@ -12124,7 +12148,7 @@ _RECEIPT_DETAIL_PAGE = """\\
       <div class="card" id="items-card">
         <h2>Items</h2>
         <table>
-          <thead><tr><th>Description</th><th>Qty</th><th class="num">Price</th><th>Category</th><th></th><th></th></tr></thead>
+          <thead><tr><th>Description</th><th title="Amount bought on this line. Leave empty to use the item&rsquo;s default from the Item names page.">Quantity</th><th class="num">Price</th><th>Category</th><th></th><th></th></tr></thead>
           <tbody id="items"></tbody>
           <tfoot><tr><td>Items total</td><td></td><td class="num" id="items-sum"></td><td colspan="3"></td></tr></tfoot>
         </table>
@@ -12203,11 +12227,27 @@ function itemRow(it) {
   return `<tr data-id="${it.id ?? ''}">
     <td><input type="text" data-f="description" value="${esc(it.description)}">
         ${printed && printed !== it.description ? `<div class="printed">${esc(printed)}</div>` : ''}</td>
-    <td><input type="text" class="qty" data-f="quantity" inputmode="decimal" value="${it.quantity ?? ''}"></td>
-    <td class="num"><input type="text" class="price" data-f="total_price" inputmode="decimal" value="${it.id == null ? '' : it.total_price.toFixed(2)}"></td>
+    <td class="qty-cell"><input type="text" class="qty" data-f="quantity" inputmode="decimal" value="${it.quantity ?? ''}"
+          placeholder="${it.default_quantity ?? ''}" title="${it.default_quantity != null ? `Item default: ${fmtQty(it.default_quantity, it.default_unit)}. Type here to override it for this line.` : 'Amount bought on this line'}"
+        ><select class="unit" data-f="unit">${UNITS.map(u => `<option value="${u}"${u === (it.unit || it.default_unit || 'ea') ? ' selected' : ''}>${u}</option>`).join('')}</select>
+        ${it.quantity == null && it.default_quantity != null ? '<div class="unit-price">item default</div>' : ''}</td>
+    <td class="num"><input type="text" class="price" data-f="total_price" inputmode="decimal" value="${it.id == null ? '' : it.total_price.toFixed(2)}">
+        <div class="unit-price">${unitPrice(it)}</div></td>
     <td><select data-f="category">${opts}</select></td>
     <td class="row-status"></td>
     <td><button class="icon-btn" title="Delete item" data-delete>&times;</button></td></tr>`;
+}
+
+const UNITS = ['ea', 'oz', 'lb'];
+function fmtQty(q, unit) {
+  return `${+q.toFixed(3)} ${unit || 'ea'}`;
+}
+// Price per unit using the line's own quantity, or the item's default
+function unitPrice(it) {
+  const q = it.quantity ?? it.default_quantity;
+  const unit = it.quantity != null ? it.unit : it.default_unit;
+  if (q == null || it.id == null || (unit === 'ea' && q === 1)) return '';
+  return `${money(it.total_price / q)}/${unit || 'ea'}`;
 }
 
 function parseAmount(s) {
@@ -12274,13 +12314,13 @@ async function saveRow(tr) {
   const get = f => tr.querySelector(`[data-f="${f}"]`).value;
   const price = parseAmount(get('total_price'));
   const qty = parseAmount(get('quantity'));
-  const body = {description: get('description'), total_price: price, quantity: qty, category: get('category')};
+  const body = {description: get('description'), total_price: price, quantity: qty, unit: qty == null ? null : get('unit'), category: get('category')};
   if (!tr.dataset.id && (!body.description.trim() || price == null)) {
     status.className = 'row-status muted'; status.textContent = 'Not saved yet'; return;
   }
   if (!body.description.trim()) { status.className = 'row-status err'; status.textContent = 'Needs a description'; return; }
   if (price == null || Number.isNaN(price)) { status.className = 'row-status err'; status.textContent = 'Needs a price'; return; }
-  if (Number.isNaN(qty)) { status.className = 'row-status err'; status.textContent = 'Bad quantity'; return; }
+  if (Number.isNaN(qty) || (qty != null && qty <= 0)) { status.className = 'row-status err'; status.textContent = 'Bad quantity'; return; }
   status.className = 'row-status muted'; status.textContent = 'Saving\\u2026';
   try {
     if (tr.dataset.id) {
@@ -12291,6 +12331,12 @@ async function saveRow(tr) {
     }
     status.className = 'row-status ok'; status.textContent = 'Saved';
     await refreshStatus();
+    const saved = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
+    if (saved) {
+      tr.querySelector('td.num .unit-price').textContent = unitPrice(saved);
+      const hint = tr.querySelector('.qty-cell .unit-price');
+      if (hint && saved.quantity != null) hint.remove();
+    }
   } catch (e) {
     status.className = 'row-status err'; status.textContent = 'Save failed';
     showNetworkError(`Could not save item: ${e.message}`);
@@ -12366,7 +12412,7 @@ def api_receipt_known_items():
     day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
     with _conn() as conn:
         rows = conn.execute(f"""
-            SELECT i.name_key, n.name, COUNT(*) AS times_bought,
+            SELECT i.name_key, n.name, n.quantity, n.unit, COUNT(*) AS times_bought,
                    MAX({day}) AS last_bought,
                    (SELECT i2.raw_text FROM receipt_items i2 WHERE i2.name_key = i.name_key
                     ORDER BY i2.id DESC LIMIT 1) AS raw_text,
@@ -12379,7 +12425,7 @@ def api_receipt_known_items():
                    GROUP_CONCAT(DISTINCT r.merchant) AS merchants
             FROM receipt_items i
             JOIN receipts r ON r.id = i.receipt_id
-            LEFT JOIN receipt_item_names n ON n.name_key = i.name_key
+            LEFT JOIN receipt_known_items n ON n.name_key = i.name_key
             WHERE i.name_key IS NOT NULL
             GROUP BY i.name_key
             ORDER BY (n.name IS NOT NULL), last_bought DESC, raw_text
@@ -12387,29 +12433,39 @@ def api_receipt_known_items():
     return jsonify({'items': [dict(r) for r in rows]})
 
 
-@app.put("/api/receipts/known-items/name")
-def api_receipt_item_name():
-    """Set (or with an empty name, clear) the friendly name for a name_key.
-    Setting it also renames every existing item with that key."""
+@app.patch("/api/receipts/known-items")
+def api_receipt_known_item_update():
+    """Update an item's settings by name_key: `name` (empty clears it) and/or
+    `quantity` + `unit` (null clears it). Setting a name also renames every
+    existing receipt line with that key."""
     data = request.get_json(silent=True) or {}
     key = data.get('name_key')
     if not isinstance(key, str) or not key:
         return jsonify({'error': 'name_key is required'}), 400
-    name = (data.get('name') or '').strip()
+    fields = {}
+    if 'name' in data:
+        fields['name'] = (data.get('name') or '').strip() or None
+    if 'quantity' in data or 'unit' in data:
+        qty, err = _quantity_fields(data)
+        if err:
+            return jsonify({'error': err}), 400
+        fields.update(qty)
+    if not fields:
+        return jsonify({'error': 'Nothing to update'}), 400
     with _conn() as conn:
         if conn.execute("SELECT 1 FROM receipt_items WHERE name_key=? LIMIT 1", (key,)).fetchone() is None:
             return jsonify({'error': 'No receipt item has that key'}), 404
-        if not name:
-            # Existing items keep their current description
-            conn.execute("DELETE FROM receipt_item_names WHERE name_key=?", (key,))
-            return jsonify({'ok': True, 'renamed': 0})
-        conn.execute(
-            "INSERT INTO receipt_item_names (name_key, name, updated_at) VALUES (?,?,?) "
-            "ON CONFLICT(name_key) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at",
-            (key, name, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-        )
-        cur = conn.execute("UPDATE receipt_items SET description=? WHERE name_key=?", (name, key))
-    return jsonify({'ok': True, 'renamed': cur.rowcount})
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("INSERT OR IGNORE INTO receipt_known_items (name_key, updated_at) VALUES (?,?)", (key, now))
+        sets = ', '.join(f'{k}=?' for k in fields)
+        conn.execute(f"UPDATE receipt_known_items SET {sets}, updated_at=? WHERE name_key=?",
+                     (*fields.values(), now, key))
+        renamed = 0
+        if fields.get('name'):
+            # Clearing a name leaves existing lines' descriptions as they are
+            renamed = conn.execute("UPDATE receipt_items SET description=? WHERE name_key=?",
+                                   (fields['name'], key)).rowcount
+    return jsonify({'ok': True, 'renamed': renamed})
 
 
 _RECEIPT_ITEMS_PAGE = """\
@@ -12442,7 +12498,10 @@ _RECEIPT_ITEMS_PAGE = """\
     .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .name-cell { display: flex; gap: .4rem; align-items: center; min-width: 18rem; }
     .name-cell input { flex: 1; padding: .4rem .6rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .88rem; }
-    .name-cell input.dirty { border-color: #e07820; }
+    .qty-cell { display: flex; gap: .25rem; align-items: center; white-space: nowrap; }
+    .qty-cell input { width: 4.5rem; padding: .4rem .5rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .88rem; text-align: right; }
+    .qty-cell select { padding: .38rem .3rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .85rem; background: #fff; }
+    .dirty { border-color: #e07820 !important; }
     .name-cell button { background: #2e7dd4; color: #fff; border: none; border-radius: 6px; padding: .4rem .8rem; cursor: pointer; font-size: .82rem; }
     .name-cell button:disabled { background: #aabbc8; cursor: default; }
     .status { font-size: .78rem; min-width: 4rem; }
@@ -12457,7 +12516,8 @@ _RECEIPT_ITEMS_PAGE = """\
   <p class="intro">Every item that has appeared on a scanned receipt. Give an item a friendly name and it replaces
   the description on all of its receipts. The text and item number as printed are kept, so the next receipt with the
   same item gets the name automatically. Items with an item number (Walmart prints one per line) are matched by that
-  number; others by their printed text.</p>
+  number; others by their printed text. The default quantity is the amount in one purchase (e.g. a 21.7&nbsp;oz pizza);
+  a quantity on a receipt line, such as a weight printed on the receipt, overrides it for that line.</p>
   <div class="toolbar">
     <input type="search" id="filter" placeholder="Filter by printed text, number, name or store">
     <label><input type="checkbox" id="unnamed-only"> Unnamed only</label>
@@ -12467,9 +12527,9 @@ _RECEIPT_ITEMS_PAGE = """\
     <table>
       <thead><tr>
         <th>As printed</th><th>Item #</th><th>Store</th><th class="num">Bought</th><th class="num">Last price</th>
-        <th>Friendly name</th><th></th>
+        <th>Friendly name</th><th>Default quantity</th><th></th><th></th>
       </tr></thead>
-      <tbody id="rows"><tr><td colspan="7" class="empty">Loading&hellip;</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="9" class="empty">Loading&hellip;</td></tr></tbody>
     </table>
   </div>
 <script>
@@ -12514,12 +12574,12 @@ function render() {
     `${shown.length} shown \u00b7 ${named} of ${items.length} named`;
   const tbody = document.getElementById('rows');
   if (!shown.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="empty">${items.length ? 'No items match.' : 'No receipt items yet. Scan a receipt in the app.'}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">${items.length ? 'No items match.' : 'No receipt items yet. Scan a receipt in the app.'}</td></tr>`;
     return;
   }
   tbody.innerHTML = shown.map(it => {
     const idx = items.indexOf(it);
-    return `<tr>
+    return `<tr data-idx="${idx}">
       <td><div class="raw">${esc(it.raw_text) || '<span class="muted">(none)</span>'}</div>
           ${!it.name && it.description ? `<div class="muted">read as: ${esc(it.description)}</div>` : ''}</td>
       <td class="code">${esc(it.item_code) || '&mdash;'}</td>
@@ -12527,54 +12587,88 @@ function render() {
       <td class="num">${it.times_bought}&times;<div class="muted">${esc(it.last_bought)}</div></td>
       <td class="num">$${Number(it.last_price).toFixed(2)}</td>
       <td><div class="name-cell">
-        <input type="text" data-idx="${idx}" value="${esc(it.name || '')}" placeholder="${esc(it.description || '')}">
-        <button data-idx="${idx}" disabled>Save</button>
+        <input type="text" data-f="name" value="${esc(it.name || '')}" placeholder="${esc(it.description || '')}">
       </div></td>
-      <td class="status" id="status-${idx}"></td>
+      <td><div class="qty-cell">
+        <input type="text" data-f="quantity" inputmode="decimal" value="${it.quantity ?? ''}" placeholder="none">
+        <select data-f="unit">${UNITS.map(u => `<option${u === (it.unit || 'oz') ? ' selected' : ''}>${u}</option>`).join('')}</select>
+      </div></td>
+      <td><div class="name-cell"><button data-save disabled>Save</button></div></td>
+      <td class="status"></td>
     </tr>`;
   }).join('');
 }
 
-async function save(idx) {
-  const it = items[idx];
-  const input = document.querySelector(`input[data-idx="${idx}"]`);
-  const btn = document.querySelector(`button[data-idx="${idx}"]`);
-  const status = document.getElementById(`status-${idx}`);
-  btn.disabled = true;
+const UNITS = ['oz', 'lb', 'ea'];
+
+function rowValues(tr) {
+  const get = f => tr.querySelector(`[data-f="${f}"]`).value.trim();
+  return {name: get('name'), quantity: get('quantity'), unit: get('unit')};
+}
+// Which fields differ from what's saved, as an API body (null if none)
+function changes(tr) {
+  const it = items[+tr.dataset.idx], v = rowValues(tr), body = {};
+  if (v.name !== (it.name || '')) body.name = v.name;
+  const savedQty = it.quantity == null ? '' : String(it.quantity);
+  if (v.quantity !== savedQty || (v.quantity && v.unit !== it.unit)) {
+    body.quantity = v.quantity === '' ? null : +v.quantity;
+    body.unit = v.quantity === '' ? null : v.unit;
+  }
+  return Object.keys(body).length ? body : null;
+}
+function markDirty(tr) {
+  const it = items[+tr.dataset.idx], v = rowValues(tr);
+  tr.querySelector('[data-f="name"]').classList.toggle('dirty', v.name !== (it.name || ''));
+  tr.querySelector('[data-f="quantity"]').classList.toggle('dirty',
+    v.quantity !== (it.quantity == null ? '' : String(it.quantity)) || (!!v.quantity && v.unit !== it.unit));
+  tr.querySelector('[data-save]').disabled = !changes(tr);
+}
+
+async function save(tr) {
+  const it = items[+tr.dataset.idx];
+  const body = changes(tr);
+  const status = tr.querySelector('.status');
+  if (!body) return;
+  if ('quantity' in body && body.quantity !== null && !(body.quantity > 0)) {
+    status.className = 'status err';
+    status.textContent = 'Quantity must be a number above 0';
+    return;
+  }
+  tr.querySelector('[data-save]').disabled = true;
   status.className = 'status';
   status.textContent = 'Saving\u2026';
   try {
-    const res = await fetchJSON('/api/receipts/known-items/name', {
-      method: 'PUT',
+    const res = await fetchJSON('/api/receipts/known-items', {
+      method: 'PATCH',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name_key: it.name_key, name: input.value}),
+      body: JSON.stringify({name_key: it.name_key, ...body}),
     });
-    it.name = input.value.trim() || null;
-    if (it.name) it.description = it.name;
-    input.value = it.name || '';
-    input.classList.remove('dirty');
+    if ('name' in body) {
+      it.name = body.name || null;
+      if (it.name) it.description = it.name;
+    }
+    if ('quantity' in body) { it.quantity = body.quantity; it.unit = body.unit; }
+    tr.querySelector('[data-f="name"]').value = it.name || '';
+    tr.querySelector('[data-f="quantity"]').value = it.quantity ?? '';
+    markDirty(tr);
     status.className = 'status ok';
-    status.textContent = it.name ? `Saved (${res.renamed} renamed)` : 'Cleared';
+    status.textContent = res.renamed ? `Saved (${res.renamed} renamed)` : 'Saved';
   } catch (e) {
-    btn.disabled = false;
+    markDirty(tr);
     status.className = 'status err';
     status.textContent = 'Failed';
-    showNetworkError(`Could not save name: ${e.message}`);
+    showNetworkError(`Could not save item: ${e.message}`);
   }
 }
 
-document.getElementById('rows').addEventListener('input', e => {
-  if (!e.target.matches('input[data-idx]')) return;
-  const idx = +e.target.dataset.idx;
-  const dirty = e.target.value.trim() !== (items[idx].name || '');
-  e.target.classList.toggle('dirty', dirty);
-  document.querySelector(`button[data-idx="${idx}"]`).disabled = !dirty;
+const rowsEl = document.getElementById('rows');
+rowsEl.addEventListener('input', e => { if (e.target.dataset.f) markDirty(e.target.closest('tr')); });
+rowsEl.addEventListener('change', e => { if (e.target.dataset.f) markDirty(e.target.closest('tr')); });
+rowsEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.dataset.f) save(e.target.closest('tr'));
 });
-document.getElementById('rows').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && e.target.matches('input[data-idx]')) save(+e.target.dataset.idx);
-});
-document.getElementById('rows').addEventListener('click', e => {
-  if (e.target.matches('button[data-idx]')) save(+e.target.dataset.idx);
+rowsEl.addEventListener('click', e => {
+  if (e.target.matches('[data-save]')) save(e.target.closest('tr'));
 });
 document.getElementById('filter').addEventListener('input', render);
 document.getElementById('unnamed-only').addEventListener('change', render);
@@ -12584,7 +12678,7 @@ fetchJSON('/api/receipts/known-items')
   .catch(e => {
     showNetworkError(`Could not load receipt items: ${e.message}`);
     document.getElementById('rows').innerHTML =
-      `<tr><td colspan="7" class="empty">Could not load receipt items: ${esc(e.message)}</td></tr>`;
+      `<tr><td colspan="9" class="empty">Could not load receipt items: ${esc(e.message)}</td></tr>`;
   });
 </script>
 </body>
