@@ -11632,6 +11632,278 @@ def gas_page():
     return Response(_GAS_PAGE, mimetype="text/html")
 
 
+_RECEIPT_COLS = ("id, uploaded_at, status, error, processed_at, merchant, purchase_date, "
+                 "subtotal, tax, total, notes")
+
+
+def _receipt_json(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    from smart_home import receipts as _receipts
+    r = dict(row)
+    # A 'processing' row with no live worker was interrupted (e.g. by a server restart)
+    if r['status'] == 'processing' and not _receipts.is_running(r['id']):
+        r['status'] = 'error'
+        r['error'] = 'Processing was interrupted; tap Retry'
+    n, items_sum = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(total_price), 0) FROM receipt_items WHERE receipt_id=?", (r['id'],)
+    ).fetchone()
+    r['n_items'] = n
+    # How far items + tax are from the printed total; non-zero means a line
+    # was probably misread and the receipt needs a look.
+    r['mismatch'] = None
+    if r['status'] == 'done' and r['total'] is not None:
+        diff = round(items_sum + (r['tax'] or 0) - r['total'], 2)
+        r['mismatch'] = diff if abs(diff) >= 0.01 else None
+    return r
+
+
+@app.get("/api/receipts/config")
+def api_receipts_config():
+    from smart_home import receipts as _receipts
+    return jsonify({
+        'model': _receipts.MODEL,
+        'categories': _receipts.CATEGORIES,
+        'tax_category': _receipts.TAX_CATEGORY,
+    })
+
+
+@app.post("/api/receipts")
+def api_receipts_upload():
+    """Body is the raw image bytes, with Content-Type set to the image type."""
+    from smart_home import receipts as _receipts
+    image = request.get_data()
+    if not image:
+        return jsonify({'error': 'No image in request body'}), 400
+    if len(image) > 20 * 1024 * 1024:
+        return jsonify({'error': 'Image is larger than 20 MB'}), 413
+    media_type = (request.content_type or '').split(';')[0].strip().lower()
+    try:
+        rid = _receipts.save_upload(_db_path, image, media_type)
+    except _receipts.ReceiptError as e:
+        return jsonify({'error': str(e)}), 400
+    _receipts.process_in_background(_db_path, rid)
+    return jsonify({'ok': True, 'id': rid}), 202
+
+
+@app.get("/api/receipts")
+def api_receipts_list():
+    limit = min(int(request.args.get('limit', 200)), 1000)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"SELECT {_RECEIPT_COLS} FROM receipts "
+            "ORDER BY COALESCE(purchase_date, substr(uploaded_at, 1, 10)) DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return jsonify({'receipts': [_receipt_json(conn, r) for r in rows]})
+
+
+@app.get("/api/receipts/<int:rid>")
+def api_receipt_detail(rid):
+    with _conn() as conn:
+        row = conn.execute(f"SELECT {_RECEIPT_COLS} FROM receipts WHERE id=?", (rid,)).fetchone()
+        if row is None:
+            return jsonify({'error': 'Receipt not found'}), 404
+        r = _receipt_json(conn, row)
+        r['items'] = [dict(i) for i in conn.execute(
+            "SELECT id, description, quantity, total_price, category FROM receipt_items "
+            "WHERE receipt_id=? ORDER BY position", (rid,)
+        ).fetchall()]
+        return jsonify(r)
+
+
+@app.get("/api/receipts/<int:rid>/image")
+def api_receipt_image(rid):
+    with _conn() as conn:
+        row = conn.execute("SELECT image_path, media_type FROM receipts WHERE id=?", (rid,)).fetchone()
+    if row is None:
+        return jsonify({'error': 'Receipt not found'}), 404
+    try:
+        with open(row['image_path'], 'rb') as f:
+            return Response(f.read(), mimetype=row['media_type'])
+    except OSError as e:
+        return jsonify({'error': f'Image file missing: {e}'}), 500
+
+
+@app.post("/api/receipts/<int:rid>/retry")
+def api_receipt_retry(rid):
+    from smart_home import receipts as _receipts
+    with _conn() as conn:
+        if conn.execute("SELECT 1 FROM receipts WHERE id=?", (rid,)).fetchone() is None:
+            return jsonify({'error': 'Receipt not found'}), 404
+    if _receipts.is_running(rid):
+        return jsonify({'error': 'This receipt is already being processed'}), 409
+    _receipts.process_in_background(_db_path, rid)
+    return jsonify({'ok': True, 'started': True}), 202
+
+
+@app.delete("/api/receipts/<int:rid>")
+def api_receipt_delete(rid):
+    import os
+    with _conn() as conn:
+        row = conn.execute("SELECT image_path FROM receipts WHERE id=?", (rid,)).fetchone()
+        if row is None:
+            return jsonify({'error': 'Receipt not found'}), 404
+        conn.execute("DELETE FROM receipt_items WHERE receipt_id=?", (rid,))
+        conn.execute("DELETE FROM receipts WHERE id=?", (rid,))
+    try:
+        os.remove(row['image_path'])
+    except FileNotFoundError:
+        pass  # already gone; the DB rows were the important part
+    return jsonify({'ok': True})
+
+
+def _receipt_item_fields(data: dict, partial: bool) -> tuple[dict, str | None]:
+    """Validate item fields from a request body. Returns (fields, error)."""
+    from smart_home import receipts as _receipts
+    out = {}
+    if 'description' in data or not partial:
+        desc = (data.get('description') or '').strip()
+        if not desc:
+            return {}, 'description is required'
+        out['description'] = desc
+    if 'total_price' in data or not partial:
+        try:
+            out['total_price'] = round(float(data.get('total_price')), 2)
+        except (TypeError, ValueError):
+            return {}, 'total_price must be a number'
+    if 'quantity' in data:
+        q = data.get('quantity')
+        try:
+            out['quantity'] = None if q in (None, '') else float(q)
+        except (TypeError, ValueError):
+            return {}, 'quantity must be a number'
+    if 'category' in data or not partial:
+        category = data.get('category', 'Other' if not partial else None)
+        if category not in _receipts.CATEGORIES:
+            return {}, f'category must be one of: {", ".join(_receipts.CATEGORIES)}'
+        out['category'] = category
+    return out, None
+
+
+@app.patch("/api/receipts/<int:rid>")
+def api_receipt_update(rid):
+    """Correct the receipt header: merchant, purchase_date, subtotal, tax, total."""
+    data = request.get_json(silent=True) or {}
+    fields = {}
+    if 'merchant' in data:
+        fields['merchant'] = (data['merchant'] or '').strip() or None
+    if 'purchase_date' in data:
+        d = data['purchase_date']
+        if d:
+            try:
+                datetime.date.fromisoformat(d)
+            except (TypeError, ValueError):
+                return jsonify({'error': 'purchase_date must be YYYY-MM-DD'}), 400
+        fields['purchase_date'] = d or None
+    for k in ('subtotal', 'tax', 'total'):
+        if k in data:
+            v = data[k]
+            try:
+                fields[k] = None if v in (None, '') else round(float(v), 2)
+            except (TypeError, ValueError):
+                return jsonify({'error': f'{k} must be a number'}), 400
+    if not fields:
+        return jsonify({'error': 'Nothing to update'}), 400
+    with _conn() as conn:
+        status = conn.execute("SELECT status FROM receipts WHERE id=?", (rid,)).fetchone()
+        if status is None:
+            return jsonify({'error': 'Receipt not found'}), 404
+        if status['status'] == 'processing':
+            return jsonify({'error': 'Wait for the receipt to finish processing before editing'}), 409
+        sets = ', '.join(f'{k}=?' for k in fields)
+        conn.execute(f"UPDATE receipts SET {sets} WHERE id=?", (*fields.values(), rid))
+    return jsonify({'ok': True})
+
+
+@app.post("/api/receipts/<int:rid>/items")
+def api_receipt_item_add(rid):
+    fields, err = _receipt_item_fields(request.get_json(silent=True) or {}, partial=False)
+    if err:
+        return jsonify({'error': err}), 400
+    with _conn() as conn:
+        row = conn.execute("SELECT status FROM receipts WHERE id=?", (rid,)).fetchone()
+        if row is None:
+            return jsonify({'error': 'Receipt not found'}), 404
+        if row['status'] != 'done':
+            return jsonify({'error': 'Items can only be added to a receipt that has been read'}), 409
+        pos = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM receipt_items WHERE receipt_id=?", (rid,)
+        ).fetchone()[0]
+        cur = conn.execute(
+            "INSERT INTO receipt_items (receipt_id, position, description, quantity, total_price, category) "
+            "VALUES (?,?,?,?,?,?)",
+            (rid, pos, fields['description'], fields.get('quantity'), fields['total_price'], fields['category']),
+        )
+    return jsonify({'ok': True, 'id': cur.lastrowid}), 201
+
+
+@app.patch("/api/receipts/items/<int:item_id>")
+def api_receipt_item_update(item_id):
+    fields, err = _receipt_item_fields(request.get_json(silent=True) or {}, partial=True)
+    if err:
+        return jsonify({'error': err}), 400
+    if not fields:
+        return jsonify({'error': 'Nothing to update'}), 400
+    with _conn() as conn:
+        sets = ', '.join(f'{k}=?' for k in fields)
+        cur = conn.execute(f"UPDATE receipt_items SET {sets} WHERE id=?", (*fields.values(), item_id))
+        if cur.rowcount == 0:
+            return jsonify({'error': 'Item not found'}), 404
+    return jsonify({'ok': True})
+
+
+@app.delete("/api/receipts/items/<int:item_id>")
+def api_receipt_item_delete(item_id):
+    with _conn() as conn:
+        cur = conn.execute("DELETE FROM receipt_items WHERE id=?", (item_id,))
+        if cur.rowcount == 0:
+            return jsonify({'error': 'Item not found'}), 404
+    return jsonify({'ok': True})
+
+
+@app.get("/api/receipts/summary")
+def api_receipts_summary():
+    """Spending per month per category over the last N months (default 12),
+    including the current month. Sales tax is reported as its own category."""
+    from smart_home import receipts as _receipts
+    months = max(1, min(int(request.args.get('months', 12)), 120))
+    today = datetime.date.today()
+    y, m = today.year, today.month - (months - 1)
+    while m <= 0:
+        y, m = y - 1, m + 12
+    start = f"{y:04d}-{m:02d}-01"
+    day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
+    with _conn() as conn:
+        item_rows = conn.execute(
+            f"SELECT substr({day}, 1, 7) AS month, i.category, SUM(i.total_price) AS amount "
+            f"FROM receipt_items i JOIN receipts r ON r.id = i.receipt_id "
+            f"WHERE r.status='done' AND {day} >= ? GROUP BY month, i.category",
+            (start,),
+        ).fetchall()
+        tax_rows = conn.execute(
+            f"SELECT substr({day}, 1, 7) AS month, SUM(r.tax) AS amount FROM receipts r "
+            f"WHERE r.status='done' AND r.tax IS NOT NULL AND {day} >= ? GROUP BY month",
+            (start,),
+        ).fetchall()
+        n_receipts = conn.execute(
+            f"SELECT COUNT(*) FROM receipts r WHERE r.status='done' AND {day} >= ?", (start,)
+        ).fetchone()[0]
+    rows = [{'month': r['month'], 'category': r['category'], 'amount': round(r['amount'], 2)} for r in item_rows]
+    rows += [{'month': r['month'], 'category': _receipts.TAX_CATEGORY, 'amount': round(r['amount'], 2)}
+             for r in tax_rows if r['amount']]
+    totals: dict[str, float] = {}
+    for r in rows:
+        totals[r['category']] = totals.get(r['category'], 0) + r['amount']
+    return jsonify({
+        'start': start,
+        'months': months,
+        'n_receipts': n_receipts,
+        'rows': sorted(rows, key=lambda r: (r['month'], r['category'])),
+        'totals': sorted(({'category': c, 'amount': round(a, 2)} for c, a in totals.items()),
+                         key=lambda t: -t['amount']),
+        'grand_total': round(sum(totals.values()), 2),
+    })
+
+
 def run(db_path: str, host: str, port: int, debug: bool) -> None:
     global _db_path
     _db_path = db_path

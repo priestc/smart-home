@@ -298,6 +298,39 @@ def open_db(path: str) -> sqlite3.Connection:
             error      TEXT
         )
     """)
+    # Receipts photographed in the iOS app and read by Claude. status is
+    # 'processing', 'done' or 'error'; purchase_date falls back to the upload
+    # date in summaries when the receipt doesn't print one.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS receipts (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            uploaded_at   TEXT NOT NULL,
+            status        TEXT NOT NULL,
+            error         TEXT,
+            processed_at  TEXT,
+            image_path    TEXT NOT NULL,
+            media_type    TEXT NOT NULL,
+            merchant      TEXT,
+            purchase_date TEXT,
+            subtotal      REAL,
+            tax           REAL,
+            total         REAL,
+            notes         TEXT,
+            raw_json      TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS receipt_items (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            receipt_id  INTEGER NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+            position    INTEGER NOT NULL,
+            description TEXT NOT NULL,
+            quantity    REAL,
+            total_price REAL NOT NULL,
+            category    TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS receipt_items_receipt ON receipt_items (receipt_id)")
     conn.commit()
     return conn
 

@@ -16,6 +16,10 @@ struct ContentView: View {
                 .tabItem {
                     Label("Gas", systemImage: "fuelpump")
                 }
+            ReceiptsView()
+                .tabItem {
+                    Label("Receipts", systemImage: "receipt")
+                }
             SettingsView()
                 .tabItem {
                     Label("Settings", systemImage: "gear")
