@@ -84,9 +84,9 @@ _PROMPT = f"""This is a photo of a store or restaurant receipt. Extract it for a
 - merchant: the store or restaurant name as a person would say it (e.g. "Costco", not "COSTCO WHOLESALE #1234").
 - purchase_date: the transaction date as YYYY-MM-DD, or null if it isn't printed.
 - items: one entry per purchased line.
-  - raw_text: the item's name exactly as printed, abbreviations and all (e.g. "GV 2% MLK GAL"). Leave out the price and item number.
-  - item_code: the item number, UPC or SKU printed on that line, digits only, or null if there isn't one. Walmart prints a 12-digit number after each item name; copy every digit carefully.
-  - description: Expand cryptic abbreviations into a readable description (e.g. "GV 2% MLK GAL" -> "Great Value 2% milk, 1 gal"). total_price is the line's final amount in dollars. Apply discounts, coupons and instant savings as their own lines with a negative total_price, in the same category as the item they discount. Bottle deposits, bag fees and similar go in "Fees & Deposits". Do not include sales tax, subtotal, total, payment or change lines as items.
+  - raw_text: the item's name exactly as printed, abbreviations and all (e.g. "GV 2% MLK GAL"). Leave out the price and item number. Keep markers such as "INST SV" (e.g. "INST SV LA CROIX VPF").
+  - item_code: the item number, UPC or SKU printed on that line, digits only, or null if there isn't one. Walmart prints a 12-digit number after each item name; Sam's Club prints it before. Copy every digit carefully, and only from that same line. Savings and coupon lines usually have no number of their own: use null.
+  - description: Expand cryptic abbreviations into a readable description (e.g. "GV 2% MLK GAL" -> "Great Value 2% milk, 1 gal"). total_price is the line's final amount in dollars. A minus sign after the amount means it is negative: "2.00-" is -2.00. Discounts, coupons and instant savings are their own lines with a negative total_price, in the same category as the item they discount; describe them as e.g. "Instant savings: La Croix". On Sam's Club receipts "INST SV" means instant savings and is always negative, even if the minus sign is hard to see. Bottle deposits, bag fees and similar go in "Fees & Deposits". Do not include sales tax, subtotal, total, payment or change lines as items.
 - category: choose the single best fit from: {", ".join(CATEGORIES)}. A restaurant meal or takeout is "Dining Out"; food bought at a store is "Groceries".
 - subtotal, tax, total: as printed, or null if missing. For restaurants, include any tip in total.
 - If the image is not a receipt or is unreadable, set is_receipt to false, leave items empty and explain why in notes.
@@ -208,6 +208,11 @@ def name_key(raw_text: str | None, item_code: str | None) -> str | None:
     return f"text:{text}" if text else None
 
 
+# Printed markers for a line that takes money off: a savings line read as a
+# positive amount is a misread (the trailing "-" is easy to miss).
+_SAVINGS_RE = re.compile(r"\b(INST(ANT)?\s*SV|INSTANT SAVINGS|SAVINGS|COUPON|CPN|DISCOUNT|DISC)\b", re.I)
+
+
 def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
     if not data.get("is_receipt"):
         raise ReceiptError(data.get("notes") or "This doesn't look like a receipt")
@@ -221,8 +226,10 @@ def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
     for i, it in enumerate(data.get("items") or []):
         code = re.sub(r"\D", "", it.get("item_code") or "") or None
         key = name_key(it.get("raw_text"), code)
-        rows.append((rid, i, names.get(key) or it["description"], it.get("quantity"),
-                     round(float(it["total_price"]), 2),
+        price = round(float(it["total_price"]), 2)
+        if price > 0 and _SAVINGS_RE.search(f'{it.get("raw_text") or ""} {it["description"]}'):
+            price = -price
+        rows.append((rid, i, names.get(key) or it["description"], it.get("quantity"), price,
                      it["category"] if it["category"] in CATEGORIES else "Other",
                      it.get("raw_text"), code, key))
     conn.execute("DELETE FROM receipt_items WHERE receipt_id=?", (rid,))
