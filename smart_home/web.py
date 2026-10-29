@@ -5293,7 +5293,7 @@ def index():
     <a href="/chart/db-sizes"   class="chart-link"><span class="cl-title">Database Growth</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/camera"            class="chart-link"><span class="cl-title">Cameras</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
-    <a href="/receipts/items"    class="chart-link"><span class="cl-title">Receipt Items</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/receipts"          class="chart-link"><span class="cl-title">Receipts &amp; Spending</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/water-chemistry"   class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Water Chemistry</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/rssi"              class="chart-link"><span class="cl-title">Bluetooth Signal</span><span class="cl-arrow">&#8594;</span></a>
   </div>
@@ -11861,6 +11861,504 @@ def api_receipt_item_delete(item_id):
     return jsonify({'ok': True})
 
 
+_RECEIPTS_COMMON_CSS = """
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1.2rem; font-size: .85rem; }
+    .nav a { color: #2e7dd4; text-decoration: none; margin-right: 1rem; }
+    .nav a:hover { text-decoration: underline; }
+    .card { background: #fff; border-radius: 12px; padding: 1.2rem 1.4rem; margin-bottom: 1.2rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .card h2 { font-size: .8rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: .9rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th { text-align: left; font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding: .5rem .6rem; border-bottom: 1px solid #e8eef4; white-space: nowrap; }
+    td { padding: .5rem .6rem; border-bottom: 1px solid #f0f4f8; vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .muted { color: #7a90a8; font-size: .82rem; }
+    .err { color: #b00; }
+    .warn { background: #fff4e5; border: 1px solid #f5c27a; color: #8a4b00; border-radius: 8px; padding: .7rem 1rem; margin-bottom: 1.2rem; font-size: .9rem; }
+    .btn { background: #2e7dd4; color: #fff; border: none; border-radius: 6px; padding: .4rem .9rem; cursor: pointer; font-size: .85rem; }
+    .btn:disabled { background: #aabbc8; cursor: default; }
+    .btn.secondary { background: #fff; color: #4a6080; border: 1px solid #d0dce8; }
+    .btn.danger { background: #fff; color: #b00; border: 1px solid #e8b4b4; }
+    input[type=text], input[type=number], input[type=date], select { padding: .35rem .5rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .88rem; font-family: inherit; background: #fff; }
+    input.dirty, select.dirty { border-color: #e07820; }
+"""
+
+_RECEIPTS_COMMON_JS = """
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\\u26a0 ' + msg;
+}
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
+async function fetchJSON(url, opts) {
+  const r = await fetch(url, opts);
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* non-JSON error body; reported below */ }
+  if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status} ${r.statusText}`);
+  return data;
+}
+function sendJSON(url, method, body) {
+  return fetchJSON(url, {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+}
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function money(v) {
+  return v == null ? '\\u2014' : (v < 0 ? '-$' : '$') + Math.abs(v).toFixed(2);
+}
+"""
+
+_RECEIPTS_PAGE = """\\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Receipts &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>__COMMON_CSS__
+    .periods { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .periods button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; }
+    .periods button.active { background: #e07820; color: #fff; border-color: #e07820; }
+    .grand { font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(16rem, 1fr); gap: 1.2rem; align-items: start; }
+    @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } }
+    .swatch { display: inline-block; width: .7rem; height: .7rem; border-radius: 2px; margin-right: .5rem; vertical-align: middle; }
+    tr.receipt { cursor: pointer; }
+    tr.receipt:hover td { background: #f7fafc; }
+    .badge { font-size: .75rem; padding: .1rem .5rem; border-radius: 999px; white-space: nowrap; }
+    .badge.processing { background: #e8f1fb; color: #2e7dd4; }
+    .badge.error { background: #fdeaea; color: #b00; }
+    .badge.mismatch { background: #fff4e5; color: #8a4b00; }
+  </style>
+</head>
+<body>
+  <h1>Receipts</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a><a href="/receipts/items">Item names &rarr;</a></div>
+  <div class="periods" id="periods">
+    <button data-months="1" class="active">This month</button>
+    <button data-months="3">3 months</button>
+    <button data-months="6">6 months</button>
+    <button data-months="12">12 months</button>
+    <button data-months="120">All</button>
+  </div>
+  <div class="layout">
+    <div>
+      <div class="card">
+        <h2>Spending</h2>
+        <div class="grand" id="grand">&hellip;</div>
+        <div class="muted" id="n-receipts"></div>
+        <div id="chart-wrap" style="margin-top:1rem;display:none"><canvas id="chart" height="110"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>Receipts</h2>
+        <table>
+          <thead><tr><th>Date</th><th>Store</th><th class="num">Items</th><th class="num">Total</th><th></th></tr></thead>
+          <tbody id="receipts"><tr><td colspan="5" class="muted">Loading&hellip;</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <h2>By category</h2>
+      <table><tbody id="totals"></tbody></table>
+    </div>
+  </div>
+<script>__COMMON_JS__
+const COLORS = ['#2e7dd4','#e07820','#2db37a','#9b59b6','#e74c3c','#1abc9c','#f39c12','#34495e',
+                '#d35400','#16a085','#8e44ad','#c0392b','#27ae60','#7f8c8d','#f1c40f','#2c3e50','#e84393'];
+let months = 1, chart = null, pollTimer = null, categoryOrder = [];
+
+function colorFor(cat) {
+  let i = categoryOrder.indexOf(cat);
+  if (i < 0) { categoryOrder.push(cat); i = categoryOrder.length - 1; }
+  return COLORS[i % COLORS.length];
+}
+
+function renderSummary(s) {
+  document.getElementById('grand').textContent = money(s.grand_total);
+  document.getElementById('n-receipts').textContent =
+    `${s.n_receipts} receipt${s.n_receipts === 1 ? '' : 's'} since ${s.start}`;
+  document.getElementById('totals').innerHTML = s.totals.length ? s.totals.map(t => `<tr>
+      <td><span class="swatch" style="background:${colorFor(t.category)}"></span>${esc(t.category)}</td>
+      <td class="num muted">${s.grand_total > 0 ? Math.round(t.amount / s.grand_total * 100) + '%' : ''}</td>
+      <td class="num">${money(t.amount)}</td></tr>`).join('')
+    : '<tr><td class="muted">Nothing spent in this period.</td></tr>';
+
+  const monthsSeen = [...new Set(s.rows.map(r => r.month))].sort();
+  const wrap = document.getElementById('chart-wrap');
+  if (monthsSeen.length < 2) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  const cats = s.totals.map(t => t.category);
+  const datasets = cats.map(cat => ({
+    label: cat, backgroundColor: colorFor(cat),
+    data: monthsSeen.map(m => (s.rows.find(r => r.month === m && r.category === cat) || {}).amount || 0),
+  }));
+  const labels = monthsSeen.map(m => new Date(m + '-15').toLocaleDateString(undefined, {month: 'short', year: 'numeric'}));
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('chart'), {
+    type: 'bar', data: {labels, datasets},
+    options: {
+      animation: false,
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
+                 tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${money(ctx.raw)}` } } },
+      scales: { x: { stacked: true, grid: { display: false } },
+                y: { stacked: true, ticks: { callback: v => '$' + v } } },
+    },
+  });
+}
+
+function renderReceipts(list) {
+  const tbody = document.getElementById('receipts');
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="muted">No receipts yet. Take a photo of one in the app.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(r => {
+    let badge = '';
+    if (r.status === 'processing') badge = '<span class="badge processing">Reading&hellip;</span>';
+    else if (r.status === 'error') badge = `<span class="badge error" title="${esc(r.error)}">Couldn\\u2019t read</span>`;
+    else if (r.mismatch != null) badge = `<span class="badge mismatch" title="Items + tax are off from the total by ${money(r.mismatch)}">Doesn\\u2019t add up</span>`;
+    return `<tr class="receipt" data-id="${r.id}">
+      <td>${esc(r.purchase_date || r.uploaded_at.slice(0, 10))}</td>
+      <td>${esc(r.merchant || (r.status === 'done' ? 'Unknown store' : ''))}
+          ${r.status === 'error' ? `<div class="muted err">${esc(r.error)}</div>` : ''}</td>
+      <td class="num">${r.status === 'done' ? r.n_items : ''}</td>
+      <td class="num">${r.status === 'done' ? money(r.total) : ''}</td>
+      <td>${badge}</td></tr>`;
+  }).join('');
+}
+
+async function load() {
+  clearTimeout(pollTimer);
+  try {
+    const [s, r] = await Promise.all([
+      fetchJSON(`/api/receipts/summary?months=${months}`),
+      fetchJSON('/api/receipts'),
+    ]);
+    clearNetworkError();
+    renderSummary(s);
+    renderReceipts(r.receipts);
+    // Refresh while a receipt is still being read so it flips to done/error by itself
+    if (r.receipts.some(x => x.status === 'processing')) pollTimer = setTimeout(load, 3000);
+  } catch (e) {
+    showNetworkError(`Could not load receipts: ${e.message}`);
+  }
+}
+
+document.getElementById('periods').addEventListener('click', e => {
+  const b = e.target.closest('button[data-months]');
+  if (!b) return;
+  months = +b.dataset.months;
+  document.querySelectorAll('#periods button').forEach(x => x.classList.toggle('active', x === b));
+  load();
+});
+document.getElementById('receipts').addEventListener('click', e => {
+  const tr = e.target.closest('tr.receipt');
+  if (tr) location.href = `/receipts/${tr.dataset.id}`;
+});
+load();
+</script>
+</body>
+</html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS)
+
+
+_RECEIPT_DETAIL_PAGE = """\\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Receipt &mdash; Smart Home</title>
+  <style>__COMMON_CSS__
+    .layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(16rem, 2fr); gap: 1.2rem; align-items: start; }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+    .photo { position: sticky; top: 1rem; }
+    .photo img { width: 100%; border-radius: 8px; display: block; cursor: zoom-in; }
+    .header-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: .8rem; margin-bottom: 1rem; }
+    .header-grid label { display: block; font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-bottom: .25rem; }
+    .header-grid input { width: 100%; }
+    .actions { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+    td input[type=text] { width: 100%; min-width: 12rem; }
+    td input.qty { width: 4.5rem; }
+    td input.price { width: 6rem; text-align: right; }
+    .printed { font-family: ui-monospace, Menlo, monospace; font-size: .76rem; color: #7a90a8; margin-top: .2rem; }
+    .row-status { font-size: .75rem; white-space: nowrap; }
+    .row-status.ok { color: #2db37a; }
+    .icon-btn { background: none; border: none; color: #b0bccb; cursor: pointer; font-size: 1.1rem; padding: 0 .3rem; }
+    .icon-btn:hover { color: #b00; }
+    tfoot td { font-weight: 600; border-top: 1px solid #e8eef4; }
+  </style>
+</head>
+<body>
+  <h1 id="title">Receipt</h1>
+  <div class="nav"><a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Item names</a></div>
+  <div id="banners"></div>
+  <div class="layout">
+    <div>
+      <div class="card" id="header-card">
+        <h2>Receipt</h2>
+        <div class="header-grid">
+          <div><label for="merchant">Store</label><input type="text" id="merchant"></div>
+          <div><label for="purchase_date">Date</label><input type="date" id="purchase_date"></div>
+          <div><label for="subtotal">Subtotal</label><input type="text" id="subtotal" inputmode="decimal"></div>
+          <div><label for="tax">Tax</label><input type="text" id="tax" inputmode="decimal"></div>
+          <div><label for="total">Total</label><input type="text" id="total" inputmode="decimal"></div>
+        </div>
+        <div class="actions">
+          <button class="btn" id="save-header" disabled>Save</button>
+          <span id="header-status" class="muted"></span>
+        </div>
+        <div class="muted" id="notes" style="margin-top:.8rem"></div>
+      </div>
+      <div class="card" id="items-card">
+        <h2>Items</h2>
+        <table>
+          <thead><tr><th>Description</th><th>Qty</th><th class="num">Price</th><th>Category</th><th></th><th></th></tr></thead>
+          <tbody id="items"></tbody>
+          <tfoot><tr><td>Items total</td><td></td><td class="num" id="items-sum"></td><td colspan="3"></td></tr></tfoot>
+        </table>
+        <div class="actions" style="margin-top:.9rem">
+          <button class="btn secondary" id="add-item">+ Add item</button>
+          <span class="muted">Changes save when you leave a field. Enter discounts as a negative price.</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="actions">
+          <button class="btn secondary" id="retry">Read again</button>
+          <span class="muted">Re-reads the photo and replaces all items and edits.</span>
+        </div>
+        <div class="actions" style="margin-top:.8rem">
+          <button class="btn danger" id="delete">Delete receipt</button>
+        </div>
+      </div>
+    </div>
+    <div class="card photo">
+      <h2>Photo</h2>
+      <a id="photo-link" target="_blank"><img id="photo" alt="Receipt photo"></a>
+      <div class="muted err" id="photo-error"></div>
+    </div>
+  </div>
+<script>__COMMON_JS__
+const RID = __RID__;
+let receipt = null, categories = [], pollTimer = null;
+const HEADER_FIELDS = ['merchant', 'purchase_date', 'subtotal', 'tax', 'total'];
+
+function headerValue(k) {
+  const v = receipt[k];
+  if (v == null) return '';
+  return ['subtotal', 'tax', 'total'].includes(k) ? v.toFixed(2) : v;
+}
+
+// Title, warnings and the items total: everything that changes when an item is edited
+function renderStatus() {
+  const r = receipt;
+  document.title = `${r.merchant || 'Receipt'} \\u2014 Smart Home`;
+  document.getElementById('title').textContent =
+    r.status === 'processing' ? 'Reading receipt\\u2026' : (r.merchant || 'Receipt') + (r.purchase_date ? ' \\u00b7 ' + r.purchase_date : '');
+
+  let banners = '';
+  if (r.status === 'processing') banners += '<div class="warn">The photo is being read. This page will update when it\\u2019s done.</div>';
+  if (r.status === 'error') banners += `<div class="warn err">Couldn\\u2019t read this receipt: ${esc(r.error)}</div>`;
+  if (r.mismatch != null && r.total != null)
+    banners += `<div class="warn">Items + tax come to ${money(r.total + r.mismatch)}, but the receipt total is ${money(r.total)}. A line was probably misread; check the items against the photo.</div>`;
+  document.getElementById('banners').innerHTML = banners;
+  if (r.items) document.getElementById('items-sum').textContent = money(r.items.reduce((a, it) => a + it.total_price, 0));
+}
+
+function render() {
+  const r = receipt;
+  renderStatus();
+  const done = r.status === 'done';
+  document.getElementById('header-card').style.display = done ? '' : 'none';
+  document.getElementById('items-card').style.display = done ? '' : 'none';
+  document.getElementById('retry').disabled = r.status === 'processing';
+  if (!done) return;
+
+  HEADER_FIELDS.forEach(k => {
+    const el = document.getElementById(k);
+    el.value = headerValue(k);
+    el.classList.remove('dirty');
+  });
+  document.getElementById('save-header').disabled = true;
+  document.getElementById('notes').textContent = r.notes ? 'Note from the reader: ' + r.notes : '';
+
+  document.getElementById('items').innerHTML = r.items.map(it => itemRow(it)).join('') ||
+    '<tr><td colspan="6" class="muted">No items.</td></tr>';
+}
+
+function itemRow(it) {
+  const printed = [it.raw_text, it.item_code].filter(Boolean).join(' \\u00b7 ');
+  const opts = categories.map(c => `<option${c === it.category ? ' selected' : ''}>${esc(c)}</option>`).join('');
+  return `<tr data-id="${it.id ?? ''}">
+    <td><input type="text" data-f="description" value="${esc(it.description)}">
+        ${printed && printed !== it.description ? `<div class="printed">${esc(printed)}</div>` : ''}</td>
+    <td><input type="text" class="qty" data-f="quantity" inputmode="decimal" value="${it.quantity ?? ''}"></td>
+    <td class="num"><input type="text" class="price" data-f="total_price" inputmode="decimal" value="${it.id == null ? '' : it.total_price.toFixed(2)}"></td>
+    <td><select data-f="category">${opts}</select></td>
+    <td class="row-status"></td>
+    <td><button class="icon-btn" title="Delete item" data-delete>&times;</button></td></tr>`;
+}
+
+function parseAmount(s) {
+  const t = String(s).replace(/[$,\\s]/g, '');
+  return t === '' ? null : (isNaN(+t) ? NaN : +t);
+}
+
+// After an item edit, refetch for the new total/mismatch without redrawing the
+// rows, so focus stays where the user is typing.
+async function refreshStatus() {
+  try {
+    receipt = await fetchJSON(`/api/receipts/${RID}`);
+    clearNetworkError();
+    renderStatus();
+  } catch (e) {
+    showNetworkError(`Could not refresh receipt: ${e.message}`);
+  }
+}
+
+async function load() {
+  clearTimeout(pollTimer);
+  try {
+    receipt = await fetchJSON(`/api/receipts/${RID}`);
+    clearNetworkError();
+    render();
+    if (receipt.status === 'processing') pollTimer = setTimeout(load, 3000);
+  } catch (e) {
+    showNetworkError(`Could not load receipt: ${e.message}`);
+  }
+}
+
+// Header: Save button enables once any field differs from what's stored
+document.getElementById('header-card').addEventListener('input', () => {
+  let dirty = false;
+  HEADER_FIELDS.forEach(k => {
+    const el = document.getElementById(k);
+    const d = el.value.trim() !== String(headerValue(k));
+    el.classList.toggle('dirty', d);
+    dirty = dirty || d;
+  });
+  document.getElementById('save-header').disabled = !dirty;
+});
+document.getElementById('save-header').addEventListener('click', async () => {
+  const status = document.getElementById('header-status');
+  const body = {merchant: document.getElementById('merchant').value, purchase_date: document.getElementById('purchase_date').value || null};
+  for (const k of ['subtotal', 'tax', 'total']) {
+    const v = parseAmount(document.getElementById(k).value);
+    if (Number.isNaN(v)) { status.className = 'err'; status.textContent = `${k[0].toUpperCase() + k.slice(1)} isn\\u2019t a valid amount.`; return; }
+    body[k] = v;
+  }
+  status.className = 'muted'; status.textContent = 'Saving\\u2026';
+  try {
+    await sendJSON(`/api/receipts/${RID}`, 'PATCH', body);
+    status.textContent = 'Saved';
+    await load();
+  } catch (e) {
+    status.className = 'err'; status.textContent = 'Save failed: ' + e.message;
+  }
+});
+
+// Items: each row saves itself when a field changes
+async function saveRow(tr) {
+  const status = tr.querySelector('.row-status');
+  const get = f => tr.querySelector(`[data-f="${f}"]`).value;
+  const price = parseAmount(get('total_price'));
+  const qty = parseAmount(get('quantity'));
+  const body = {description: get('description'), total_price: price, quantity: qty, category: get('category')};
+  if (!tr.dataset.id && (!body.description.trim() || price == null)) {
+    status.className = 'row-status muted'; status.textContent = 'Not saved yet'; return;
+  }
+  if (!body.description.trim()) { status.className = 'row-status err'; status.textContent = 'Needs a description'; return; }
+  if (price == null || Number.isNaN(price)) { status.className = 'row-status err'; status.textContent = 'Needs a price'; return; }
+  if (Number.isNaN(qty)) { status.className = 'row-status err'; status.textContent = 'Bad quantity'; return; }
+  status.className = 'row-status muted'; status.textContent = 'Saving\\u2026';
+  try {
+    if (tr.dataset.id) {
+      await sendJSON(`/api/receipts/items/${tr.dataset.id}`, 'PATCH', body);
+    } else {
+      const res = await sendJSON(`/api/receipts/${RID}/items`, 'POST', body);
+      tr.dataset.id = res.id;
+    }
+    status.className = 'row-status ok'; status.textContent = 'Saved';
+    await refreshStatus();
+  } catch (e) {
+    status.className = 'row-status err'; status.textContent = 'Save failed';
+    showNetworkError(`Could not save item: ${e.message}`);
+  }
+}
+const itemsEl = document.getElementById('items');
+itemsEl.addEventListener('change', e => { if (e.target.dataset.f) saveRow(e.target.closest('tr')); });
+itemsEl.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.dataset.f) e.target.blur(); });
+itemsEl.addEventListener('click', async e => {
+  if (!e.target.matches('[data-delete]')) return;
+  const tr = e.target.closest('tr');
+  if (!tr.dataset.id) { tr.remove(); return; }
+  try {
+    await fetchJSON(`/api/receipts/items/${tr.dataset.id}`, {method: 'DELETE'});
+    tr.remove();
+    await refreshStatus();
+  } catch (e2) {
+    showNetworkError(`Could not delete item: ${e2.message}`);
+  }
+});
+document.getElementById('add-item').addEventListener('click', () => {
+  if (itemsEl.querySelector('td[colspan]')) itemsEl.innerHTML = '';
+  itemsEl.insertAdjacentHTML('beforeend', itemRow({id: null, description: '', quantity: null, total_price: 0, category: 'Other'}));
+  itemsEl.lastElementChild.querySelector('input').focus();
+});
+
+document.getElementById('retry').addEventListener('click', async () => {
+  if (!confirm('Read the photo again? This replaces all items, including your edits.')) return;
+  try {
+    await fetchJSON(`/api/receipts/${RID}/retry`, {method: 'POST'});
+    await load();
+  } catch (e) {
+    showNetworkError(`Could not start reading: ${e.message}`);
+  }
+});
+document.getElementById('delete').addEventListener('click', async () => {
+  if (!confirm('Delete this receipt and its photo?')) return;
+  try {
+    await fetchJSON(`/api/receipts/${RID}`, {method: 'DELETE'});
+    location.href = '/receipts';
+  } catch (e) {
+    showNetworkError(`Could not delete receipt: ${e.message}`);
+  }
+});
+
+const img = document.getElementById('photo');
+img.onerror = () => { document.getElementById('photo-error').textContent = 'Could not load the photo.'; };
+img.src = document.getElementById('photo-link').href = `/api/receipts/${RID}/image`;
+
+fetchJSON('/api/receipts/config')
+  .then(c => { categories = c.categories; })
+  .catch(e => showNetworkError(`Could not load categories: ${e.message}`))
+  .finally(load);
+</script>
+</body>
+</html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS)
+
+
+@app.get("/receipts")
+def receipts_page():
+    return Response(_RECEIPTS_PAGE, mimetype="text/html")
+
+
+@app.get("/receipts/<int:rid>")
+def receipt_detail_page(rid):
+    return Response(_RECEIPT_DETAIL_PAGE.replace("__RID__", str(rid)), mimetype="text/html")
+
+
 @app.get("/api/receipts/known-items")
 def api_receipt_known_items():
     """Every distinct item read off a receipt (grouped by name_key), with its
@@ -11955,7 +12453,7 @@ _RECEIPT_ITEMS_PAGE = """\
 </head>
 <body>
   <h1>Receipt Items</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div class="nav"><a href="/">&larr; Dashboard</a> &nbsp; <a href="/receipts">&larr; Receipts</a></div>
   <p class="intro">Every item that has appeared on a scanned receipt. Give an item a friendly name and it replaces
   the description on all of its receipts. The text and item number as printed are kept, so the next receipt with the
   same item gets the name automatically. Items with an item number (Walmart prints one per line) are matched by that
