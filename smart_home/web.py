@@ -11633,8 +11633,9 @@ def gas_page():
     return Response(_GAS_PAGE, mimetype="text/html")
 
 
+# A receipt entered by hand on the web page has no photo (image_path '')
 _RECEIPT_COLS = ("id, uploaded_at, status, error, processed_at, merchant, purchase_date, "
-                 "subtotal, tax, total, notes")
+                 "subtotal, tax, total, notes, image_path = '' AS manual")
 
 
 def _receipt_json(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
@@ -11721,6 +11722,8 @@ def api_receipt_image(rid):
         row = conn.execute("SELECT image_path, media_type FROM receipts WHERE id=?", (rid,)).fetchone()
     if row is None:
         return jsonify({'error': 'Receipt not found'}), 404
+    if not row['image_path']:
+        return jsonify({'error': 'This receipt was entered by hand and has no photo'}), 404
     try:
         with open(row['image_path'], 'rb') as f:
             return Response(f.read(), mimetype=row['media_type'])
@@ -11732,8 +11735,11 @@ def api_receipt_image(rid):
 def api_receipt_retry(rid):
     from smart_home import receipts as _receipts
     with _conn() as conn:
-        if conn.execute("SELECT 1 FROM receipts WHERE id=?", (rid,)).fetchone() is None:
+        row = conn.execute("SELECT image_path FROM receipts WHERE id=?", (rid,)).fetchone()
+        if row is None:
             return jsonify({'error': 'Receipt not found'}), 404
+        if not row['image_path']:
+            return jsonify({'error': 'This receipt was entered by hand; there is no photo to read'}), 409
     if _receipts.is_running(rid):
         return jsonify({'error': 'This receipt is already being processed'}), 409
     _receipts.process_in_background(_db_path, rid)
@@ -11966,7 +11972,7 @@ _RECEIPTS_PAGE = """\\
 </head>
 <body>
   <h1>Receipts</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a><a href="/receipts/items">Item names &rarr;</a></div>
+  <div class="nav"><a href="/">&larr; Dashboard</a><a href="/receipts/items">Item names &rarr;</a><a href="/receipts/new">+ Add receipt by hand</a></div>
   <div class="periods" id="periods">
     <button data-months="1" class="active">This month</button>
     <button data-months="3">3 months</button>
@@ -12158,7 +12164,7 @@ _RECEIPT_DETAIL_PAGE = """\\
         </div>
       </div>
       <div class="card">
-        <div class="actions">
+        <div class="actions" id="retry-row">
           <button class="btn secondary" id="retry">Read again</button>
           <span class="muted">Re-reads the photo and replaces all items and edits.</span>
         </div>
@@ -12207,6 +12213,11 @@ function render() {
   document.getElementById('header-card').style.display = done ? '' : 'none';
   document.getElementById('items-card').style.display = done ? '' : 'none';
   document.getElementById('retry').disabled = r.status === 'processing';
+  // Receipts entered by hand have no photo to show or re-read
+  document.querySelector('.card.photo').style.display = r.manual ? 'none' : '';
+  document.querySelector('.layout').style.gridTemplateColumns = r.manual ? '1fr' : '';
+  document.getElementById('retry-row').style.display = r.manual ? 'none' : '';
+  if (!r.manual && !img.getAttribute('src')) img.src = document.getElementById('photo-link').href = `/api/receipts/${RID}/image`;
   if (!done) return;
 
   HEADER_FIELDS.forEach(k => {
@@ -12384,7 +12395,6 @@ document.getElementById('delete').addEventListener('click', async () => {
 
 const img = document.getElementById('photo');
 img.onerror = () => { document.getElementById('photo-error').textContent = 'Could not load the photo.'; };
-img.src = document.getElementById('photo-link').href = `/api/receipts/${RID}/image`;
 
 fetchJSON('/api/receipts/config')
   .then(c => { categories = c.categories; })
@@ -12393,6 +12403,224 @@ fetchJSON('/api/receipts/config')
 </script>
 </body>
 </html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS)
+
+
+_RECEIPT_NEW_PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Add Receipt &mdash; Smart Home</title>
+  <style>__COMMON_CSS__
+    .layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(18rem, 2fr); gap: 1.2rem; align-items: start; }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+    .fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: .8rem; }
+    .fields label { display: block; font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-bottom: .25rem; }
+    .fields select, .fields input { width: 100%; }
+    #search { width: 100%; margin-bottom: .6rem; }
+    .picker { max-height: 32rem; overflow-y: auto; border: 1px solid #e8eef4; border-radius: 8px; }
+    .pick { display: flex; justify-content: space-between; gap: .8rem; align-items: center; padding: .55rem .8rem; border-bottom: 1px solid #f0f4f8; cursor: pointer; }
+    .pick:last-child { border-bottom: none; }
+    .pick:hover { background: #f0f6fd; }
+    .pick .printed { font-family: ui-monospace, Menlo, monospace; font-size: .76rem; color: #7a90a8; }
+    .pick .add { color: #2e7dd4; font-size: 1.2rem; font-weight: 600; }
+    td input.desc { width: 100%; min-width: 12rem; }
+    td input.qty { width: 4.5rem; }
+    td input.price { width: 6rem; text-align: right; }
+    .icon-btn { background: none; border: none; color: #b0bccb; cursor: pointer; font-size: 1.1rem; padding: 0 .3rem; }
+    .icon-btn:hover { color: #b00; }
+    tfoot td { font-weight: 600; border-top: 1px solid #e8eef4; }
+    .printed { font-family: ui-monospace, Menlo, monospace; font-size: .76rem; color: #7a90a8; margin-top: .2rem; }
+  </style>
+</head>
+<body>
+  <h1>Add Receipt by Hand</h1>
+  <div class="nav"><a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Item names</a></div>
+  <p class="muted" style="margin-bottom:1rem">For a purchase that didn&rsquo;t come with a receipt. Pick the store, then add
+  items you&rsquo;ve bought there before. Prices start at what you paid last time.</p>
+  <div class="layout">
+    <div>
+      <div class="card">
+        <h2>Receipt</h2>
+        <div class="fields">
+          <div><label for="store">Store</label><select id="store"><option value="">Loading&hellip;</option></select></div>
+          <div><label for="date">Date</label><input type="date" id="date"></div>
+          <div><label for="tax">Tax</label><input type="text" id="tax" inputmode="decimal" placeholder="0.00"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Items</h2>
+        <table>
+          <thead><tr><th>Item</th><th>Quantity</th><th class="num">Price</th><th>Category</th><th></th></tr></thead>
+          <tbody id="lines"><tr><td colspan="5" class="muted">Pick a store, then click items on the right to add them.</td></tr></tbody>
+          <tfoot>
+            <tr><td>Subtotal</td><td></td><td class="num" id="subtotal">$0.00</td><td colspan="2"></td></tr>
+            <tr><td>Total</td><td></td><td class="num" id="total">$0.00</td><td colspan="2"></td></tr>
+          </tfoot>
+        </table>
+        <div class="actions" style="margin-top:1rem">
+          <button class="btn" id="save" disabled>Save receipt</button>
+          <span id="save-status" class="muted"></span>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Items bought at this store</h2>
+      <input type="search" id="search" placeholder="Search by name or printed text" disabled>
+      <div class="picker" id="picker"><div class="pick muted" style="cursor:default">Pick a store first.</div></div>
+    </div>
+  </div>
+<script>__COMMON_JS__
+const UNITS = ['ea', 'oz', 'lb'];
+let categories = [], known = [], lines = [], currentStore = '';
+
+function itemName(it) { return it.name || it.description || it.raw_text; }
+
+function renderPicker() {
+  const q = document.getElementById('search').value.trim().toLowerCase();
+  const shown = known.filter(it => !q || [it.name, it.description, it.raw_text, it.item_code]
+    .some(v => v && String(v).toLowerCase().includes(q)));
+  document.getElementById('picker').innerHTML = shown.length ? shown.map(it => `
+    <div class="pick" data-key="${esc(it.name_key)}">
+      <div><div>${esc(itemName(it))}</div>
+        <div class="printed">${esc([it.raw_text, it.item_code].filter(Boolean).join(' \\u00b7 '))}</div></div>
+      <div class="num">${money(it.last_price)} <span class="add">+</span></div>
+    </div>`).join('')
+    : `<div class="pick muted" style="cursor:default">${known.length ? 'No items match.' : 'No items from this store yet.'}</div>`;
+}
+
+function renderLines() {
+  const tbody = document.getElementById('lines');
+  if (!lines.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="muted">Click items on the right to add them.</td></tr>';
+  } else {
+    tbody.innerHTML = lines.map((l, i) => `<tr data-i="${i}">
+      <td><input type="text" class="desc" data-f="description" value="${esc(l.description)}">
+          <div class="printed">${esc([l.raw_text, l.item_code].filter(Boolean).join(' \\u00b7 '))}</div></td>
+      <td style="white-space:nowrap"><input type="text" class="qty" data-f="quantity" inputmode="decimal"
+            value="${l.quantity ?? ''}" placeholder="${l.default_quantity ?? ''}"
+          ><select data-f="unit">${UNITS.map(u => `<option${u === l.unit ? ' selected' : ''}>${u}</option>`).join('')}</select></td>
+      <td class="num"><input type="text" class="price" data-f="price" inputmode="decimal" value="${l.price}"></td>
+      <td><select data-f="category">${categories.map(c => `<option${c === l.category ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select></td>
+      <td><button class="icon-btn" title="Remove" data-remove>&times;</button></td></tr>`).join('');
+  }
+  updateTotals();
+}
+
+function parseAmount(s) {
+  const t = String(s).replace(/[$,\\s]/g, '');
+  return t === '' ? null : (isNaN(+t) ? NaN : +t);
+}
+
+function updateTotals() {
+  const sub = lines.reduce((a, l) => a + (parseAmount(l.price) || 0), 0);
+  const tax = parseAmount(document.getElementById('tax').value) || 0;
+  document.getElementById('subtotal').textContent = money(sub);
+  document.getElementById('total').textContent = money(sub + tax);
+  document.getElementById('save').disabled = !lines.length || !document.getElementById('store').value;
+}
+
+async function loadStore() {
+  const storeEl = document.getElementById('store'), store = storeEl.value;
+  const search = document.getElementById('search');
+  if (lines.length && !confirm('Changing the store removes the items you added. Continue?')) {
+    storeEl.value = currentStore;
+    return;
+  }
+  currentStore = store;
+  known = [];
+  lines = [];
+  renderLines();
+  search.disabled = !store;
+  if (!store) { document.getElementById('picker').innerHTML = '<div class="pick muted" style="cursor:default">Pick a store first.</div>'; return; }
+  document.getElementById('picker').innerHTML = '<div class="pick muted" style="cursor:default">Loading\\u2026</div>';
+  try {
+    known = (await fetchJSON(`/api/receipts/known-items?store=${encodeURIComponent(store)}`)).items
+      .filter(it => it.last_price > 0);  // savings lines aren't something to pick
+    known.sort((a, b) => b.times_bought - a.times_bought || itemName(a).localeCompare(itemName(b)));
+    clearNetworkError();
+    renderPicker();
+    search.focus();
+  } catch (e) {
+    showNetworkError(`Could not load items for ${store}: ${e.message}`);
+  }
+}
+
+document.getElementById('store').addEventListener('change', loadStore);
+document.getElementById('search').addEventListener('input', renderPicker);
+document.getElementById('tax').addEventListener('input', updateTotals);
+document.getElementById('picker').addEventListener('click', e => {
+  const el = e.target.closest('.pick[data-key]');
+  if (!el) return;
+  const it = known.find(k => k.name_key === el.dataset.key);
+  lines.push({name_key: it.name_key, description: itemName(it), raw_text: it.raw_text, item_code: it.item_code,
+              price: it.last_price.toFixed(2), quantity: null, unit: it.unit || 'ea',
+              default_quantity: it.quantity, category: it.category || 'Other'});
+  renderLines();
+});
+const linesEl = document.getElementById('lines');
+linesEl.addEventListener('input', e => {
+  const tr = e.target.closest('tr[data-i]');
+  if (!tr || !e.target.dataset.f) return;
+  const l = lines[+tr.dataset.i], v = e.target.value;
+  if (e.target.dataset.f === 'quantity') l.quantity = v.trim() === '' ? null : v;
+  else l[e.target.dataset.f] = v;
+  updateTotals();
+});
+linesEl.addEventListener('click', e => {
+  if (!e.target.matches('[data-remove]')) return;
+  lines.splice(+e.target.closest('tr').dataset.i, 1);
+  renderLines();
+});
+
+document.getElementById('save').addEventListener('click', async () => {
+  const status = document.getElementById('save-status');
+  const fail = msg => { status.className = 'err'; status.textContent = msg; };
+  const items = [];
+  for (const [i, l] of lines.entries()) {
+    const price = parseAmount(l.price), qty = l.quantity == null ? null : parseAmount(l.quantity);
+    if (price == null || Number.isNaN(price)) return fail(`Item ${i + 1} needs a price.`);
+    if (Number.isNaN(qty) || (qty != null && qty <= 0)) return fail(`Item ${i + 1} has a bad quantity.`);
+    if (!l.description.trim()) return fail(`Item ${i + 1} needs a description.`);
+    items.push({name_key: l.name_key, description: l.description, total_price: price,
+                quantity: qty, unit: qty == null ? null : l.unit, category: l.category});
+  }
+  const tax = parseAmount(document.getElementById('tax').value);
+  if (Number.isNaN(tax)) return fail('Tax isn\\u2019t a valid amount.');
+  const date = document.getElementById('date').value;
+  if (!date) return fail('Pick a date.');
+  document.getElementById('save').disabled = true;
+  status.className = 'muted'; status.textContent = 'Saving\\u2026';
+  try {
+    const res = await sendJSON('/api/receipts/manual', 'POST',
+      {merchant: document.getElementById('store').value, purchase_date: date, tax, items});
+    location.href = `/receipts/${res.id}`;
+  } catch (e) {
+    document.getElementById('save').disabled = false;
+    fail('Save failed: ' + e.message);
+  }
+});
+
+const today = new Date();
+document.getElementById('date').value =
+  `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+Promise.all([fetchJSON('/api/receipts/config'), fetchJSON('/api/receipts/stores')])
+  .then(([c, s]) => {
+    categories = c.categories;
+    document.getElementById('store').innerHTML = '<option value="">Choose a store\\u2026</option>' +
+      s.stores.map(st => `<option>${esc(st.merchant)}</option>`).join('');
+    clearNetworkError();
+  })
+  .catch(e => showNetworkError(`Could not load stores: ${e.message}`));
+</script>
+</body>
+</html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS)
+
+
+@app.get("/receipts/new")
+def receipt_new_page():
+    return Response(_RECEIPT_NEW_PAGE, mimetype="text/html")
 
 
 @app.get("/receipts")
@@ -12405,12 +12633,95 @@ def receipt_detail_page(rid):
     return Response(_RECEIPT_DETAIL_PAGE.replace("__RID__", str(rid)), mimetype="text/html")
 
 
+@app.get("/api/receipts/stores")
+def api_receipt_stores():
+    """Stores that appear on read receipts, most visited first."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT merchant, COUNT(*) AS n_receipts FROM receipts "
+            "WHERE status='done' AND merchant IS NOT NULL AND merchant != '' "
+            "GROUP BY merchant ORDER BY n_receipts DESC, merchant"
+        ).fetchall()
+    return jsonify({'stores': [dict(r) for r in rows]})
+
+
+@app.post("/api/receipts/manual")
+def api_receipt_manual():
+    """Create a receipt by hand, for a purchase with no paper receipt.
+    Body: merchant (a store already in the system), purchase_date, tax, and
+    items: [{name_key, total_price, quantity, unit, category}] chosen from
+    that store's known items."""
+    from smart_home import receipts as _receipts
+    data = request.get_json(silent=True) or {}
+    merchant = (data.get('merchant') or '').strip()
+    date = data.get('purchase_date')
+    try:
+        datetime.date.fromisoformat(date or '')
+    except (TypeError, ValueError):
+        return jsonify({'error': 'purchase_date must be YYYY-MM-DD'}), 400
+    try:
+        tax = None if data.get('tax') in (None, '') else round(float(data['tax']), 2)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'tax must be a number'}), 400
+    lines = data.get('items') or []
+    if not lines:
+        return jsonify({'error': 'Add at least one item'}), 400
+    rows = []
+    with _conn() as conn:
+        if conn.execute("SELECT 1 FROM receipts WHERE merchant=? AND status='done' LIMIT 1",
+                        (merchant,)).fetchone() is None:
+            return jsonify({'error': f'{merchant!r} is not a store in the system'}), 400
+        names = dict(conn.execute("SELECT name_key, name FROM receipt_known_items WHERE name IS NOT NULL"))
+        for n, line in enumerate(lines, 1):
+            key = line.get('name_key')
+            known = conn.execute(
+                "SELECT raw_text, item_code, description, category FROM receipt_items "
+                "WHERE name_key=? ORDER BY id DESC LIMIT 1", (key,)
+            ).fetchone() if key else None
+            if known is None:
+                return jsonify({'error': f'Item {n} is not a known item'}), 400
+            fields, err = _receipt_item_fields(
+                {'description': names.get(key) or known['description'], 'category': known['category'], **line},
+                partial=False)
+            if err:
+                return jsonify({'error': f'Item {n}: {err}'}), 400
+            rows.append((fields, known, key))
+        subtotal = round(sum(f['total_price'] for f, _, _ in rows), 2)
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur = conn.execute(
+            "INSERT INTO receipts (uploaded_at, status, processed_at, image_path, media_type, merchant, "
+            "purchase_date, subtotal, tax, total, notes) VALUES (?, 'done', ?, '', '', ?, ?, ?, ?, ?, ?)",
+            (now, now, merchant, date, subtotal, tax, round(subtotal + (tax or 0), 2), 'Entered by hand'),
+        )
+        rid = cur.lastrowid
+        conn.executemany(
+            "INSERT INTO receipt_items (receipt_id, position, description, quantity, unit, total_price, category, "
+            "raw_text, item_code, name_key) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [(rid, i, f['description'], f.get('quantity'), f.get('unit'), f['total_price'], f['category'],
+              k['raw_text'], k['item_code'], key) for i, (f, k, key) in enumerate(rows)],
+        )
+    return jsonify({'ok': True, 'id': rid}), 201
+
+
 @app.get("/api/receipts/known-items")
 def api_receipt_known_items():
     """Every distinct item read off a receipt (grouped by name_key), with its
-    human-friendly name if one has been set."""
+    human-friendly name if one has been set. ?store=<merchant> limits it to
+    items bought at that store's chain (e.g. any Walmart)."""
+    from smart_home import receipts as _receipts
     day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
+    store_filter, params = "", []
     with _conn() as conn:
+        store = request.args.get('store')
+        if store:
+            family = _receipts._store_family(store)
+            merchants = [m for (m,) in conn.execute("SELECT DISTINCT merchant FROM receipts WHERE merchant IS NOT NULL")
+                         if _receipts._store_family(m) == family]
+            if not merchants:
+                return jsonify({'error': f'No receipts from {store!r}'}), 404
+            store_filter = (f"AND i.name_key IN (SELECT i3.name_key FROM receipt_items i3 JOIN receipts r3 "
+                            f"ON r3.id = i3.receipt_id WHERE r3.merchant IN ({','.join('?' * len(merchants))}))")
+            params = merchants
         rows = conn.execute(f"""
             SELECT i.name_key, n.name, n.quantity, n.unit, COUNT(*) AS times_bought,
                    MAX({day}) AS last_bought,
@@ -12422,14 +12733,16 @@ def api_receipt_known_items():
                     ORDER BY i2.id DESC LIMIT 1) AS description,
                    (SELECT i2.total_price FROM receipt_items i2 WHERE i2.name_key = i.name_key
                     ORDER BY i2.id DESC LIMIT 1) AS last_price,
+                   (SELECT i2.category FROM receipt_items i2 WHERE i2.name_key = i.name_key
+                    ORDER BY i2.id DESC LIMIT 1) AS category,
                    GROUP_CONCAT(DISTINCT r.merchant) AS merchants
             FROM receipt_items i
             JOIN receipts r ON r.id = i.receipt_id
             LEFT JOIN receipt_known_items n ON n.name_key = i.name_key
-            WHERE i.name_key IS NOT NULL
+            WHERE i.name_key IS NOT NULL {store_filter}
             GROUP BY i.name_key
             ORDER BY (n.name IS NOT NULL), last_bought DESC, raw_text
-        """).fetchall()
+        """, params).fetchall()
     return jsonify({'items': [dict(r) for r in rows]})
 
 
