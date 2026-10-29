@@ -12089,7 +12089,7 @@ _RECEIPT_DETAIL_PAGE = """\\
     .header-grid label { display: block; font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-bottom: .25rem; }
     .header-grid input { width: 100%; }
     .actions { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
-    td input[type=text] { width: 100%; min-width: 12rem; }
+    td input[data-f=description] { width: 100%; min-width: 14rem; }
     td input.qty { width: 4.5rem; }
     td input.price { width: 6rem; text-align: right; }
     .printed { font-family: ui-monospace, Menlo, monospace; font-size: .76rem; color: #7a90a8; margin-top: .2rem; }
