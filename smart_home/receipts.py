@@ -10,11 +10,20 @@ everything it extracts can be corrected by hand in the app.
 Each item keeps the text and item number exactly as printed. Those form its
 name_key, which links it to a human-friendly name set on the /receipts/items
 web page; the next time the same item shows up it gets that name automatically.
+
+Faded or torn receipts: items already seen on earlier receipts from the same
+store form a catalog. Partly readable lines are matched against it (filling
+in the item number and, if unreadable, the price). If the result still
+doesn't check out (the printed "# ITEMS SOLD" count, missing prices, or items
+not adding up to the total) the photo is read a second time with that
+catalog and the specific problems given to the model, and the better of the
+two readings is kept.
 """
 from __future__ import annotations
 
 import base64
 import datetime
+import difflib
 import json
 import os
 import re
@@ -63,19 +72,20 @@ _SCHEMA = {
                     "item_code": {"type": ["string", "null"]},
                     "description": {"type": "string"},
                     "quantity": {"type": ["number", "null"]},
-                    "total_price": {"type": "number"},
+                    "total_price": {"type": ["number", "null"]},
                     "category": {"type": "string", "enum": CATEGORIES},
                 },
                 "required": ["raw_text", "item_code", "description", "quantity", "total_price", "category"],
                 "additionalProperties": False,
             },
         },
+        "items_sold": {"type": ["integer", "null"]},
         "subtotal": {"type": ["number", "null"]},
         "tax": {"type": ["number", "null"]},
         "total": {"type": ["number", "null"]},
         "notes": {"type": ["string", "null"]},
     },
-    "required": ["is_receipt", "merchant", "purchase_date", "items", "subtotal", "tax", "total", "notes"],
+    "required": ["is_receipt", "merchant", "purchase_date", "items", "items_sold", "subtotal", "tax", "total", "notes"],
     "additionalProperties": False,
 }
 
@@ -83,10 +93,11 @@ _PROMPT = f"""This is a photo of a store or restaurant receipt. Extract it for a
 
 - merchant: the store or restaurant name as a person would say it (e.g. "Costco", not "COSTCO WHOLESALE #1234").
 - purchase_date: the transaction date as YYYY-MM-DD, or null if it isn't printed.
-- items: one entry per purchased line.
+- items_sold: the "# ITEMS SOLD" count printed on the receipt (Walmart and Sam's Club print one near the top or bottom), or null if there isn't one. When it is printed, return exactly that many purchased item lines (savings and coupon lines don't count), one for each line, even when part of a line is faded or torn.
+- items: one entry per purchased line, top to bottom.
   - raw_text: the item's name exactly as printed, abbreviations and all (e.g. "GV 2% MLK GAL"). Leave out the price and item number. Keep markers such as "INST SV" (e.g. "INST SV LA CROIX VPF").
   - item_code: the item number, UPC or SKU printed on that line, digits only, or null if there isn't one. Walmart prints a 12-digit number after each item name; Sam's Club prints it before. Copy every digit carefully, and only from that same line. Savings and coupon lines usually have no number of their own: use null.
-  - description: Expand cryptic abbreviations into a readable description (e.g. "GV 2% MLK GAL" -> "Great Value 2% milk, 1 gal"). total_price is the line's final amount in dollars. A minus sign after the amount means it is negative: "2.00-" is -2.00. Discounts, coupons and instant savings are their own lines with a negative total_price, in the same category as the item they discount; describe them as e.g. "Instant savings: La Croix". On Sam's Club receipts "INST SV" means instant savings and is always negative, even if the minus sign is hard to see. Bottle deposits, bag fees and similar go in "Fees & Deposits". Do not include sales tax, subtotal, total, payment or change lines as items.
+  - description: Expand cryptic abbreviations into a readable description (e.g. "GV 2% MLK GAL" -> "Great Value 2% milk, 1 gal"). total_price is the line's final amount in dollars. A minus sign after the amount means it is negative: "2.00-" is -2.00. Discounts, coupons and instant savings are their own lines with a negative total_price, in the same category as the item they discount; describe them as e.g. "Instant savings: La Croix". On Sam's Club receipts "INST SV" means instant savings and is always negative, even if the minus sign is hard to see. Bottle deposits, bag fees and similar go in "Fees & Deposits". Do not include sales tax, subtotal, total, payment or change lines as items. Each price is on the same row as its item: if a line's price is faded or unreadable, use null for that line rather than taking a price from a neighbouring row.
 - category: choose the single best fit from: {", ".join(CATEGORIES)}. A restaurant meal or takeout is "Dining Out"; food bought at a store is "Groceries".
 - subtotal, tax, total: as printed, or null if missing. For restaurants, include any tip in total.
 - If the image is not a receipt or is unreadable, set is_receipt to false, leave items empty and explain why in notes.
@@ -157,7 +168,9 @@ def _shrink_for_model(image: bytes) -> bytes:
     return buf.tobytes()
 
 
-def _extract(image: bytes) -> dict:
+def _extract(image: bytes, extra: str = "") -> dict:
+    """One reading of the photo. `extra` is appended to the prompt (used for
+    the second, catalog-assisted reading)."""
     import httpx
 
     image = _shrink_for_model(image)
@@ -168,7 +181,7 @@ def _extract(image: bytes) -> dict:
                 "model": MODEL,
                 "messages": [{
                     "role": "user",
-                    "content": _PROMPT,
+                    "content": _PROMPT + extra,
                     "images": [base64.standard_b64encode(image).decode("ascii")],
                 }],
                 "format": _SCHEMA,
@@ -206,6 +219,159 @@ def name_key(raw_text: str | None, item_code: str | None) -> str | None:
         return f"code:{code}"
     text = " ".join((raw_text or "").upper().split())
     return f"text:{text}" if text else None
+
+
+def _store_family(merchant: str | None) -> str:
+    """Groups a chain's variants: "Walmart Neighborhood Market" and "Walmart"
+    both give "walmart"; "Sam's Club" gives "sams"."""
+    words = (merchant or "").lower().split()
+    return re.sub(r"[^a-z0-9]", "", words[0]) if words else ""
+
+
+def _norm_text(t: str | None) -> str:
+    return " ".join(re.sub(r"[^A-Z0-9% ]", " ", (t or "").upper()).split())
+
+
+def _catalog(conn: sqlite3.Connection, rid: int, merchant: str | None) -> list[dict]:
+    """Items with an item number seen on other receipts from the same store,
+    most frequently bought first."""
+    family = _store_family(merchant)
+    if not family:
+        return []
+    by_code: dict[str, dict] = {}
+    for code, raw, price, m, name in conn.execute(
+        "SELECT i.item_code, i.raw_text, i.total_price, r.merchant, n.name FROM receipt_items i "
+        "JOIN receipts r ON r.id = i.receipt_id LEFT JOIN receipt_item_names n ON n.name_key = i.name_key "
+        "WHERE i.item_code IS NOT NULL AND i.total_price > 0 AND r.status = 'done' AND r.id != ? "
+        "ORDER BY i.id DESC", (rid,)
+    ):
+        if _store_family(m) != family:
+            continue
+        entry = by_code.setdefault(code, {"code": code, "raw_text": raw, "price": price, "name": name, "seen": 0})
+        entry["seen"] += 1
+    return sorted(by_code.values(), key=lambda e: -e["seen"])
+
+
+def _match(item: dict, catalog: list[dict]) -> dict | None:
+    """The catalog entry a partly readable line most likely is, or None.
+
+    A complete item number that isn't in the catalog is a different product
+    (several products can share a printed name like "PIZZA"), so it only
+    matches when both its digits and text are very close, i.e. a digit or two
+    misread. A partial number (the paper is torn or faded) or none at all is
+    matched on the printed text. The best match must clearly beat the
+    runner-up."""
+    code = re.sub(r"\D", "", item.get("item_code") or "")
+    text = _norm_text(item.get("raw_text"))
+    if code:
+        for e in catalog:
+            if e["code"] == code:
+                return e
+    scored = []
+    for e in catalog:
+        t = difflib.SequenceMatcher(None, text, _norm_text(e["raw_text"])).ratio() if text else 0.0
+        c = difflib.SequenceMatcher(None, code, e["code"]).ratio() if code else 0.0
+        if code and len(code) >= len(e["code"]):
+            ok = c >= 0.75 and t >= 0.6 and c + t >= 1.6
+        elif code and len(code) >= 5 and e["code"].startswith(code):
+            ok = t >= 0.6
+        else:
+            ok = t >= 0.85
+        if ok:
+            scored.append((t + c, e))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: -x[0])
+    if len(scored) > 1 and scored[0][0] - scored[1][0] < 0.1:
+        return None
+    return scored[0][1]
+
+
+def _reconcile(data: dict, catalog: list[dict]) -> list[str]:
+    """Fix lines against the catalog in place. Returns what was changed."""
+    fixed_codes, filled_prices = [], []
+    for it in data.get("items") or []:
+        e = _match(it, catalog)
+        if e is None:
+            continue
+        if it.get("item_code") != e["code"]:
+            fixed_codes.append(e["raw_text"])
+            it["item_code"] = e["code"]
+            it["raw_text"] = e["raw_text"]
+        if it.get("total_price") is None:
+            it["total_price"] = e["price"]
+            filled_prices.append(e["raw_text"])
+    changes = []
+    if fixed_codes:
+        changes.append(f"Matched {len(fixed_codes)} partly unreadable line(s) to items from earlier receipts: "
+                       + ", ".join(fixed_codes) + ".")
+    if filled_prices:
+        changes.append(f"Price unreadable, used the last price paid for: {', '.join(filled_prices)}.")
+    return changes
+
+
+def _problems(data: dict) -> list[str]:
+    """Reasons to doubt a reading, in words the model can act on."""
+    items = data.get("items") or []
+    out = []
+    sold = data.get("items_sold")
+    n = sum(1 for it in items if it.get("total_price") is None or it["total_price"] > 0)
+    if sold and n != sold:
+        out.append(f'The receipt prints "# ITEMS SOLD {sold}", but {n} item lines were read.')
+    missing = [it.get("raw_text") or it.get("description") for it in items if it.get("total_price") is None]
+    if missing:
+        out.append(f"No price was read for: {', '.join(missing)}.")
+    target = data.get("subtotal")
+    if target is None and data.get("total") is not None:
+        target = data["total"] - (data.get("tax") or 0)
+    if target is not None and not missing:
+        got = sum(it["total_price"] for it in items)
+        if abs(got - target) >= 0.01:
+            out.append(f"The item prices add up to {got:.2f}, but the receipt's subtotal is {target:.2f}.")
+    return out
+
+
+def _retry_hint(problems: list[str], catalog: list[dict]) -> str:
+    lines = ["", "", "A first reading of this receipt had these problems:"]
+    lines += [f"- {p}" for p in problems]
+    lines.append("Read every line again carefully. The paper may be faded or torn.")
+    if catalog:
+        lines.append("Items bought at this store before (item number, printed name, last price). "
+                     "A partly readable line is very likely one of these; use its full item number:")
+        for e in catalog[:80]:
+            lines.append(f'{e["code"]}  {e["raw_text"]}  {e["price"]:.2f}')
+    return "\n".join(lines)
+
+
+def _read(conn: sqlite3.Connection, rid: int, image: bytes) -> dict:
+    """Read the photo, check it against earlier receipts, and read it a second
+    time with that help if it still doesn't add up."""
+    data = _extract(image)
+    if not data.get("is_receipt"):
+        return data
+    catalog = _catalog(conn, rid, data.get("merchant"))
+    changes = _reconcile(data, catalog)
+    problems = _problems(data)
+    if problems:
+        second = _extract(image, _retry_hint(problems, catalog))
+        if second.get("is_receipt"):
+            changes2 = _reconcile(second, catalog)
+            problems2 = _problems(second)
+            if len(problems2) < len(problems):
+                data, changes, problems = second, changes2, problems2
+    # A single missing price can be worked out from the subtotal
+    items = data.get("items") or []
+    missing = [it for it in items if it.get("total_price") is None]
+    if len(missing) == 1 and data.get("subtotal") is not None:
+        rest = sum(it["total_price"] for it in items if it is not missing[0])
+        missing[0]["total_price"] = round(data["subtotal"] - rest, 2)
+        changes.append(f"Price unreadable for {missing[0].get('raw_text')}; worked out from the subtotal.")
+        problems = _problems(data)
+    for it in items:
+        if it.get("total_price") is None:
+            it["total_price"] = 0.0
+    data["notes"] = " ".join(filter(None, [data.get("notes"), *changes, *problems])) or None
+    return data
 
 
 # Printed markers for a line that takes money off: a savings line read as a
@@ -262,7 +428,7 @@ def process(db_path: str, rid: int) -> None:
         try:
             with open(row[0], "rb") as f:
                 image = f.read()
-            _store_result(conn, rid, _extract(image))
+            _store_result(conn, rid, _read(conn, rid, image))
         except Exception as e:
             msg = str(e) if isinstance(e, ReceiptError) else f"{type(e).__name__}: {e}"
             conn.execute("UPDATE receipts SET status='error', error=?, processed_at=? WHERE id=?", (msg, _now(), rid))
