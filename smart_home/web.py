@@ -12226,7 +12226,7 @@ function render() {
     el.classList.remove('dirty');
   });
   document.getElementById('save-header').disabled = true;
-  document.getElementById('notes').textContent = r.notes ? 'Note from the reader: ' + r.notes : '';
+  document.getElementById('notes').textContent = !r.notes ? '' : r.manual ? r.notes : 'Note from the reader: ' + r.notes;
 
   document.getElementById('items').innerHTML = r.items.map(it => itemRow(it)).join('') ||
     '<tr><td colspan="6" class="muted">No items.</td></tr>';
