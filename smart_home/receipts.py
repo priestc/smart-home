@@ -6,6 +6,10 @@ merchant, date, line items (each assigned a spending category), tax and total
 as structured JSON. Items are stored in receipt_items so spending can be
 summed by category over time. A small local model will misread some lines, so
 everything it extracts can be corrected by hand in the app.
+
+Each item keeps the text and item number exactly as printed. Those form its
+name_key, which links it to a human-friendly name set on the /receipts/items
+web page; the next time the same item shows up it gets that name automatically.
 """
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ import base64
 import datetime
 import json
 import os
+import re
 import sqlite3
 import threading
 
@@ -54,12 +59,14 @@ _SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "raw_text": {"type": "string"},
+                    "item_code": {"type": ["string", "null"]},
                     "description": {"type": "string"},
                     "quantity": {"type": ["number", "null"]},
                     "total_price": {"type": "number"},
                     "category": {"type": "string", "enum": CATEGORIES},
                 },
-                "required": ["description", "quantity", "total_price", "category"],
+                "required": ["raw_text", "item_code", "description", "quantity", "total_price", "category"],
                 "additionalProperties": False,
             },
         },
@@ -76,7 +83,10 @@ _PROMPT = f"""This is a photo of a store or restaurant receipt. Extract it for a
 
 - merchant: the store or restaurant name as a person would say it (e.g. "Costco", not "COSTCO WHOLESALE #1234").
 - purchase_date: the transaction date as YYYY-MM-DD, or null if it isn't printed.
-- items: one entry per purchased line. Expand cryptic abbreviations into a readable description (e.g. "GV 2% MLK GAL" -> "Great Value 2% milk, 1 gal"). total_price is the line's final amount in dollars. Apply discounts, coupons and instant savings as their own lines with a negative total_price, in the same category as the item they discount. Bottle deposits, bag fees and similar go in "Fees & Deposits". Do not include sales tax, subtotal, total, payment or change lines as items.
+- items: one entry per purchased line.
+  - raw_text: the item's name exactly as printed, abbreviations and all (e.g. "GV 2% MLK GAL"). Leave out the price and item number.
+  - item_code: the item number, UPC or SKU printed on that line, digits only, or null if there isn't one. Walmart prints a 12-digit number after each item name; copy every digit carefully.
+  - description: Expand cryptic abbreviations into a readable description (e.g. "GV 2% MLK GAL" -> "Great Value 2% milk, 1 gal"). total_price is the line's final amount in dollars. Apply discounts, coupons and instant savings as their own lines with a negative total_price, in the same category as the item they discount. Bottle deposits, bag fees and similar go in "Fees & Deposits". Do not include sales tax, subtotal, total, payment or change lines as items.
 - category: choose the single best fit from: {", ".join(CATEGORIES)}. A restaurant meal or takeout is "Dining Out"; food bought at a store is "Groceries".
 - subtotal, tax, total: as printed, or null if missing. For restaurants, include any tip in total.
 - If the image is not a receipt or is unreadable, set is_receipt to false, leave items empty and explain why in notes.
@@ -187,6 +197,17 @@ def _extract(image: bytes) -> dict:
         raise ReceiptError(f"Unparseable response from {MODEL}: {text[:200]}")
 
 
+def name_key(raw_text: str | None, item_code: str | None) -> str | None:
+    """What identifies an item across receipts: its item number when one is
+    printed (it tells apart products whose printed names are identical),
+    otherwise the printed text."""
+    code = re.sub(r"\D", "", item_code or "")
+    if code:
+        return f"code:{code}"
+    text = " ".join((raw_text or "").upper().split())
+    return f"text:{text}" if text else None
+
+
 def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
     if not data.get("is_receipt"):
         raise ReceiptError(data.get("notes") or "This doesn't look like a receipt")
@@ -195,13 +216,20 @@ def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
         datetime.date.fromisoformat(date or "")
     except ValueError:
         date = None
+    names = dict(conn.execute("SELECT name_key, name FROM receipt_item_names").fetchall())
+    rows = []
+    for i, it in enumerate(data.get("items") or []):
+        code = re.sub(r"\D", "", it.get("item_code") or "") or None
+        key = name_key(it.get("raw_text"), code)
+        rows.append((rid, i, names.get(key) or it["description"], it.get("quantity"),
+                     round(float(it["total_price"]), 2),
+                     it["category"] if it["category"] in CATEGORIES else "Other",
+                     it.get("raw_text"), code, key))
     conn.execute("DELETE FROM receipt_items WHERE receipt_id=?", (rid,))
     conn.executemany(
-        "INSERT INTO receipt_items (receipt_id, position, description, quantity, total_price, category) "
-        "VALUES (?,?,?,?,?,?)",
-        [(rid, i, it["description"], it.get("quantity"), round(float(it["total_price"]), 2),
-          it["category"] if it["category"] in CATEGORIES else "Other")
-         for i, it in enumerate(data.get("items") or [])],
+        "INSERT INTO receipt_items (receipt_id, position, description, quantity, total_price, category, "
+        "raw_text, item_code, name_key) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
     )
     conn.execute(
         "UPDATE receipts SET status='done', error=NULL, processed_at=?, merchant=?, purchase_date=?, "

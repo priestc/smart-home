@@ -298,7 +298,7 @@ def open_db(path: str) -> sqlite3.Connection:
             error      TEXT
         )
     """)
-    # Receipts photographed in the iOS app and read by Claude. status is
+    # Receipts photographed in the iOS app and read by a local vision model. status is
     # 'processing', 'done' or 'error'; purchase_date falls back to the upload
     # date in summaries when the receipt doesn't print one.
     conn.execute("""
@@ -331,6 +331,23 @@ def open_db(path: str) -> sqlite3.Connection:
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS receipt_items_receipt ON receipt_items (receipt_id)")
+    # raw_text and item_code are the line as printed (e.g. Walmart's 12-digit
+    # item number); name_key is derived from them and links the item to a
+    # human-friendly name in receipt_item_names. NULL for hand-added items.
+    for col in ("raw_text TEXT", "item_code TEXT", "name_key TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE receipt_items ADD COLUMN {col}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.execute("CREATE INDEX IF NOT EXISTS receipt_items_name_key ON receipt_items (name_key)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS receipt_item_names (
+            name_key   TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
     conn.commit()
     return conn
 

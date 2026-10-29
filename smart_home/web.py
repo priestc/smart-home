@@ -5293,6 +5293,7 @@ def index():
     <a href="/chart/db-sizes"   class="chart-link"><span class="cl-title">Database Growth</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/camera"            class="chart-link"><span class="cl-title">Cameras</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/receipts/items"    class="chart-link"><span class="cl-title">Receipt Items</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/water-chemistry"   class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Water Chemistry</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/rssi"              class="chart-link"><span class="cl-title">Bluetooth Signal</span><span class="cl-arrow">&#8594;</span></a>
   </div>
@@ -11704,7 +11705,7 @@ def api_receipt_detail(rid):
             return jsonify({'error': 'Receipt not found'}), 404
         r = _receipt_json(conn, row)
         r['items'] = [dict(i) for i in conn.execute(
-            "SELECT id, description, quantity, total_price, category FROM receipt_items "
+            "SELECT id, description, quantity, total_price, category, raw_text, item_code FROM receipt_items "
             "WHERE receipt_id=? ORDER BY position", (rid,)
         ).fetchall()]
         return jsonify(r)
@@ -11858,6 +11859,243 @@ def api_receipt_item_delete(item_id):
         if cur.rowcount == 0:
             return jsonify({'error': 'Item not found'}), 404
     return jsonify({'ok': True})
+
+
+@app.get("/api/receipts/known-items")
+def api_receipt_known_items():
+    """Every distinct item read off a receipt (grouped by name_key), with its
+    human-friendly name if one has been set."""
+    day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
+    with _conn() as conn:
+        rows = conn.execute(f"""
+            SELECT i.name_key, n.name, COUNT(*) AS times_bought,
+                   MAX({day}) AS last_bought,
+                   (SELECT i2.raw_text FROM receipt_items i2 WHERE i2.name_key = i.name_key
+                    ORDER BY i2.id DESC LIMIT 1) AS raw_text,
+                   (SELECT i2.item_code FROM receipt_items i2 WHERE i2.name_key = i.name_key
+                    ORDER BY i2.id DESC LIMIT 1) AS item_code,
+                   (SELECT i2.description FROM receipt_items i2 WHERE i2.name_key = i.name_key
+                    ORDER BY i2.id DESC LIMIT 1) AS description,
+                   (SELECT i2.total_price FROM receipt_items i2 WHERE i2.name_key = i.name_key
+                    ORDER BY i2.id DESC LIMIT 1) AS last_price,
+                   GROUP_CONCAT(DISTINCT r.merchant) AS merchants
+            FROM receipt_items i
+            JOIN receipts r ON r.id = i.receipt_id
+            LEFT JOIN receipt_item_names n ON n.name_key = i.name_key
+            WHERE i.name_key IS NOT NULL
+            GROUP BY i.name_key
+            ORDER BY (n.name IS NOT NULL), last_bought DESC, raw_text
+        """).fetchall()
+    return jsonify({'items': [dict(r) for r in rows]})
+
+
+@app.put("/api/receipts/known-items/name")
+def api_receipt_item_name():
+    """Set (or with an empty name, clear) the friendly name for a name_key.
+    Setting it also renames every existing item with that key."""
+    data = request.get_json(silent=True) or {}
+    key = data.get('name_key')
+    if not isinstance(key, str) or not key:
+        return jsonify({'error': 'name_key is required'}), 400
+    name = (data.get('name') or '').strip()
+    with _conn() as conn:
+        if conn.execute("SELECT 1 FROM receipt_items WHERE name_key=? LIMIT 1", (key,)).fetchone() is None:
+            return jsonify({'error': 'No receipt item has that key'}), 404
+        if not name:
+            # Existing items keep their current description
+            conn.execute("DELETE FROM receipt_item_names WHERE name_key=?", (key,))
+            return jsonify({'ok': True, 'renamed': 0})
+        conn.execute(
+            "INSERT INTO receipt_item_names (name_key, name, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(name_key) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at",
+            (key, name, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        cur = conn.execute("UPDATE receipt_items SET description=? WHERE name_key=?", (name, key))
+    return jsonify({'ok': True, 'renamed': cur.rowcount})
+
+
+_RECEIPT_ITEMS_PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Receipt Items &mdash; Smart Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; letter-spacing: -.02em; }
+    .nav { margin-bottom: 1rem; }
+    .nav a { font-size: .85rem; color: #2e7dd4; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .intro { font-size: .9rem; color: #4a6080; margin-bottom: 1rem; max-width: 52rem; }
+    .toolbar { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+    .toolbar input[type=search] { padding: .45rem .7rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .9rem; min-width: 16rem; }
+    .toolbar label { font-size: .85rem; color: #4a6080; }
+    .count { font-size: .85rem; color: #7a90a8; }
+    .wrap { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th { text-align: left; font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; padding: .7rem .8rem; border-bottom: 1px solid #e8eef4; white-space: nowrap; }
+    td { padding: .55rem .8rem; border-bottom: 1px solid #f0f4f8; vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    .raw { font-family: ui-monospace, Menlo, monospace; font-size: .82rem; }
+    .code { font-family: ui-monospace, Menlo, monospace; font-size: .8rem; color: #7a90a8; }
+    .muted { color: #7a90a8; font-size: .8rem; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .name-cell { display: flex; gap: .4rem; align-items: center; min-width: 18rem; }
+    .name-cell input { flex: 1; padding: .4rem .6rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .88rem; }
+    .name-cell input.dirty { border-color: #e07820; }
+    .name-cell button { background: #2e7dd4; color: #fff; border: none; border-radius: 6px; padding: .4rem .8rem; cursor: pointer; font-size: .82rem; }
+    .name-cell button:disabled { background: #aabbc8; cursor: default; }
+    .status { font-size: .78rem; min-width: 4rem; }
+    .status.ok { color: #2db37a; }
+    .status.err { color: #b00; }
+    .empty { padding: 2rem; text-align: center; color: #7a90a8; }
+  </style>
+</head>
+<body>
+  <h1>Receipt Items</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <p class="intro">Every item that has appeared on a scanned receipt. Give an item a friendly name and it replaces
+  the description on all of its receipts. The text and item number as printed are kept, so the next receipt with the
+  same item gets the name automatically. Items with an item number (Walmart prints one per line) are matched by that
+  number; others by their printed text.</p>
+  <div class="toolbar">
+    <input type="search" id="filter" placeholder="Filter by printed text, number, name or store">
+    <label><input type="checkbox" id="unnamed-only"> Unnamed only</label>
+    <span class="count" id="count"></span>
+  </div>
+  <div class="wrap">
+    <table>
+      <thead><tr>
+        <th>As printed</th><th>Item #</th><th>Store</th><th class="num">Bought</th><th class="num">Last price</th>
+        <th>Friendly name</th><th></th>
+      </tr></thead>
+      <tbody id="rows"><tr><td colspan="7" class="empty">Loading&hellip;</td></tr></tbody>
+    </table>
+  </div>
+<script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '\u26a0 ' + msg;
+}
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
+async function fetchJSON(url, opts) {
+  const r = await fetch(url, opts);
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* non-JSON error body; reported below */ }
+  if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status} ${r.statusText}`);
+  return data;
+}
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+let items = [];
+
+function render() {
+  const q = document.getElementById('filter').value.trim().toLowerCase();
+  const unnamedOnly = document.getElementById('unnamed-only').checked;
+  const shown = items.filter(it => {
+    if (unnamedOnly && it.name) return false;
+    if (!q) return true;
+    return [it.raw_text, it.item_code, it.name, it.description, it.merchants]
+      .some(v => v && String(v).toLowerCase().includes(q));
+  });
+  const named = items.filter(it => it.name).length;
+  document.getElementById('count').textContent =
+    `${shown.length} shown \u00b7 ${named} of ${items.length} named`;
+  const tbody = document.getElementById('rows');
+  if (!shown.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="empty">${items.length ? 'No items match.' : 'No receipt items yet. Scan a receipt in the app.'}</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = shown.map(it => {
+    const idx = items.indexOf(it);
+    return `<tr>
+      <td><div class="raw">${esc(it.raw_text) || '<span class="muted">(none)</span>'}</div>
+          ${!it.name && it.description ? `<div class="muted">read as: ${esc(it.description)}</div>` : ''}</td>
+      <td class="code">${esc(it.item_code) || '&mdash;'}</td>
+      <td class="muted">${esc(it.merchants) || '&mdash;'}</td>
+      <td class="num">${it.times_bought}&times;<div class="muted">${esc(it.last_bought)}</div></td>
+      <td class="num">$${Number(it.last_price).toFixed(2)}</td>
+      <td><div class="name-cell">
+        <input type="text" data-idx="${idx}" value="${esc(it.name || '')}" placeholder="${esc(it.description || '')}">
+        <button data-idx="${idx}" disabled>Save</button>
+      </div></td>
+      <td class="status" id="status-${idx}"></td>
+    </tr>`;
+  }).join('');
+}
+
+async function save(idx) {
+  const it = items[idx];
+  const input = document.querySelector(`input[data-idx="${idx}"]`);
+  const btn = document.querySelector(`button[data-idx="${idx}"]`);
+  const status = document.getElementById(`status-${idx}`);
+  btn.disabled = true;
+  status.className = 'status';
+  status.textContent = 'Saving\u2026';
+  try {
+    const res = await fetchJSON('/api/receipts/known-items/name', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name_key: it.name_key, name: input.value}),
+    });
+    it.name = input.value.trim() || null;
+    if (it.name) it.description = it.name;
+    input.value = it.name || '';
+    input.classList.remove('dirty');
+    status.className = 'status ok';
+    status.textContent = it.name ? `Saved (${res.renamed} renamed)` : 'Cleared';
+  } catch (e) {
+    btn.disabled = false;
+    status.className = 'status err';
+    status.textContent = 'Failed';
+    showNetworkError(`Could not save name: ${e.message}`);
+  }
+}
+
+document.getElementById('rows').addEventListener('input', e => {
+  if (!e.target.matches('input[data-idx]')) return;
+  const idx = +e.target.dataset.idx;
+  const dirty = e.target.value.trim() !== (items[idx].name || '');
+  e.target.classList.toggle('dirty', dirty);
+  document.querySelector(`button[data-idx="${idx}"]`).disabled = !dirty;
+});
+document.getElementById('rows').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.matches('input[data-idx]')) save(+e.target.dataset.idx);
+});
+document.getElementById('rows').addEventListener('click', e => {
+  if (e.target.matches('button[data-idx]')) save(+e.target.dataset.idx);
+});
+document.getElementById('filter').addEventListener('input', render);
+document.getElementById('unnamed-only').addEventListener('change', render);
+
+fetchJSON('/api/receipts/known-items')
+  .then(data => { items = data.items; clearNetworkError(); render(); })
+  .catch(e => {
+    showNetworkError(`Could not load receipt items: ${e.message}`);
+    document.getElementById('rows').innerHTML =
+      `<tr><td colspan="7" class="empty">Could not load receipt items: ${esc(e.message)}</td></tr>`;
+  });
+</script>
+</body>
+</html>"""
+
+
+@app.get("/receipts/items")
+def receipt_items_page():
+    return Response(_RECEIPT_ITEMS_PAGE, mimetype="text/html")
 
 
 @app.get("/api/receipts/summary")

@@ -45,6 +45,15 @@ struct ReceiptItem: Codable, Identifiable {
     var quantity: Double?
     var total_price: Double
     var category: String
+    /// The line as printed and its item number (e.g. Walmart's 12-digit code);
+    /// nil for items added by hand.
+    var raw_text: String? = nil
+    var item_code: String? = nil
+
+    var printedText: String? {
+        let parts = [raw_text, item_code].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 }
 
 private struct ReceiptsListResponse: Codable { let receipts: [Receipt] }
@@ -604,6 +613,9 @@ struct ReceiptDetailView: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.description)
+                if let printed = item.printedText, printed != item.description {
+                    Text(printed).font(.caption.monospaced()).foregroundColor(.secondary)
+                }
                 HStack(spacing: 6) {
                     Text(item.category).font(.caption)
                         .padding(.horizontal, 8).padding(.vertical, 2)
@@ -762,6 +774,9 @@ private struct ReceiptItemEditor: View {
                 Section { Text(err).font(.footnote).foregroundColor(.red) }
             }
             Section {
+                if let printed = item?.printedText {
+                    LabeledContent("On receipt") { Text(printed).font(.callout.monospaced()) }
+                }
                 TextField("Description", text: $description)
                 LabeledContent("Price") {
                     TextField("0.00", text: $price).keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing)
