@@ -18,6 +18,9 @@ import threading
 
 OLLAMA_URL = "http://127.0.0.1:11434"
 MODEL = "qwen3-vl:8b-instruct"
+# Longest side of the copy sent to the model. Image tokens grow with pixel
+# count and dominate processing time; receipt text stays legible at this size.
+MODEL_MAX_DIMENSION = 1600
 
 CATEGORIES = [
     "Groceries",
@@ -125,9 +128,29 @@ def save_upload(db_path: str, image: bytes, media_type: str) -> int:
         conn.close()
 
 
+def _shrink_for_model(image: bytes) -> bytes:
+    """Downscale so the longest side is at most MODEL_MAX_DIMENSION; returns JPEG bytes."""
+    import cv2
+    import numpy as np
+
+    img = cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise ReceiptError("Could not decode the uploaded image")
+    h, w = img.shape[:2]
+    scale = MODEL_MAX_DIMENSION / max(h, w)
+    if scale >= 1:
+        return image
+    img = cv2.resize(img, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        raise ReceiptError("Could not re-encode the resized image")
+    return buf.tobytes()
+
+
 def _extract(image: bytes) -> dict:
     import httpx
 
+    image = _shrink_for_model(image)
     try:
         resp = httpx.post(
             f"{OLLAMA_URL}/api/chat",
