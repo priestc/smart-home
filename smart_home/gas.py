@@ -23,6 +23,8 @@ import threading
 
 import httpx
 
+from smart_home import delegated
+
 SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 FIELD_MASK = (
     "places.id,places.displayName,places.location,places.fuelOptions,"
@@ -174,8 +176,8 @@ def _search_tile(client: httpx.Client, api_key: str, tile, budget: list[int]) ->
             body["pageToken"] = page_token
         budget[0] -= 1
         budget[1] += 1
-        resp = client.post(
-            SEARCH_URL,
+        resp = delegated.request(
+            "POST", SEARCH_URL, client=client,
             json=body,
             headers={"X-Goog-Api-Key": api_key, "X-Goog-FieldMask": FIELD_MASK},
             timeout=20,

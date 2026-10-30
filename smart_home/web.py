@@ -11666,7 +11666,7 @@ def _receipt_json(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
 def api_receipts_config():
     from smart_home import receipts as _receipts
     return jsonify({
-        'model': f'AI delegator task {_receipts.AI_TASK}',
+        'model': f'service delegator task {_receipts.AI_TASK}',
         'categories': _receipts.CATEGORIES,
         'tax_category': _receipts.TAX_CATEGORY,
         'utilities': _receipts.UTILITIES,

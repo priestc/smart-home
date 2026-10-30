@@ -37,12 +37,11 @@ import re
 import sqlite3
 import threading
 
-from smart_home import gpu_monitor
+from smart_home import delegated, gpu_monitor
 
-# Photos are read through AI Delegator (github.com/priestc/AI-delegator) on
-# this machine. Its "receipt-reader" task picks the model (a local Ollama
+# Photos are read through the service delegator on this machine (see
+# delegated.py). Its "receipt-reader" task picks the model (a local Ollama
 # vision model, qwen3-vl:8b-instruct) and logs each call with GPU readings.
-AI_DELEGATOR_URL = "http://127.0.0.1:5055"
 AI_TASK = "receipt-reader"
 # Longest side of the copy sent to the model. Image tokens grow with pixel
 # count and dominate processing time; receipt text stays legible at this size.
@@ -210,7 +209,7 @@ def _extract(image: bytes, extra: str = "") -> dict:
     image = _shrink_for_model(image)
     try:
         resp = httpx.post(
-            f"{AI_DELEGATOR_URL}/api/ask",
+            f"{delegated.SERVICE_DELEGATOR_URL}/api/ask",
             json={
                 "task": AI_TASK,
                 "project": "smart-home",
@@ -221,14 +220,14 @@ def _extract(image: bytes, extra: str = "") -> dict:
             timeout=900.0,
         )
     except httpx.HTTPError as e:
-        raise ReceiptError(f"Could not reach the AI delegator at {AI_DELEGATOR_URL}: {e}")
+        raise ReceiptError(f"Could not reach the service delegator at {delegated.SERVICE_DELEGATOR_URL}: {e}")
     try:
         body = resp.json()
     except ValueError:
-        raise ReceiptError(f"AI delegator returned HTTP {resp.status_code}: {resp.text[:300]}")
+        raise ReceiptError(f"Service delegator returned HTTP {resp.status_code}: {resp.text[:300]}")
     if resp.status_code != 200:
         notes = "; ".join(body.get("notes") or [])
-        raise ReceiptError((body.get("error") or f"AI delegator returned HTTP {resp.status_code}")
+        raise ReceiptError((body.get("error") or f"Service delegator returned HTTP {resp.status_code}")
                            + (f" ({notes})" if notes else ""))
     text = body.get("text") or ""
     try:

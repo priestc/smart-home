@@ -76,6 +76,7 @@ def send_notification(title: str, body: str) -> None:
 
     try:
         import httpx
+        from smart_home import delegated
     except ImportError:
         print("[push] httpx not installed. Run: pip install 'httpx[http2]'")
         return
@@ -93,8 +94,8 @@ def send_notification(title: str, body: str) -> None:
     with httpx.Client(http2=True) as client:
         for token in tokens:
             try:
-                resp = client.post(
-                    f"{host}/3/device/{token}",
+                resp = delegated.request(
+                    "POST", f"{host}/3/device/{token}", client=client,
                     headers={
                         "authorization": f"bearer {bearer}",
                         "apns-topic": creds["bundle_id"],
