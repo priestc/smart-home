@@ -13,8 +13,9 @@ web page; the next time the same item shows up it gets that name automatically.
 
 Utility bills (water, electricity, propane, internet...) are photographed the
 same way. The model tells them apart from store receipts; they're stored in
-the same table with kind='bill', the utility, and the usage printed on the
-bill (e.g. 1440 gallons), and shown on the /utilities page instead.
+the same table with kind='bill': the utility, the company, the billing date,
+the usage printed on the bill (e.g. 1440 gallons) and the amount (total).
+A bill has no items. Bills are shown on the /utilities pages instead.
 That page also sets an item's default quantity (e.g. 21.7 oz); a quantity on
 the receipt line itself (a printed weight, or one entered by hand) overrides it.
 
@@ -63,12 +64,10 @@ CATEGORIES = [
     "Entertainment",
     "Gifts",
     "Fees & Deposits",
-    "Utilities",
     "Other",
 ]
 # What a utility bill (kind='bill') is for
 UTILITIES = ["Electricity", "Water", "Propane", "Natural Gas", "Internet", "Phone", "Trash", "Sewer", "Other"]
-UTILITY_CATEGORY = "Utilities"
 # Units for an item's quantity: a count, ounces or pounds
 UNITS = ["ea", "oz", "lb"]
 # Not an item category: receipts.tax is reported under this name in summaries
@@ -82,7 +81,6 @@ _SCHEMA = {
         "utility": {"type": ["string", "null"], "enum": UTILITIES + [None]},
         "usage": {"type": ["number", "null"]},
         "usage_unit": {"type": ["string", "null"]},
-        "due_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
         "merchant": {"type": ["string", "null"]},
         "purchase_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
         "items": {
@@ -108,7 +106,7 @@ _SCHEMA = {
         "total": {"type": ["number", "null"]},
         "notes": {"type": ["string", "null"]},
     },
-    "required": ["is_receipt", "document_type", "utility", "usage", "usage_unit", "due_date", "merchant", "purchase_date", "items", "items_sold", "subtotal", "tax", "total", "notes"],
+    "required": ["is_receipt", "document_type", "utility", "usage", "usage_unit", "merchant", "purchase_date", "items", "items_sold", "subtotal", "tax", "total", "notes"],
     "additionalProperties": False,
 }
 
@@ -116,12 +114,11 @@ _PROMPT = f"""This is a photo of a store or restaurant receipt, or of a utility 
 
 - document_type: "utility_bill" for a bill from a utility or service provider (water, electricity, propane or gas delivery, internet, phone, trash, sewer), otherwise "receipt". A dump, landfill or transfer station scale ticket is a utility bill for "Trash".
 - For a utility bill:
-  - utility: one of {", ".join(UTILITIES)}. For a receipt use null, and null for usage, usage_unit and due_date too.
+  - utility: one of {", ".join(UTILITIES)}. For a receipt use null, and null for usage and usage_unit too.
   - merchant: the company's name (e.g. "Moongate Water Co."). purchase_date: the billing or statement date.
   - usage and usage_unit: the amount used this period as printed, e.g. GALLONS USED 1440 gives 1440, "gal"; 812 KWH gives 812, "kWh"; propane delivered in gallons gives "gal"; a transfer station's net weight "20 lb" gives 20, "lb". Null for both if no usage is printed (e.g. internet).
-  - due_date: the payment due date as YYYY-MM-DD, or null.
-  - items: each charge for this period (e.g. "WATER CHRG.", "CONSERVATION FEE", "Monthly service") with category "{UTILITY_CATEGORY}". Fees and surcharges are charges wherever they are printed, including below the subtotal (e.g. "Environmental Impact Fee", "Fuel Surcharge Fee"): include each one as an item, even when it is 0.00. Do not include tax, meter readings, subtotal, balance forward, previous balance, payments or the total as items.
-  - tax: the tax charged. total: this period's charges plus tax (leave out any balance forward or past-due amount). subtotal: null. items_sold: null. Skip the store-receipt rules below.
+  - total: the amount charged for this period, including every fee, surcharge and tax (wherever they are printed, even below the subtotal), but not any balance forward or past-due amount.
+  - items: empty. subtotal, tax and items_sold: null. Skip the store-receipt rules below.
 
 - merchant: the store or restaurant name as a person would say it (e.g. "Costco", not "COSTCO WHOLESALE #1234").
 - purchase_date: the transaction date as YYYY-MM-DD, or null if it isn't printed.
@@ -369,29 +366,6 @@ def _retry_hint(problems: list[str], catalog: list[dict]) -> str:
     return "\n".join(lines)
 
 
-# Lines on a bill that aren't charges for the period, which the model sometimes
-# lists as items anyway
-_BILL_TAX_RE = re.compile(r"^\s*(SALES\s+|STATE\s+|GROSS\s+RECEIPTS\s+)?TAX(ES)?\b", re.I)
-_BILL_NOT_CHARGE_RE = re.compile(r"\b(SUB\s*TOTAL|TOTAL|BALANCE|PAYMENTS?|PREVIOUS|AMOUNT\s+DUE)\b", re.I)
-
-
-def _clean_bill(data: dict) -> None:
-    """Take tax, totals and balances out of a bill's charges (in place)."""
-    charges = []
-    for it in data.get("items") or []:
-        text = it.get("raw_text") or it.get("description") or ""
-        if _BILL_TAX_RE.search(text):
-            if data.get("tax") is None:
-                data["tax"] = it.get("total_price")
-        elif not _BILL_NOT_CHARGE_RE.search(text):
-            charges.append(it)
-    for it in charges:
-        if it.get("total_price") is None:
-            it["total_price"] = 0.0
-    data["items"] = charges
-    data["subtotal"] = round(sum(it["total_price"] for it in charges), 2)
-
-
 def _read(conn: sqlite3.Connection, rid: int, image: bytes) -> dict:
     """Read the photo, check it against earlier receipts, and read it a second
     time with that help if it still doesn't add up."""
@@ -399,9 +373,8 @@ def _read(conn: sqlite3.Connection, rid: int, image: bytes) -> dict:
     if not data.get("is_receipt"):
         return data
     if data.get("document_type") == "utility_bill":
-        # No store catalog or item count to check a bill against; a mismatch
-        # between its charges and total is flagged on the page instead
-        _clean_bill(data)
+        # Only the amount matters; there's nothing to check it against
+        data.update(items=[], subtotal=None, tax=None)
         return data
     catalog = _catalog(conn, rid, data.get("merchant"))
     changes = _reconcile(data, catalog)
@@ -446,8 +419,7 @@ def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
     rows = []
     for i, it in enumerate(data.get("items") or []):
         code = re.sub(r"\D", "", it.get("item_code") or "") or None
-        # A bill's charges aren't products, so they stay off the Item names page
-        key = None if bill else name_key(it.get("raw_text"), code)
+        key = name_key(it.get("raw_text"), code)
         price = round(float(it["total_price"]), 2)
         if price > 0 and _SAVINGS_RE.search(f'{it.get("raw_text") or ""} {it["description"]}'):
             price = -price
@@ -455,7 +427,7 @@ def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
         if qty is None or unit not in UNITS or qty <= 0:
             qty, unit = None, None
         rows.append((rid, i, names.get(key) or it["description"], qty, unit, price,
-                     UTILITY_CATEGORY if bill else it["category"] if it["category"] in CATEGORIES else "Other",
+                     it["category"] if it["category"] in CATEGORIES else "Other",
                      it.get("raw_text"), code, key))
     conn.execute("DELETE FROM receipt_items WHERE receipt_id=?", (rid,))
     conn.executemany(
@@ -463,25 +435,20 @@ def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
         "raw_text, item_code, name_key) VALUES (?,?,?,?,?,?,?,?,?,?)",
         rows,
     )
-    utility = usage = usage_unit = due = None
+    utility = usage = usage_unit = None
     if bill:
         utility = data.get("utility") if data.get("utility") in UTILITIES else "Other"
         usage = data.get("usage")
         usage_unit = (data.get("usage_unit") or "").strip() or None
         if usage is None or usage_unit is None:
             usage = usage_unit = None
-        due = data.get("due_date")
-        try:
-            datetime.date.fromisoformat(due or "")
-        except ValueError:
-            due = None
     conn.execute(
         "UPDATE receipts SET status='done', error=NULL, processed_at=?, merchant=?, purchase_date=?, "
-        "subtotal=?, tax=?, total=?, notes=?, raw_json=?, kind=?, utility=?, usage_amount=?, usage_unit=?, "
-        "due_date=? WHERE id=?",
+        "subtotal=?, tax=?, total=?, notes=?, raw_json=?, kind=?, utility=?, usage_amount=?, usage_unit=? "
+        "WHERE id=?",
         (_now(), data.get("merchant"), date, data.get("subtotal"), data.get("tax"),
          data.get("total"), data.get("notes"), json.dumps(data), "bill" if bill else "receipt",
-         utility, usage, usage_unit, due, rid),
+         utility, usage, usage_unit, rid),
     )
 
 

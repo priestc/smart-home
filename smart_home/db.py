@@ -332,7 +332,8 @@ def open_db(path: str) -> sqlite3.Connection:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS receipt_items_receipt ON receipt_items (receipt_id)")
     # kind is 'receipt' or 'bill'. A utility bill also records which utility
-    # it is, the usage printed on it (e.g. 1440 gal) and its due date.
+    # it is and the usage printed on it (e.g. 1440 gal); its amount is total.
+    # due_date is no longer used.
     for col in ("kind TEXT NOT NULL DEFAULT 'receipt'", "utility TEXT", "usage_amount REAL",
                 "usage_unit TEXT", "due_date TEXT"):
         try:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import datetime
 import sqlite3
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, redirect, request, Response
 from flask_compress import Compress
 from smart_home.db import open_db
 
@@ -11639,7 +11639,7 @@ def gas_page():
 # kind is 'receipt' or 'bill' (a utility bill, shown on /utilities).
 _RECEIPT_COLS = ("id, uploaded_at, status, error, processed_at, merchant, purchase_date, "
                  "subtotal, tax, total, notes, image_path = '' AS manual, "
-                 "kind, utility, usage_amount, usage_unit, due_date")
+                 "kind, utility, usage_amount, usage_unit")
 
 
 def _receipt_json(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
@@ -11656,7 +11656,8 @@ def _receipt_json(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     # How far items + tax are from the printed total; non-zero means a line
     # was probably misread and the receipt needs a look.
     r['mismatch'] = None
-    if r['status'] == 'done' and r['total'] is not None:
+    # A bill is just an amount: there are no items to add up
+    if r['status'] == 'done' and r['total'] is not None and r['kind'] != 'bill':
         diff = round(items_sum + (r['tax'] or 0) - r['total'], 2)
         r['mismatch'] = diff if abs(diff) >= 0.01 else None
     return r
@@ -11670,7 +11671,6 @@ def api_receipts_config():
         'categories': _receipts.CATEGORIES,
         'tax_category': _receipts.TAX_CATEGORY,
         'utilities': _receipts.UTILITIES,
-        'utility_category': _receipts.UTILITY_CATEGORY,
     })
 
 
@@ -11820,8 +11820,9 @@ def _receipt_item_fields(data: dict, partial: bool) -> tuple[dict, str | None]:
 @app.patch("/api/receipts/<int:rid>")
 def api_receipt_update(rid):
     """Correct the receipt header: merchant, purchase_date, subtotal, tax, total,
-    and kind ('receipt' or 'bill'). A bill also has utility, usage_amount +
-    usage_unit and due_date."""
+    and kind ('receipt' or 'bill'). A bill also has utility and usage_amount +
+    usage_unit. Items stay with the receipt when it's switched to a bill
+    (they're hidden), so switching back restores them."""
     from smart_home import receipts as _receipts
     data = request.get_json(silent=True) or {}
     fields = {}
@@ -11830,7 +11831,7 @@ def api_receipt_update(rid):
             return jsonify({'error': 'kind must be receipt or bill'}), 400
         fields['kind'] = data['kind']
         if data['kind'] == 'receipt':
-            fields.update(utility=None, usage_amount=None, usage_unit=None, due_date=None)
+            fields.update(utility=None, usage_amount=None, usage_unit=None)
         elif not data.get('utility'):
             fields['utility'] = 'Other'
     if data.get('utility') is not None:
@@ -11859,14 +11860,6 @@ def api_receipt_update(rid):
             except (TypeError, ValueError):
                 return jsonify({'error': 'purchase_date must be YYYY-MM-DD'}), 400
         fields['purchase_date'] = d or None
-    if 'due_date' in data:
-        d = data['due_date']
-        if d:
-            try:
-                datetime.date.fromisoformat(d)
-            except (TypeError, ValueError):
-                return jsonify({'error': 'due_date must be YYYY-MM-DD'}), 400
-        fields['due_date'] = d or None
     for k in ('subtotal', 'tax', 'total'):
         if k in data:
             v = data[k]
@@ -12178,19 +12171,16 @@ _RECEIPT_DETAIL_PAGE = """\\
 </head>
 <body>
   <h1 id="title">Receipt</h1>
-  <div class="nav"><a href="/receipts" id="back-link">&larr; Receipts</a><a href="/receipts/items">Item names</a></div>
+  <div class="nav"><a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Item names</a></div>
   <div id="banners"></div>
   <div class="layout">
     <div>
       <div class="card" id="header-card">
-        <h2 id="header-title">Receipt</h2>
+        <h2>Receipt</h2>
         <div class="header-grid">
-          <div><label for="kind">Type</label><select id="kind"><option value="receipt">Store receipt</option><option value="bill">Utility bill</option></select></div>
-          <div class="bill-only"><label for="utility">Utility</label><select id="utility"></select></div>
-          <div><label for="merchant" id="merchant-label">Store</label><input type="text" id="merchant"></div>
-          <div><label for="purchase_date" id="date-label">Date</label><input type="date" id="purchase_date"></div>
-          <div class="bill-only"><label for="due_date">Due date</label><input type="date" id="due_date"></div>
-          <div class="bill-only"><label for="usage_amount">Usage</label><div style="display:flex;gap:.3rem"><input type="text" id="usage_amount" inputmode="decimal"><input type="text" id="usage_unit" placeholder="unit" style="width:4.5rem;flex:none"></div></div>
+          <div><label for="kind" title="Change to Utility bill if this is a water, electricity, propane, internet... bill">Type</label><select id="kind"><option value="receipt">Store receipt</option><option value="bill">Utility bill</option></select></div>
+          <div><label for="merchant">Store</label><input type="text" id="merchant"></div>
+          <div><label for="purchase_date">Date</label><input type="date" id="purchase_date"></div>
           <div><label for="subtotal">Subtotal</label><input type="text" id="subtotal" inputmode="decimal"></div>
           <div><label for="tax">Tax</label><input type="text" id="tax" inputmode="decimal"></div>
           <div><label for="total">Total</label><input type="text" id="total" inputmode="decimal"></div>
@@ -12232,30 +12222,18 @@ _RECEIPT_DETAIL_PAGE = """\\
 <script>__COMMON_JS__
 const RID = __RID__;
 let receipt = null, categories = [], pollTimer = null;
-const HEADER_FIELDS = ['kind', 'utility', 'merchant', 'purchase_date', 'due_date', 'usage_amount', 'usage_unit', 'subtotal', 'tax', 'total'];
+const HEADER_FIELDS = ['kind', 'merchant', 'purchase_date', 'subtotal', 'tax', 'total'];
 
 function headerValue(k) {
   const v = receipt[k];
-  if (v == null) return k === 'utility' ? 'Other' : '';
+  if (v == null) return '';
   return ['subtotal', 'tax', 'total'].includes(k) ? v.toFixed(2) : String(v);
-}
-
-// Bill-only fields and wording follow the Type select, before it's saved too
-function showKind(kind) {
-  const bill = kind === 'bill';
-  document.querySelectorAll('.bill-only').forEach(el => { el.style.display = bill ? '' : 'none'; });
-  document.getElementById('header-title').textContent = bill ? 'Utility bill' : 'Receipt';
-  document.getElementById('merchant-label').textContent = bill ? 'Company' : 'Store';
-  document.getElementById('date-label').textContent = bill ? 'Billing date' : 'Date';
 }
 
 // Title, warnings and the items total: everything that changes when an item is edited
 function renderStatus() {
   const r = receipt;
   document.title = `${r.merchant || 'Receipt'} \\u2014 Smart Home`;
-  const back = document.getElementById('back-link');
-  back.href = r.kind === 'bill' ? '/utilities' : '/receipts';
-  back.innerHTML = r.kind === 'bill' ? '&larr; Utilities' : '&larr; Receipts';
   document.getElementById('title').textContent =
     r.status === 'processing' ? 'Reading receipt\\u2026' : (r.merchant || 'Receipt') + (r.purchase_date ? ' \\u00b7 ' + r.purchase_date : '');
 
@@ -12287,7 +12265,6 @@ function render() {
     el.value = headerValue(k);
     el.classList.remove('dirty');
   });
-  showKind(r.kind);
   document.getElementById('save-header').disabled = true;
   document.getElementById('notes').textContent = !r.notes ? '' : r.manual ? r.notes : 'Note from the reader: ' + r.notes;
 
@@ -12346,6 +12323,8 @@ async function load() {
   try {
     receipt = await fetchJSON(`/api/receipts/${RID}`);
     clearNetworkError();
+    // A photo that turned out to be a utility bill (e.g. just finished reading)
+    if (receipt.kind === 'bill') { location.replace(`/utilities/${RID}`); return; }
     render();
     if (receipt.status === 'processing') pollTimer = setTimeout(load, 3000);
   } catch (e) {
@@ -12354,7 +12333,6 @@ async function load() {
 }
 
 // Header: Save button enables once any field differs from what's stored
-document.getElementById('kind').addEventListener('change', e => showKind(e.target.value));
 document.getElementById('header-card').addEventListener('input', () => {
   let dirty = false;
   HEADER_FIELDS.forEach(k => {
@@ -12369,12 +12347,6 @@ document.getElementById('save-header').addEventListener('click', async () => {
   const status = document.getElementById('header-status');
   const val = id => document.getElementById(id).value;
   const body = {merchant: val('merchant'), purchase_date: val('purchase_date') || null, kind: val('kind')};
-  if (body.kind === 'bill') {
-    const usage = parseAmount(val('usage_amount'));
-    if (Number.isNaN(usage)) { status.className = 'err'; status.textContent = 'Usage isn\\u2019t a number.'; return; }
-    if (usage != null && !val('usage_unit').trim()) { status.className = 'err'; status.textContent = 'Give a unit for the usage, e.g. gal or kWh.'; return; }
-    Object.assign(body, {utility: val('utility'), due_date: val('due_date') || null, usage_amount: usage, usage_unit: val('usage_unit')});
-  }
   for (const k of ['subtotal', 'tax', 'total']) {
     const v = parseAmount(document.getElementById(k).value);
     if (Number.isNaN(v)) { status.className = 'err'; status.textContent = `${k[0].toUpperCase() + k.slice(1)} isn\\u2019t a valid amount.`; return; }
@@ -12383,6 +12355,8 @@ document.getElementById('save-header').addEventListener('click', async () => {
   status.className = 'muted'; status.textContent = 'Saving\\u2026';
   try {
     await sendJSON(`/api/receipts/${RID}`, 'PATCH', body);
+    // A utility bill has its own page
+    if (body.kind === 'bill') { location.href = `/utilities/${RID}`; return; }
     status.textContent = 'Saved';
     await load();
   } catch (e) {
@@ -12441,7 +12415,7 @@ itemsEl.addEventListener('click', async e => {
 });
 document.getElementById('add-item').addEventListener('click', () => {
   if (itemsEl.querySelector('td[colspan]')) itemsEl.innerHTML = '';
-  itemsEl.insertAdjacentHTML('beforeend', itemRow({id: null, description: '', quantity: null, total_price: 0, category: receipt.kind === 'bill' ? 'Utilities' : 'Other'}));
+  itemsEl.insertAdjacentHTML('beforeend', itemRow({id: null, description: '', quantity: null, total_price: 0, category: 'Other'}));
   itemsEl.lastElementChild.querySelector('input').focus();
 });
 
@@ -12468,10 +12442,7 @@ const img = document.getElementById('photo');
 img.onerror = () => { document.getElementById('photo-error').textContent = 'Could not load the photo.'; };
 
 fetchJSON('/api/receipts/config')
-  .then(c => {
-    categories = c.categories;
-    document.getElementById('utility').innerHTML = c.utilities.map(u => `<option>${esc(u)}</option>`).join('');
-  })
+  .then(c => { categories = c.categories; })
   .catch(e => showNetworkError(`Could not load categories: ${e.message}`))
   .finally(load);
 </script>
@@ -12704,6 +12675,10 @@ def receipts_page():
 
 @app.get("/receipts/<int:rid>")
 def receipt_detail_page(rid):
+    with _conn() as conn:
+        row = conn.execute("SELECT kind FROM receipts WHERE id=?", (rid,)).fetchone()
+    if row is not None and row['kind'] == 'bill':
+        return redirect(f"/utilities/{rid}")
     return Response(_RECEIPT_DETAIL_PAGE.replace("__RID__", str(rid)), mimetype="text/html")
 
 
@@ -13072,6 +13047,24 @@ fetchJSON('/api/receipts/known-items')
 </html>"""
 
 
+# Shared by the Utilities pages
+_UTILITY_JS = """
+const UTILITY_COLORS = {Electricity: '#e0a800', Water: '#2e7dd4', Propane: '#e07820', 'Natural Gas': '#9b59b6',
+                        Internet: '#2db37a', Phone: '#1abc9c', Trash: '#7f8c8d', Sewer: '#8e6e53', Other: '#34495e'};
+// Unit suggested when entering a bill by hand
+const USAGE_UNITS = {Electricity: 'kWh', Water: 'gal', Propane: 'gal', 'Natural Gas': 'therm'};
+function fmtUsage(b) {
+  return b.usage_amount == null ? '' : `${(+b.usage_amount.toFixed(2)).toLocaleString()} ${esc(b.usage_unit || '')}`;
+}
+// Amount per unit used; small ones (water by the gallon) are given per 1,000 units
+function unitCost(b) {
+  if (b.total == null || !b.usage_amount) return '';
+  const c = b.total / b.usage_amount, unit = esc(b.usage_unit || '');
+  return c < 0.1 ? `${money(c * 1000)} per 1,000 ${unit}` : `${money(c)} per ${unit}`;
+}
+"""
+
+
 _UTILITIES_PAGE = """\\
 <!DOCTYPE html>
 <html lang="en">
@@ -13090,7 +13083,6 @@ _UTILITIES_PAGE = """\\
     .swatch { display: inline-block; width: .7rem; height: .7rem; border-radius: 2px; margin-right: .5rem; vertical-align: middle; }
     tr.bill { cursor: pointer; }
     tr.bill:hover td { background: #f7fafc; }
-    .badge { font-size: .75rem; padding: .1rem .5rem; border-radius: 999px; white-space: nowrap; background: #fff4e5; color: #8a4b00; }
     .form { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; }
     .form label { display: block; font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-bottom: .25rem; }
     .form input, .form select { width: 100%; }
@@ -13120,8 +13112,8 @@ _UTILITIES_PAGE = """\\
       <div class="card">
         <h2>Bills</h2>
         <table>
-          <thead><tr><th>Date</th><th>Utility</th><th>Company</th><th class="num">Usage</th><th>Due</th><th class="num">Amount</th><th></th></tr></thead>
-          <tbody id="bills"><tr><td colspan="7" class="muted">Loading&hellip;</td></tr></tbody>
+          <thead><tr><th>Billing date</th><th>Utility</th><th>Company</th><th class="num">Usage</th><th class="num">Cost per unit</th><th class="num">Amount</th></tr></thead>
+          <tbody id="bills"><tr><td colspan="6" class="muted">Loading&hellip;</td></tr></tbody>
         </table>
         <div class="muted" style="margin-top:.8rem">Photograph a paper bill with the app&rsquo;s receipt camera; it&rsquo;s recognized as a bill and shows up here.</div>
       </div>
@@ -13137,9 +13129,7 @@ _UTILITIES_PAGE = """\\
           <div><label for="f-utility">Utility</label><select id="f-utility"></select></div>
           <div><label for="f-merchant">Company</label><input type="text" id="f-merchant" list="companies"><datalist id="companies"></datalist></div>
           <div><label for="f-date">Billing date</label><input type="date" id="f-date"></div>
-          <div><label for="f-due">Due date</label><input type="date" id="f-due"></div>
           <div><label for="f-total">Amount</label><input type="text" id="f-total" inputmode="decimal" placeholder="0.00"></div>
-          <div><label for="f-tax">Tax (if any)</label><input type="text" id="f-tax" inputmode="decimal"></div>
           <div class="wide"><label for="f-usage">Usage (optional)</label>
             <div class="usage"><input type="text" id="f-usage" inputmode="decimal" placeholder="e.g. 1440"><input type="text" id="f-unit" placeholder="unit"></div></div>
           <div class="wide actions"><button class="btn" id="f-save">Add bill</button> <span id="f-status" class="muted"></span></div>
@@ -13147,19 +13137,8 @@ _UTILITIES_PAGE = """\\
       </div>
     </div>
   </div>
-<script>__COMMON_JS__
-const UTILITY_COLORS = {Electricity: '#e0a800', Water: '#2e7dd4', Propane: '#e07820', 'Natural Gas': '#9b59b6',
-                        Internet: '#2db37a', Phone: '#1abc9c', Trash: '#7f8c8d', Sewer: '#8e6e53', Other: '#34495e'};
-// Unit suggested when entering a bill by hand
-const USAGE_UNITS = {Electricity: 'kWh', Water: 'gal', Propane: 'gal', 'Natural Gas': 'therm'};
+<script>__COMMON_JS____UTILITY_JS__
 let months = 12, chart = null, bills = [];
-
-function fmtUsage(b) {
-  return b.usage_amount == null ? '' : `${(+b.usage_amount.toFixed(2)).toLocaleString()} ${esc(b.usage_unit || '')}`;
-}
-function billAmount(b) {
-  return b.total ?? (b.subtotal ?? 0) + (b.tax ?? 0);
-}
 
 function renderSummary(s) {
   document.getElementById('grand').textContent = money(s.grand_total);
@@ -13170,7 +13149,7 @@ function renderSummary(s) {
     const latest = bills.find(b => b.status === 'done' && (b.utility || 'Other') === t.utility);
     return `<tr>
       <td><span class="swatch" style="background:${UTILITY_COLORS[t.utility] || '#34495e'}"></span>${esc(t.utility)}
-        ${latest ? `<div class="muted">Last: ${money(billAmount(latest))}${latest.usage_amount != null ? ' for ' + fmtUsage(latest) : ''}</div>` : ''}</td>
+        ${latest ? `<div class="muted">Last: ${money(latest.total)}${latest.usage_amount != null ? ' for ' + fmtUsage(latest) : ''}</div>` : ''}</td>
       <td class="num muted">${t.n_bills} bill${t.n_bills === 1 ? '' : 's'}</td>
       <td class="num">${money(t.amount)}</td></tr>`;
   }).join('') : '<tr><td class="muted">No bills in this period.</td></tr>';
@@ -13199,7 +13178,7 @@ function renderSummary(s) {
 function renderBills() {
   const tbody = document.getElementById('bills');
   if (!bills.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="muted">No bills yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">No bills yet.</td></tr>';
     return;
   }
   tbody.innerHTML = bills.map(b => `<tr class="bill" data-id="${b.id}">
@@ -13207,9 +13186,8 @@ function renderBills() {
       <td><span class="swatch" style="background:${UTILITY_COLORS[b.utility] || '#34495e'}"></span>${esc(b.utility || 'Other')}</td>
       <td>${esc(b.merchant || '')}</td>
       <td class="num">${fmtUsage(b)}</td>
-      <td>${esc(b.due_date || '')}</td>
-      <td class="num">${money(billAmount(b))}</td>
-      <td>${b.mismatch != null ? `<span class="badge" title="Charges + tax are off from the total by ${money(b.mismatch)}">Doesn\\u2019t add up</span>` : ''}</td></tr>`).join('');
+      <td class="num muted">${unitCost(b)}</td>
+      <td class="num">${money(b.total)}</td></tr>`).join('');
   // Companies already billed for the chosen utility, for the hand-entry form
   updateCompanies();
 }
@@ -13244,7 +13222,7 @@ document.getElementById('periods').addEventListener('click', e => {
 });
 document.getElementById('bills').addEventListener('click', e => {
   const tr = e.target.closest('tr.bill');
-  if (tr) location.href = `/receipts/${tr.dataset.id}`;
+  if (tr) location.href = `/utilities/${tr.dataset.id}`;
 });
 
 const utilitySel = document.getElementById('f-utility');
@@ -13261,13 +13239,12 @@ document.getElementById('f-save').addEventListener('click', async () => {
   if (!val('f-date')) { status.className = 'err'; status.textContent = 'Enter the billing date.'; return; }
   if (isNaN(total)) { status.className = 'err'; status.textContent = 'Enter the amount.'; return; }
   const body = {utility: utilitySel.value, merchant: val('f-merchant'), purchase_date: val('f-date'),
-                due_date: val('f-due') || null, total, tax: val('f-tax').replace(/[$,]/g, '') || null,
-                usage_amount: val('f-usage').replace(/,/g, '') || null, usage_unit: val('f-unit') || null};
+                total, usage_amount: val('f-usage').replace(/,/g, '') || null, usage_unit: val('f-unit') || null};
   status.className = 'muted'; status.textContent = 'Saving\\u2026';
   try {
     await sendJSON('/api/utilities/bills', 'POST', body);
     status.textContent = 'Added';
-    ['f-merchant', 'f-due', 'f-total', 'f-tax', 'f-usage'].forEach(id => { document.getElementById(id).value = ''; });
+    ['f-merchant', 'f-total', 'f-usage'].forEach(id => { document.getElementById(id).value = ''; });
     await load();
   } catch (e) {
     status.className = 'err'; status.textContent = 'Could not add bill: ' + e.message;
@@ -13283,7 +13260,236 @@ fetchJSON('/api/receipts/config')
   .finally(load);
 </script>
 </body>
-</html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS)
+</html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS) \
+    .replace("__UTILITY_JS__", _UTILITY_JS)
+
+
+_UTILITY_BILL_PAGE = """\\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Utility bill &mdash; Smart Home</title>
+  <style>__COMMON_CSS__
+    .layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(16rem, 2fr); gap: 1.2rem; align-items: start; }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+    .bill { border-top: 6px solid var(--accent, #34495e); }
+    .eyebrow { font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--accent, #34495e); }
+    .company { font-size: 1.25rem; font-weight: 600; margin: .15rem 0 1rem; }
+    .figures { display: flex; flex-wrap: wrap; gap: 1.2rem 2.4rem; margin-bottom: .4rem; }
+    .figure .v { font-size: 1.9rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+    .figure .l { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+    .figure .s { font-size: .82rem; color: #7a90a8; margin-top: .15rem; }
+    .compare { font-size: .85rem; color: #4a6080; margin-top: .6rem; }
+    .up { color: #b00; } .down { color: #1d7a50; }
+    .form { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: .8rem; margin-bottom: 1rem; }
+    .form label { display: block; font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-bottom: .25rem; }
+    .form input, .form select { width: 100%; }
+    .usage { display: flex; gap: .3rem; }
+    .usage input:last-child { width: 4.5rem; flex: none; }
+    .actions { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+    .photo { position: sticky; top: 1rem; }
+    .photo img { width: 100%; border-radius: 8px; display: block; cursor: zoom-in; }
+  </style>
+</head>
+<body>
+  <h1 id="title">Utility bill</h1>
+  <div class="nav"><a href="/utilities">&larr; Utilities</a></div>
+  <div id="banners"></div>
+  <div class="layout">
+    <div>
+      <div class="card bill" id="bill-card">
+        <div class="eyebrow" id="eyebrow"></div>
+        <div class="company" id="company"></div>
+        <div class="figures" id="figures"></div>
+        <div class="compare" id="compare"></div>
+      </div>
+      <div class="card" id="edit-card">
+        <h2>Correct the bill</h2>
+        <div class="form">
+          <div><label for="utility">Utility</label><select id="utility"></select></div>
+          <div><label for="merchant">Company</label><input type="text" id="merchant"></div>
+          <div><label for="purchase_date">Billing date</label><input type="date" id="purchase_date"></div>
+          <div><label for="usage_amount">Usage</label><div class="usage"><input type="text" id="usage_amount" inputmode="decimal" placeholder="e.g. 1440"><input type="text" id="usage_unit" placeholder="unit"></div></div>
+          <div><label for="total">Amount</label><input type="text" id="total" inputmode="decimal" placeholder="0.00"></div>
+        </div>
+        <div class="actions">
+          <button class="btn" id="save" disabled>Save</button>
+          <span id="save-status" class="muted"></span>
+        </div>
+        <div class="muted" id="notes" style="margin-top:.8rem"></div>
+      </div>
+      <div class="card">
+        <div class="actions" id="retry-row">
+          <button class="btn secondary" id="retry">Read again</button>
+          <span class="muted">Re-reads the photo and replaces your corrections.</span>
+        </div>
+        <div class="actions" style="margin-top:.8rem">
+          <button class="btn secondary" id="to-receipt">This is a store receipt</button>
+          <button class="btn danger" id="delete">Delete bill</button>
+        </div>
+      </div>
+    </div>
+    <div class="card photo" id="photo-card">
+      <h2>Photo</h2>
+      <a id="photo-link" target="_blank"><img id="photo" alt="Bill photo"></a>
+      <div class="muted err" id="photo-error"></div>
+    </div>
+  </div>
+<script>__COMMON_JS____UTILITY_JS__
+const RID = __RID__;
+const FIELDS = ['utility', 'merchant', 'purchase_date', 'usage_amount', 'usage_unit', 'total'];
+let bill = null, pollTimer = null;
+
+function fieldValue(k) {
+  const v = bill[k];
+  if (v == null) return k === 'utility' ? 'Other' : '';
+  return k === 'total' ? v.toFixed(2) : String(v);
+}
+function parseAmount(s) {
+  const t = String(s).replace(/[$,\\s]/g, '');
+  return t === '' ? null : (isNaN(+t) ? NaN : +t);
+}
+
+// The same utility's bill before this one, to compare against
+async function renderCompare() {
+  const el = document.getElementById('compare');
+  try {
+    const {receipts} = await fetchJSON('/api/receipts?kind=bill&limit=1000');
+    const day = b => b.purchase_date || b.uploaded_at.slice(0, 10);
+    const prev = receipts.filter(b => b.id !== bill.id && b.status === 'done' && b.utility === bill.utility
+                                      && day(b) < day(bill)).sort((a, b) => day(b).localeCompare(day(a)))[0];
+    if (!prev || prev.total == null || bill.total == null) { el.textContent = ''; return; }
+    const diff = bill.total - prev.total;
+    let text = `Previous ${esc(bill.utility.toLowerCase())} bill (${esc(day(prev))}): ${money(prev.total)}`;
+    if (prev.usage_amount != null) text += ` for ${fmtUsage(prev)}`;
+    text += Math.abs(diff) < 0.005 ? ' \\u00b7 same amount'
+      : ` \\u00b7 <span class="${diff > 0 ? 'up' : 'down'}">${diff > 0 ? '+' : '\\u2212'}${money(Math.abs(diff))}</span>`;
+    el.innerHTML = text;
+  } catch (e) {
+    el.innerHTML = `<span class="err">Couldn\\u2019t load earlier bills: ${esc(e.message)}</span>`;
+  }
+}
+
+function render() {
+  const b = bill;
+  const color = UTILITY_COLORS[b.utility] || UTILITY_COLORS.Other;
+  document.getElementById('bill-card').style.setProperty('--accent', color);
+  document.title = `${b.utility || 'Utility'} bill \\u2014 Smart Home`;
+  const reading = b.status === 'processing';
+  document.getElementById('title').textContent = reading ? 'Reading bill\\u2026' : `${b.utility || 'Utility'} bill`;
+  let banners = '';
+  if (reading) banners += '<div class="warn">The photo is being read. This page will update when it\\u2019s done.</div>';
+  if (b.status === 'error') banners += `<div class="warn err">Couldn\\u2019t read this bill: ${esc(b.error)}</div>`;
+  document.getElementById('banners').innerHTML = banners;
+  document.getElementById('bill-card').style.display = document.getElementById('edit-card').style.display =
+    b.status === 'done' ? '' : 'none';
+  document.getElementById('retry').disabled = reading;
+  document.getElementById('photo-card').style.display = b.manual ? 'none' : '';
+  document.querySelector('.layout').style.gridTemplateColumns = b.manual ? '1fr' : '';
+  document.getElementById('retry-row').style.display = b.manual ? 'none' : '';
+  const img = document.getElementById('photo');
+  if (!b.manual && !img.getAttribute('src')) img.src = document.getElementById('photo-link').href = `/api/receipts/${RID}/image`;
+  if (b.status !== 'done') return;
+
+  document.getElementById('eyebrow').textContent = `${b.utility || 'Other'} bill`;
+  document.getElementById('company').textContent = b.merchant || 'Unknown company';
+  const figures = [`<div class="figure"><div class="v">${money(b.total)}</div><div class="l">Amount</div></div>`];
+  if (b.usage_amount != null) figures.push(`<div class="figure"><div class="v">${fmtUsage(b)}</div><div class="l">Used</div>
+      ${unitCost(b) ? `<div class="s">${unitCost(b)}</div>` : ''}</div>`);
+  figures.push(`<div class="figure"><div class="v">${esc(b.purchase_date || '\\u2014')}</div><div class="l">Billing date</div></div>`);
+  document.getElementById('figures').innerHTML = figures.join('');
+  FIELDS.forEach(k => { const el = document.getElementById(k); el.value = fieldValue(k); el.classList.remove('dirty'); });
+  document.getElementById('save').disabled = true;
+  document.getElementById('notes').textContent = !b.notes ? '' : b.manual ? b.notes : 'Note from the reader: ' + b.notes;
+  renderCompare();
+}
+
+async function load() {
+  clearTimeout(pollTimer);
+  try {
+    bill = await fetchJSON(`/api/receipts/${RID}`);
+    clearNetworkError();
+    // Read again and it turned out to be a store receipt
+    if (bill.kind !== 'bill') { location.replace(`/receipts/${RID}`); return; }
+    render();
+    if (bill.status === 'processing') pollTimer = setTimeout(load, 3000);
+  } catch (e) {
+    showNetworkError(`Could not load bill: ${e.message}`);
+  }
+}
+
+document.getElementById('edit-card').addEventListener('input', () => {
+  let dirty = false;
+  FIELDS.forEach(k => {
+    const el = document.getElementById(k);
+    const d = el.value.trim() !== fieldValue(k);
+    el.classList.toggle('dirty', d);
+    dirty = dirty || d;
+  });
+  document.getElementById('save').disabled = !dirty;
+});
+document.getElementById('save').addEventListener('click', async () => {
+  const status = document.getElementById('save-status');
+  const val = id => document.getElementById(id).value.trim();
+  const fail = msg => { status.className = 'err'; status.textContent = msg; };
+  const usage = parseAmount(val('usage_amount')), total = parseAmount(val('total'));
+  if (Number.isNaN(usage)) return fail('Usage isn\\u2019t a number.');
+  if (usage != null && !val('usage_unit')) return fail('Give a unit for the usage, e.g. gal or kWh.');
+  if (Number.isNaN(total)) return fail('The amount isn\\u2019t a valid number.');
+  status.className = 'muted'; status.textContent = 'Saving\\u2026';
+  try {
+    await sendJSON(`/api/receipts/${RID}`, 'PATCH', {
+      utility: val('utility'), merchant: val('merchant'), purchase_date: val('purchase_date') || null,
+      usage_amount: usage, usage_unit: val('usage_unit'), total});
+    status.textContent = 'Saved';
+    await load();
+  } catch (e) {
+    fail('Save failed: ' + e.message);
+  }
+});
+document.getElementById('retry').addEventListener('click', async () => {
+  if (!confirm('Read the photo again? This replaces your corrections.')) return;
+  try {
+    await fetchJSON(`/api/receipts/${RID}/retry`, {method: 'POST'});
+    await load();
+  } catch (e) {
+    showNetworkError(`Could not start reading: ${e.message}`);
+  }
+});
+document.getElementById('to-receipt').addEventListener('click', async () => {
+  if (!confirm('Move this to Receipts as a store receipt?')) return;
+  try {
+    await sendJSON(`/api/receipts/${RID}`, 'PATCH', {kind: 'receipt'});
+    location.href = `/receipts/${RID}`;
+  } catch (e) {
+    showNetworkError(`Could not move it: ${e.message}`);
+  }
+});
+document.getElementById('delete').addEventListener('click', async () => {
+  if (!confirm('Delete this bill' + (bill && !bill.manual ? ' and its photo?' : '?'))) return;
+  try {
+    await fetchJSON(`/api/receipts/${RID}`, {method: 'DELETE'});
+    location.href = '/utilities';
+  } catch (e) {
+    showNetworkError(`Could not delete bill: ${e.message}`);
+  }
+});
+document.getElementById('photo').onerror = () => {
+  document.getElementById('photo-error').textContent = 'Could not load the photo.';
+};
+
+fetchJSON('/api/receipts/config')
+  .then(c => { document.getElementById('utility').innerHTML = c.utilities.map(u => `<option>${esc(u)}</option>`).join(''); })
+  .catch(e => showNetworkError(`Could not load utility types: ${e.message}`))
+  .finally(load);
+</script>
+</body>
+</html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS) \
+    .replace("__UTILITY_JS__", _UTILITY_JS)
+
+
 
 
 @app.get("/receipts/items")
@@ -13378,8 +13584,8 @@ def api_utilities_summary():
 @app.post("/api/utilities/bills")
 def api_utility_bill_add():
     """Enter a utility bill by hand (e.g. internet paid by autopay with no paper
-    bill). Body: utility, merchant, purchase_date, total, and optionally tax,
-    usage_amount + usage_unit, due_date."""
+    bill). Body: utility, merchant, purchase_date, total, and optionally
+    usage_amount + usage_unit."""
     from smart_home import receipts as _receipts
     data = request.get_json(silent=True) or {}
     utility = data.get('utility')
@@ -13388,22 +13594,15 @@ def api_utility_bill_add():
     merchant = (data.get('merchant') or '').strip()
     if not merchant:
         return jsonify({'error': 'Enter the company the bill is from'}), 400
-    dates = {}
-    for k in ('purchase_date', 'due_date'):
-        d = data.get(k)
-        if not d and k == 'due_date':
-            dates[k] = None
-            continue
-        try:
-            datetime.date.fromisoformat(d or '')
-        except (TypeError, ValueError):
-            return jsonify({'error': f'{k} must be YYYY-MM-DD'}), 400
-        dates[k] = d
+    date = data.get('purchase_date')
+    try:
+        datetime.date.fromisoformat(date or '')
+    except (TypeError, ValueError):
+        return jsonify({'error': 'purchase_date must be YYYY-MM-DD'}), 400
     try:
         total = round(float(data.get('total')), 2)
-        tax = None if data.get('tax') in (None, '') else round(float(data['tax']), 2)
     except (TypeError, ValueError):
-        return jsonify({'error': 'total and tax must be numbers'}), 400
+        return jsonify({'error': 'total must be a number'}), 400
     usage, unit = data.get('usage_amount'), (data.get('usage_unit') or '').strip()
     if usage in (None, ''):
         usage, unit = None, None
@@ -13414,21 +13613,24 @@ def api_utility_bill_add():
             return jsonify({'error': 'usage_amount must be a number'}), 400
         if not unit:
             return jsonify({'error': 'Give a unit for the usage, e.g. gal or kWh'}), 400
-    charges = round(total - (tax or 0), 2)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with _conn() as conn:
         cur = conn.execute(
             "INSERT INTO receipts (uploaded_at, status, processed_at, image_path, media_type, merchant, "
-            "purchase_date, subtotal, tax, total, notes, kind, utility, usage_amount, usage_unit, due_date) "
-            "VALUES (?, 'done', ?, '', '', ?, ?, ?, ?, ?, 'Entered by hand', 'bill', ?, ?, ?, ?)",
-            (now, now, merchant, dates['purchase_date'], charges, tax, total, utility, usage, unit,
-             dates['due_date']),
-        )
-        conn.execute(
-            "INSERT INTO receipt_items (receipt_id, position, description, total_price, category) VALUES (?,0,?,?,?)",
-            (cur.lastrowid, f'{utility} service', charges, _receipts.UTILITY_CATEGORY),
+            "purchase_date, total, notes, kind, utility, usage_amount, usage_unit) "
+            "VALUES (?, 'done', ?, '', '', ?, ?, ?, 'Entered by hand', 'bill', ?, ?, ?)",
+            (now, now, merchant, date, total, utility, usage, unit),
         )
     return jsonify({'ok': True, 'id': cur.lastrowid}), 201
+
+
+@app.get("/utilities/<int:rid>")
+def utility_bill_page(rid):
+    with _conn() as conn:
+        row = conn.execute("SELECT kind FROM receipts WHERE id=?", (rid,)).fetchone()
+    if row is not None and row['kind'] != 'bill':
+        return redirect(f"/receipts/{rid}")
+    return Response(_UTILITY_BILL_PAGE.replace("__RID__", str(rid)), mimetype="text/html")
 
 
 @app.get("/api/gpu/runs")
