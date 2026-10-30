@@ -39,8 +39,11 @@ import threading
 
 from smart_home import gpu_monitor
 
-OLLAMA_URL = "http://127.0.0.1:11434"
-MODEL = "qwen3-vl:8b-instruct"
+# Photos are read through AI Delegator (github.com/priestc/AI-delegator) on
+# this machine. Its "receipt-reader" task picks the model (a local Ollama
+# vision model, qwen3-vl:8b-instruct) and logs each call with GPU readings.
+AI_DELEGATOR_URL = "http://127.0.0.1:5055"
+AI_TASK = "receipt-reader"
 # Longest side of the copy sent to the model. Image tokens grow with pixel
 # count and dominate processing time; receipt text stays legible at this size.
 MODEL_MAX_DIMENSION = 1600
@@ -207,38 +210,31 @@ def _extract(image: bytes, extra: str = "") -> dict:
     image = _shrink_for_model(image)
     try:
         resp = httpx.post(
-            f"{OLLAMA_URL}/api/chat",
+            f"{AI_DELEGATOR_URL}/api/ask",
             json={
-                "model": MODEL,
-                "messages": [{
-                    "role": "user",
-                    "content": _PROMPT + extra,
-                    "images": [base64.standard_b64encode(image).decode("ascii")],
-                }],
-                "format": _SCHEMA,
-                "stream": False,
-                "think": False,
-                "keep_alive": "2m",
-                "options": {"temperature": 0, "num_ctx": 8192},
+                "task": AI_TASK,
+                "project": "smart-home",
+                "prompt": _PROMPT + extra,
+                "images": [base64.standard_b64encode(image).decode("ascii")],
+                "json_schema": _SCHEMA,
             },
-            timeout=600.0,
+            timeout=900.0,
         )
     except httpx.HTTPError as e:
-        raise ReceiptError(f"Could not reach Ollama at {OLLAMA_URL}: {e}")
+        raise ReceiptError(f"Could not reach the AI delegator at {AI_DELEGATOR_URL}: {e}")
+    try:
+        body = resp.json()
+    except ValueError:
+        raise ReceiptError(f"AI delegator returned HTTP {resp.status_code}: {resp.text[:300]}")
     if resp.status_code != 200:
-        try:
-            msg = resp.json().get("error") or resp.text
-        except ValueError:
-            msg = resp.text
-        raise ReceiptError(f"Ollama error {resp.status_code}: {msg[:300]}")
-    body = resp.json()
-    if body.get("done_reason") == "length":
-        raise ReceiptError("Receipt too long: the model's response was cut off")
-    text = (body.get("message") or {}).get("content") or ""
+        notes = "; ".join(body.get("notes") or [])
+        raise ReceiptError((body.get("error") or f"AI delegator returned HTTP {resp.status_code}")
+                           + (f" ({notes})" if notes else ""))
+    text = body.get("text") or ""
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        raise ReceiptError(f"Unparseable response from {MODEL}: {text[:200]}")
+        raise ReceiptError(f"Unparseable response from {body.get('model')}: {text[:200]}")
 
 
 def name_key(raw_text: str | None, item_code: str | None) -> str | None:
