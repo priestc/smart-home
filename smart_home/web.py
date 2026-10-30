@@ -5295,6 +5295,7 @@ def index():
     <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/receipts"          class="chart-link"><span class="cl-title">Receipts &amp; Spending</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/utilities"         class="chart-link"><span class="cl-title">Utilities</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/gpu"               class="chart-link"><span class="cl-title">GPU Temperatures</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/water-chemistry"   class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Water Chemistry</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/rssi"              class="chart-link"><span class="cl-title">Bluetooth Signal</span><span class="cl-arrow">&#8594;</span></a>
   </div>
@@ -13428,6 +13429,280 @@ def api_utility_bill_add():
             (cur.lastrowid, f'{utility} service', charges, _receipts.UTILITY_CATEGORY),
         )
     return jsonify({'ok': True, 'id': cur.lastrowid}), 201
+
+
+@app.get("/api/gpu/runs")
+def api_gpu_runs():
+    """Every recorded scan with its temperature and power summary. status is
+    'done', 'error', 'running', or 'interrupted' (never finished and no new
+    sample for a minute: the machine crashed or the service restarted)."""
+    with _conn() as conn:
+        rows = conn.execute("""
+            SELECT g.id, g.receipt_id, g.kind, g.started_at, g.ended_at, g.outcome, g.error, g.note,
+                   r.merchant, COUNT(s.t) AS n_samples, MAX(s.t) AS duration,
+                   (SELECT s2.junction FROM gpu_samples s2 WHERE s2.run_id = g.id AND s2.junction IS NOT NULL
+                    ORDER BY s2.t LIMIT 1) AS start_junction,
+                   MAX(s.junction) AS peak_junction, AVG(s.junction) AS avg_junction,
+                   MAX(s.edge) AS peak_edge, MAX(s.mem) AS peak_mem,
+                   MAX(s.power) AS peak_power, AVG(s.power) AS avg_power,
+                   MAX(s.cpu) AS peak_cpu, MAX(s.fan_rpm) AS peak_fan, MAX(s.sclk) AS peak_sclk
+            FROM gpu_runs g
+            LEFT JOIN gpu_samples s ON s.run_id = g.id
+            LEFT JOIN receipts r ON r.id = g.receipt_id
+            GROUP BY g.id ORDER BY g.id DESC
+        """).fetchall()
+    now = datetime.datetime.now()
+    out = []
+    for row in rows:
+        r = dict(row)
+        for k in ('avg_junction', 'avg_power'):
+            if r[k] is not None:
+                r[k] = round(r[k], 1)
+        if r['ended_at']:
+            r['status'] = r['outcome'] or 'done'
+        else:
+            started = datetime.datetime.strptime(r['started_at'], "%Y-%m-%d %H:%M:%S")
+            last = started + datetime.timedelta(seconds=r['duration'] or 0)
+            r['status'] = 'running' if (now - last).total_seconds() < 60 else 'interrupted'
+        out.append(r)
+    from smart_home import gpu_monitor as _gpu
+    return jsonify({'runs': out, 'test_running': _gpu.test_running()})
+
+
+@app.get("/api/gpu/runs/<int:run_id>/samples")
+def api_gpu_run_samples(run_id):
+    with _conn() as conn:
+        if conn.execute("SELECT 1 FROM gpu_runs WHERE id=?", (run_id,)).fetchone() is None:
+            return jsonify({'error': 'Run not found'}), 404
+        rows = conn.execute(
+            "SELECT t, edge, junction, mem, power, sclk, fan_rpm, cpu FROM gpu_samples WHERE run_id=? ORDER BY t",
+            (run_id,),
+        ).fetchall()
+    return jsonify({'samples': [dict(r) for r in rows]})
+
+
+@app.patch("/api/gpu/runs/<int:run_id>")
+def api_gpu_run_update(run_id):
+    """Set a run's note, e.g. "after repaste"."""
+    data = request.get_json(silent=True) or {}
+    if 'note' not in data:
+        return jsonify({'error': 'Nothing to update'}), 400
+    with _conn() as conn:
+        cur = conn.execute("UPDATE gpu_runs SET note=? WHERE id=?", ((data['note'] or '').strip() or None, run_id))
+        if cur.rowcount == 0:
+            return jsonify({'error': 'Run not found'}), 404
+    return jsonify({'ok': True})
+
+
+@app.delete("/api/gpu/runs/<int:run_id>")
+def api_gpu_run_delete(run_id):
+    with _conn() as conn:
+        conn.execute("DELETE FROM gpu_samples WHERE run_id=?", (run_id,))
+        cur = conn.execute("DELETE FROM gpu_runs WHERE id=?", (run_id,))
+        if cur.rowcount == 0:
+            return jsonify({'error': 'Run not found'}), 404
+    return jsonify({'ok': True})
+
+
+@app.post("/api/gpu/test")
+def api_gpu_test():
+    """Re-read a receipt's photo while recording temperatures; the receipt
+    isn't changed. Body: receipt_id."""
+    from smart_home import gpu_monitor as _gpu, receipts as _receipts
+    try:
+        rid = int((request.get_json(silent=True) or {}).get('receipt_id'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'receipt_id is required'}), 400
+    try:
+        _gpu.run_test(_db_path, rid)
+    except _receipts.ReceiptError as e:
+        return jsonify({'error': str(e)}), 409
+    except OSError as e:
+        return jsonify({'error': f'Could not open the photo: {e}'}), 500
+    return jsonify({'ok': True}), 202
+
+
+@app.get("/gpu")
+def gpu_page():
+    return Response(_GPU_PAGE, mimetype="text/html")
+
+
+_GPU_PAGE = """\\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GPU Temperatures &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>__COMMON_CSS__
+    tr.run { cursor: pointer; }
+    tr.run:hover td, tr.run.selected td { background: #f7fafc; }
+    .badge { font-size: .75rem; padding: .1rem .5rem; border-radius: 999px; white-space: nowrap; }
+    .badge.running { background: #e8f1fb; color: #2e7dd4; }
+    .badge.error, .badge.interrupted { background: #fdeaea; color: #b00; }
+    .badge.test { background: #eef7f1; color: #1d7a50; }
+    .hot { color: #b00; font-weight: 600; }
+    .f { color: #7a90a8; font-size: .78rem; }
+    td input.note { width: 100%; min-width: 9rem; }
+    .scroll { overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>GPU temperatures</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a><a href="/receipts">Receipts</a></div>
+  <div class="card">
+    <h2>Test scan</h2>
+    <div class="actions">
+      <select id="test-receipt"></select>
+      <button class="btn" id="test-run">Run test scan</button>
+      <span id="test-status" class="muted"></span>
+    </div>
+    <div class="muted" style="margin-top:.6rem">Reads the chosen receipt&rsquo;s photo again while recording, without changing the receipt. Use the same receipt each time so runs compare fairly. Every real scan is recorded too. The GPU&rsquo;s junction limit is 110&deg;C (230&deg;F); it throttles near it.</div>
+  </div>
+  <div class="card">
+    <h2>Runs</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Started</th><th>Receipt</th><th class="num">Time</th><th class="num" title="Junction (hotspot) temperature at the first reading">Junction start</th><th class="num">Junction peak</th><th class="num">Junction avg</th><th class="num">Edge peak</th><th class="num">Memory peak</th><th class="num">Power peak / avg</th><th class="num">Fan peak</th><th class="num">CPU peak</th><th>Note</th><th></th></tr></thead>
+      <tbody id="runs"><tr><td colspan="13" class="muted">Loading&hellip;</td></tr></tbody>
+    </table></div>
+  </div>
+  <div class="card" id="chart-card" style="display:none">
+    <h2 id="chart-title">Run</h2>
+    <canvas id="chart" height="90"></canvas>
+  </div>
+<script>__COMMON_JS__
+let runs = [], selected = null, chart = null, pollTimer = null;
+
+function temp(c, hotAt) {
+  if (c == null) return '\\u2014';
+  return `<span class="${hotAt != null && c >= hotAt ? 'hot' : ''}">${c.toFixed(0)}\\u00b0C</span> <span class="f">${(c * 9 / 5 + 32).toFixed(0)}\\u00b0F</span>`;
+}
+function num(v, unit) { return v == null ? '\\u2014' : `${Math.round(v)}${unit}`; }
+
+function renderRuns() {
+  const tbody = document.getElementById('runs');
+  if (!runs.length) { tbody.innerHTML = '<tr><td colspan="13" class="muted">Nothing recorded yet. Run a test scan or photograph a receipt.</td></tr>'; return; }
+  tbody.innerHTML = runs.map(r => {
+    const badges = (r.kind === 'test' ? '<span class="badge test">test</span> ' : '') +
+      (r.status !== 'done' ? `<span class="badge ${r.status}" title="${esc(r.error || '')}">${r.status === 'interrupted' ? 'never finished' : r.status}</span>` : '');
+    return `<tr class="run${r.id === selected ? ' selected' : ''}" data-id="${r.id}">
+      <td>${esc(r.started_at)}</td>
+      <td>${r.receipt_id ? `<a href="/receipts/${r.receipt_id}">#${r.receipt_id}</a> ${esc(r.merchant || '')}` : ''} ${badges}
+        ${r.error ? `<div class="muted err">${esc(r.error)}</div>` : ''}</td>
+      <td class="num">${r.duration != null ? Math.round(r.duration) + 's' : ''}</td>
+      <td class="num">${temp(r.start_junction)}</td>
+      <td class="num">${temp(r.peak_junction, 100)}</td>
+      <td class="num">${temp(r.avg_junction, 100)}</td>
+      <td class="num">${temp(r.peak_edge, 90)}</td>
+      <td class="num">${temp(r.peak_mem, 95)}</td>
+      <td class="num">${num(r.peak_power, ' W')} / ${num(r.avg_power, ' W')}</td>
+      <td class="num">${num(r.peak_fan, ' rpm')}</td>
+      <td class="num">${temp(r.peak_cpu, 90)}</td>
+      <td><input type="text" class="note" data-id="${r.id}" value="${esc(r.note || '')}" placeholder="e.g. before repaste"></td>
+      <td><button class="icon-btn" title="Delete run" data-delete="${r.id}">&times;</button></td></tr>`;
+  }).join('');
+}
+
+async function showRun(id) {
+  selected = id;
+  renderRuns();
+  const r = runs.find(x => x.id === id);
+  try {
+    const {samples} = await fetchJSON(`/api/gpu/runs/${id}/samples`);
+    clearNetworkError();
+    document.getElementById('chart-card').style.display = '';
+    document.getElementById('chart-title').textContent = `Run ${r.started_at}${r.note ? ' \\u00b7 ' + r.note : ''}`;
+    const line = (label, key, color, axis) => ({label, data: samples.map(s => s[key]), borderColor: color,
+      backgroundColor: color, yAxisID: axis, pointRadius: 0, borderWidth: 2, spanGaps: true});
+    if (chart) chart.destroy();
+    chart = new Chart(document.getElementById('chart'), {
+      type: 'line',
+      data: {labels: samples.map(s => Math.round(s.t) + 's'), datasets: [
+        line('Junction \\u00b0C', 'junction', '#e74c3c', 'temp'), line('Edge \\u00b0C', 'edge', '#e07820', 'temp'),
+        line('Memory \\u00b0C', 'mem', '#9b59b6', 'temp'), line('CPU \\u00b0C', 'cpu', '#2db37a', 'temp'),
+        line('Power W', 'power', '#2e7dd4', 'power')]},
+      options: {animation: false, interaction: {mode: 'index', intersect: false},
+        plugins: {legend: {position: 'bottom', labels: {boxWidth: 12, font: {size: 11}}}},
+        scales: {temp: {position: 'left', title: {display: true, text: '\\u00b0C'}, suggestedMin: 30, suggestedMax: 110},
+                 power: {position: 'right', title: {display: true, text: 'W'}, grid: {display: false}, suggestedMin: 0}}},
+    });
+  } catch (e) {
+    showNetworkError(`Could not load run: ${e.message}`);
+  }
+}
+
+async function load() {
+  clearTimeout(pollTimer);
+  try {
+    const data = await fetchJSON('/api/gpu/runs');
+    clearNetworkError();
+    runs = data.runs;
+    renderRuns();
+    document.getElementById('test-run').disabled = data.test_running;
+    const live = runs.find(r => r.status === 'running');
+    if (live) {
+      document.getElementById('test-status').textContent = data.test_running ? 'Test scan running\\u2026' : '';
+      if (selected === live.id || selected == null) showRun(live.id);
+      pollTimer = setTimeout(load, 3000);
+    } else {
+      document.getElementById('test-status').textContent = '';
+      if (selected == null && runs.length) showRun(runs[0].id);
+    }
+  } catch (e) {
+    showNetworkError(`Could not load runs: ${e.message}`);
+  }
+}
+
+const runsEl = document.getElementById('runs');
+runsEl.addEventListener('click', async e => {
+  const del = e.target.closest('[data-delete]');
+  if (del) {
+    if (!confirm('Delete this run and its readings?')) return;
+    try {
+      await fetchJSON(`/api/gpu/runs/${del.dataset.delete}`, {method: 'DELETE'});
+      if (selected === +del.dataset.delete) { selected = null; document.getElementById('chart-card').style.display = 'none'; }
+      await load();
+    } catch (e2) { showNetworkError(`Could not delete run: ${e2.message}`); }
+    return;
+  }
+  if (e.target.closest('input, a')) return;
+  const tr = e.target.closest('tr.run');
+  if (tr) showRun(+tr.dataset.id);
+});
+runsEl.addEventListener('change', async e => {
+  if (!e.target.matches('input.note')) return;
+  try {
+    await sendJSON(`/api/gpu/runs/${e.target.dataset.id}`, 'PATCH', {note: e.target.value});
+    const r = runs.find(x => x.id === +e.target.dataset.id);
+    if (r) r.note = e.target.value.trim() || null;
+    clearNetworkError();
+  } catch (e2) { showNetworkError(`Could not save note: ${e2.message}`); }
+});
+
+document.getElementById('test-run').addEventListener('click', async () => {
+  const status = document.getElementById('test-status');
+  status.className = 'muted'; status.textContent = 'Starting\\u2026';
+  try {
+    await sendJSON('/api/gpu/test', 'POST', {receipt_id: +document.getElementById('test-receipt').value});
+    selected = null;
+    setTimeout(load, 1500);
+  } catch (e) {
+    status.className = 'err'; status.textContent = 'Could not start: ' + e.message;
+  }
+});
+
+fetchJSON('/api/receipts')
+  .then(({receipts}) => {
+    const withPhoto = receipts.filter(r => !r.manual && r.status === 'done');
+    document.getElementById('test-receipt').innerHTML = withPhoto.map(r =>
+      `<option value="${r.id}">#${r.id} ${esc(r.merchant || '')} ${esc(r.purchase_date || '')} (${r.n_items} lines)</option>`).join('');
+  })
+  .catch(e => showNetworkError(`Could not load receipts: ${e.message}`));
+load();
+</script>
+</body>
+</html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS)
 
 
 @app.get("/utilities")

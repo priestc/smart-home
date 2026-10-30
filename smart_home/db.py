@@ -372,6 +372,35 @@ def open_db(path: str) -> sqlite3.Connection:
             updated_at TEXT NOT NULL
         )
     """)
+    # GPU/CPU temperatures recorded once a second while a receipt is read
+    # (smart_home/gpu_monitor.py). A run with no ended_at never finished:
+    # the machine crashed or the service was restarted mid-scan.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gpu_runs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            receipt_id  INTEGER,
+            kind        TEXT NOT NULL DEFAULT 'scan',  -- 'scan' or 'test' (photo re-read, results discarded)
+            started_at  TEXT NOT NULL,
+            ended_at    TEXT,
+            outcome     TEXT,
+            error       TEXT,
+            note        TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gpu_samples (
+            run_id   INTEGER NOT NULL REFERENCES gpu_runs(id) ON DELETE CASCADE,
+            t        REAL NOT NULL,
+            edge     REAL,
+            junction REAL,
+            mem      REAL,
+            power    REAL,
+            sclk     REAL,
+            fan_rpm  REAL,
+            cpu      REAL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS gpu_samples_run ON gpu_samples (run_id)")
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_item_names'").fetchone():
         conn.execute("INSERT OR IGNORE INTO receipt_known_items (name_key, name, updated_at) "
                      "SELECT name_key, name, updated_at FROM receipt_item_names")

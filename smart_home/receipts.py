@@ -37,6 +37,8 @@ import re
 import sqlite3
 import threading
 
+from smart_home import gpu_monitor
+
 OLLAMA_URL = "http://127.0.0.1:11434"
 MODEL = "qwen3-vl:8b-instruct"
 # Longest side of the copy sent to the model. Image tokens grow with pixel
@@ -504,7 +506,10 @@ def process(db_path: str, rid: int) -> None:
         try:
             with open(row[0], "rb") as f:
                 image = f.read()
-            _store_result(conn, rid, _read(conn, rid, image))
+            # Temperatures during the scan, for checking the GPU's cooling (/gpu)
+            with gpu_monitor.Recorder(db_path, rid):
+                data = _read(conn, rid, image)
+            _store_result(conn, rid, data)
         except Exception as e:
             msg = str(e) if isinstance(e, ReceiptError) else f"{type(e).__name__}: {e}"
             conn.execute("UPDATE receipts SET status='error', error=?, processed_at=? WHERE id=?", (msg, _now(), rid))
