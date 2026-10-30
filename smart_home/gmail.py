@@ -13,7 +13,7 @@ Not every email from a company is a bill. The model sorts each into:
   reminder - a nudge about a bill that's already been sent
   offer    - a renewal quote, promotion or anything that isn't owed yet
   other    - not about money owed
-Only charges and bills are recorded. A charge or bill with the same amount as
+Only charges and bills are recorded. Bills are dated by when the email arrived. A charge or bill with the same amount as
 another one for the same utility within DUPLICATE_DAYS is the same payment
 seen twice (a "bill ready" email and then its receipt) and is skipped too.
 Every email that's looked at is kept in email_bills with what happened to it,
@@ -60,6 +60,8 @@ DUPLICATE_DAYS = 20
 STALE_AFTER = datetime.timedelta(minutes=30)
 DEFAULT_PERIOD_MONTHS = {"Insurance": 6}
 RECORDED_TYPES = ("charge", "bill")
+# An email that says the payment will be taken automatically is a charge
+_AUTOPAY_RE = re.compile(r"\bautomatic(ally)?\b[^.\n]{0,40}\b(payment|paid|charged|debit)|\bauto-?pay\b", re.I)
 
 _SCHEMA = {
     "type": "object",
@@ -67,14 +69,13 @@ _SCHEMA = {
         "email_type": {"type": "string", "enum": ["charge", "bill", "reminder", "offer", "other"]},
         "utility": {"type": ["string", "null"], "enum": receipts.UTILITIES + [None]},
         "merchant": {"type": ["string", "null"]},
-        "bill_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
         "amount": {"type": ["number", "null"]},
         "period_months": {"type": ["integer", "null"]},
         "usage": {"type": ["number", "null"]},
         "usage_unit": {"type": ["string", "null"]},
         "notes": {"type": ["string", "null"]},
     },
-    "required": ["email_type", "utility", "merchant", "bill_date", "amount", "period_months",
+    "required": ["email_type", "utility", "merchant", "amount", "period_months",
                  "usage", "usage_unit", "notes"],
     "additionalProperties": False,
 }
@@ -89,7 +90,6 @@ _PROMPT = f"""This is an email from a utility or service provider. Extract it fo
   - "other": anything else (outage, newsletter, password reset, usage alert with no amount owed).
 - utility: one of {", ".join(receipts.UTILITIES)}. Car, home or renters insurance is "Insurance". Cloud servers, web hosting and software subscriptions are "Hosting". A cell phone plan is "Phone".
 - merchant: the company providing the service as a person would say it (e.g. "Starlink", "El Paso Electric"). When a payment service such as PayPal sends the email, use the merchant it was paid to (e.g. "Visible"), not PayPal.
-- bill_date: the payment, statement or billing date as YYYY-MM-DD. Use the email's date if none is given.
 - amount: the amount for this period in dollars. If several payment options are shown (pay in full, installments, minimum payment), use the pay-in-full amount. Not any past-due balance.
 - period_months: how many months this amount covers, if the email says (e.g. a statement period of 10/12-11/11 is 1, a 6-month policy is 6, an annual plan is 12), otherwise null.
 - usage and usage_unit: the amount used if printed (e.g. 812 kWh gives 812, "kWh"), otherwise null for both.
@@ -341,11 +341,11 @@ def read_email(conn: sqlite3.Connection, message_id: str) -> None:
         utility = data.get("utility") if data.get("utility") in receipts.UTILITIES else "Other"
         merchant = (data.get("merchant") or "").strip() or None
         amount = data.get("amount")
-        date = data.get("bill_date")
-        try:
-            datetime.date.fromisoformat(date or "")
-        except ValueError:
-            date = em["received_at"][:10]
+        # The model would sometimes give the due date instead, putting the
+        # bill in the following month
+        date = em["received_at"][:10]
+        if kind == "reminder" and _AUTOPAY_RE.search(em["body_text"]):
+            kind = "charge"  # the model calls "automatic payment reminder" emails reminders
         rid = em["receipt_id"]
         if rid is not None and not conn.execute("SELECT 1 FROM receipts WHERE id=?", (rid,)).fetchone():
             rid = None  # its bill was deleted
