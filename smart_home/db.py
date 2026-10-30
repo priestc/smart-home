@@ -331,6 +331,15 @@ def open_db(path: str) -> sqlite3.Connection:
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS receipt_items_receipt ON receipt_items (receipt_id)")
+    # kind is 'receipt' or 'bill'. A utility bill also records which utility
+    # it is, the usage printed on it (e.g. 1440 gal) and its due date.
+    for col in ("kind TEXT NOT NULL DEFAULT 'receipt'", "utility TEXT", "usage_amount REAL",
+                "usage_unit TEXT", "due_date TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE receipts ADD COLUMN {col}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
     # raw_text and item_code are the line as printed (e.g. Walmart's 12-digit
     # item number); name_key is derived from them and links the item to a
     # human-friendly name in receipt_known_items. NULL for hand-added items.
