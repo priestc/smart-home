@@ -67,7 +67,8 @@ CATEGORIES = [
     "Other",
 ]
 # What a utility bill (kind='bill') is for
-UTILITIES = ["Electricity", "Water", "Propane", "Natural Gas", "Internet", "Phone", "Trash", "Sewer", "Other"]
+UTILITIES = ["Electricity", "Water", "Propane", "Natural Gas", "Internet", "Phone", "Trash", "Sewer",
+             "Insurance", "Hosting", "Other"]
 # Units for an item's quantity: a count, ounces or pounds
 UNITS = ["ea", "oz", "lb"]
 # Not an item category: receipts.tax is reported under this name in summaries

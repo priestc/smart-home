@@ -721,6 +721,42 @@ def fetch_gas_prices(db):
         click.echo(f"Warning: {result['warning']}")
 
 
+@main.command("gmail-setup")
+@click.option("--query", default=None, help="Gmail search for bill emails (default: label:Billz newer_than:1y).")
+def gmail_setup(query):
+    """Give read-only access to Gmail so emailed bills show up on /utilities."""
+    from smart_home import gmail as _gmail
+    cfg = _gmail.load_config() or {}
+    click.echo("You need an OAuth client from a Google Cloud project (one-time):")
+    click.echo("  1. console.cloud.google.com: create a project, then APIs & Services → Library → enable the Gmail API.")
+    click.echo("  2. OAuth consent screen: External, add yourself as a test user, then click PUBLISH APP")
+    click.echo("     (in Testing mode access expires every 7 days).")
+    click.echo("  3. Credentials → Create credentials → OAuth client ID → Desktop app.\n")
+    client_id = click.prompt("Client ID", default=cfg.get("client_id") or None).strip()
+    client_secret = click.prompt("Client secret", default=cfg.get("client_secret") or None,
+                                 hide_input=True).strip()
+    click.echo("\nOpen this in a browser and allow access:\n")
+    click.echo(_gmail.auth_url(client_id))
+    click.echo(f"\nThe browser then goes to {_gmail.REDIRECT_URI}/?code=... and says it can't connect;")
+    click.echo("that's expected. Copy that whole address from the address bar.\n")
+    pasted = click.prompt("Address (or just the code)")
+    try:
+        refresh = _gmail.exchange_code(client_id, client_secret, _gmail.code_from_redirect(pasted))
+    except _gmail.GmailError as e:
+        raise click.ClickException(str(e))
+    cfg.update(client_id=client_id, client_secret=client_secret, refresh_token=refresh)
+    if query:
+        cfg["query"] = query
+    q = cfg.get("query") or _gmail.DEFAULT_QUERY
+    try:
+        n = len(_gmail.list_message_ids(cfg, q))
+    except _gmail.GmailError as e:
+        raise click.ClickException(f"Connected, but listing emails failed: {e}")
+    _gmail.save_config(cfg)
+    click.echo(f"\nConnected. {n} email(s) match '{q}'.")
+    click.echo("The monitor reads new ones every hour; /utilities has a 'Check email now' button.")
+
+
 @main.command("firmware-dir")
 def firmware_dir():
     """Print the path to the relay firmware directory (useful for scripting)."""
@@ -2210,6 +2246,26 @@ def monitor(duration, verbose, db, no_db):
                 click.echo(f"[{ts}] Gas price fetch failed: {e}")
             await asyncio.sleep(3540)
 
+    async def gmail_bill_loop():
+        """Every hour, read new bill emails from Gmail (if it's connected)."""
+        from smart_home import gmail as _gmail
+        while True:
+            await asyncio.sleep(120)
+            if not conn:
+                continue
+            try:
+                if not _gmail.check_due(conn):
+                    continue
+                result = await asyncio.to_thread(_gmail.check, db)
+                if result["n_new"]:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    click.echo(f"[{ts}] Bill emails: {result['n_new']} new, {result['n_imported']} added, "
+                               f"{result['n_errors']} failed")
+            except Exception as e:
+                # Also recorded in email_bill_checks and shown on /utilities
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                click.echo(f"[{ts}] Bill email check failed: {e}")
+
     BLE_STALL_THRESHOLD = datetime.timedelta(minutes=10)
 
     async def ble_watchdog_loop():
@@ -2724,7 +2780,7 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
-        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), gas_price_loop(), check_iphone_network(), check_iphone_bluetooth(), check_iphone_presence(), ble_watchdog_loop()]
+        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), gas_price_loop(), gmail_bill_loop(), check_iphone_network(), check_iphone_bluetooth(), check_iphone_presence(), ble_watchdog_loop()]
         if cameras_cfg:
             extra.append(camera_watch_loop())
             extra.append(camera_vitals_loop())

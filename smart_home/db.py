@@ -334,13 +334,42 @@ def open_db(path: str) -> sqlite3.Connection:
     # kind is 'receipt' or 'bill'. A utility bill also records which utility
     # it is and the usage printed on it (e.g. 1440 gal); its amount is total.
     # due_date is no longer used.
+    # source is 'email' for a bill read from Gmail (email_id is its message;
+    # see gmail.py), otherwise NULL. period_months is how many months a bill
+    # covers (e.g. 6 for car insurance); NULL means one.
     for col in ("kind TEXT NOT NULL DEFAULT 'receipt'", "utility TEXT", "usage_amount REAL",
-                "usage_unit TEXT", "due_date TEXT"):
+                "usage_unit TEXT", "due_date TEXT", "source TEXT", "email_id TEXT", "period_months INTEGER"):
         try:
             conn.execute(f"ALTER TABLE receipts ADD COLUMN {col}")
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+    # Every email gmail.py has looked at. status is 'processing', 'imported'
+    # (receipt_id is its bill), 'skipped' (reason says why) or 'error'.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_bills (
+            message_id   TEXT PRIMARY KEY,
+            received_at  TEXT NOT NULL,
+            sender       TEXT NOT NULL,
+            subject      TEXT NOT NULL,
+            body_text    TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            email_type   TEXT,
+            reason       TEXT,
+            receipt_id   INTEGER,
+            processed_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_bill_checks (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts         TEXT NOT NULL,
+            ok         INTEGER NOT NULL,
+            error      TEXT,
+            n_new      INTEGER,
+            n_imported INTEGER
+        )
+    """)
     # raw_text and item_code are the line as printed (e.g. Walmart's 12-digit
     # item number); name_key is derived from them and links the item to a
     # human-friendly name in receipt_known_items. NULL for hand-added items.

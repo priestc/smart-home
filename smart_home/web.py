@@ -11637,16 +11637,19 @@ def gas_page():
 
 # A receipt entered by hand on the web page has no photo (image_path '').
 # kind is 'receipt' or 'bill' (a utility bill, shown on /utilities).
+# A bill read from an email has no photo either; source is 'email' and
+# email_id is the Gmail message. period_months is how many months it covers.
 _RECEIPT_COLS = ("id, uploaded_at, status, error, processed_at, merchant, purchase_date, "
-                 "subtotal, tax, total, notes, image_path = '' AS manual, "
-                 "kind, utility, usage_amount, usage_unit")
+                 "subtotal, tax, total, notes, image_path = '' AND email_id IS NULL AS manual, "
+                 "kind, utility, usage_amount, usage_unit, source, email_id, period_months")
 
 
 def _receipt_json(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
-    from smart_home import receipts as _receipts
+    from smart_home import receipts as _receipts, gmail as _gmail
     r = dict(row)
     # A 'processing' row with no live worker was interrupted (e.g. by a server restart)
-    if r['status'] == 'processing' and not _receipts.is_running(r['id']):
+    running = _gmail.is_rereading(r['email_id']) if r['email_id'] else _receipts.is_running(r['id'])
+    if r['status'] == 'processing' and not running:
         r['status'] = 'error'
         r['error'] = 'Processing was interrupted; tap Retry'
     n, items_sum = conn.execute(
@@ -11716,6 +11719,10 @@ def api_receipt_detail(rid):
         if row is None:
             return jsonify({'error': 'Receipt not found'}), 404
         r = _receipt_json(conn, row)
+        if r['email_id']:
+            em = conn.execute("SELECT sender, subject, received_at, body_text FROM email_bills WHERE message_id=?",
+                              (r['email_id'],)).fetchone()
+            r['email'] = dict(em) if em else None
         # default_quantity/default_unit come from the item's settings and apply
         # when the line has no quantity of its own
         r['items'] = [dict(i) for i in conn.execute(
@@ -11745,10 +11752,18 @@ def api_receipt_image(rid):
 @app.post("/api/receipts/<int:rid>/retry")
 def api_receipt_retry(rid):
     from smart_home import receipts as _receipts
+    from smart_home import gmail as _gmail
     with _conn() as conn:
-        row = conn.execute("SELECT image_path FROM receipts WHERE id=?", (rid,)).fetchone()
+        row = conn.execute("SELECT image_path, email_id FROM receipts WHERE id=?", (rid,)).fetchone()
         if row is None:
             return jsonify({'error': 'Receipt not found'}), 404
+        if row['email_id']:
+            conn.execute("UPDATE email_bills SET status='processing', processed_at=? WHERE message_id=?",
+                         (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row['email_id']))
+            conn.execute("UPDATE receipts SET status='processing' WHERE id=?", (rid,))
+            conn.commit()
+            _gmail.reread_in_background(_db_path, row['email_id'])
+            return jsonify({'ok': True, 'started': True}), 202
         if not row['image_path']:
             return jsonify({'error': 'This receipt was entered by hand; there is no photo to read'}), 409
     if _receipts.is_running(rid):
@@ -11766,6 +11781,11 @@ def api_receipt_delete(rid):
             return jsonify({'error': 'Receipt not found'}), 404
         conn.execute("DELETE FROM receipt_items WHERE receipt_id=?", (rid,))
         conn.execute("DELETE FROM receipts WHERE id=?", (rid,))
+        # The email stays seen, so the next Gmail check doesn't bring it back
+        conn.execute("UPDATE email_bills SET status='skipped', reason='Bill deleted by hand', receipt_id=NULL "
+                     "WHERE receipt_id=?", (rid,))
+    if not row['image_path']:
+        return jsonify({'ok': True})
     try:
         os.remove(row['image_path'])
     except FileNotFoundError:
@@ -11817,6 +11837,19 @@ def _receipt_item_fields(data: dict, partial: bool) -> tuple[dict, str | None]:
     return out, None
 
 
+def _period_months_field(v) -> tuple[int | None, str | None]:
+    """How many months a bill covers, from a request body. 1 or blank is stored as NULL."""
+    if v in (None, ''):
+        return None, None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None, 'period_months must be a whole number of months'
+    if not 1 <= n <= 24:
+        return None, 'period_months must be between 1 and 24'
+    return (None if n == 1 else n), None
+
+
 @app.patch("/api/receipts/<int:rid>")
 def api_receipt_update(rid):
     """Correct the receipt header: merchant, purchase_date, subtotal, tax, total,
@@ -11860,6 +11893,11 @@ def api_receipt_update(rid):
             except (TypeError, ValueError):
                 return jsonify({'error': 'purchase_date must be YYYY-MM-DD'}), 400
         fields['purchase_date'] = d or None
+    if 'period_months' in data:
+        n, err = _period_months_field(data['period_months'])
+        if err:
+            return jsonify({'error': err}), 400
+        fields['period_months'] = n
     for k in ('subtotal', 'tax', 'total'):
         if k in data:
             v = data[k]
@@ -13050,7 +13088,10 @@ fetchJSON('/api/receipts/known-items')
 # Shared by the Utilities pages
 _UTILITY_JS = """
 const UTILITY_COLORS = {Electricity: '#e0a800', Water: '#2e7dd4', Propane: '#e07820', 'Natural Gas': '#9b59b6',
-                        Internet: '#2db37a', Phone: '#1abc9c', Trash: '#7f8c8d', Sewer: '#8e6e53', Other: '#34495e'};
+                        Internet: '#2db37a', Phone: '#1abc9c', Trash: '#7f8c8d', Sewer: '#8e6e53',
+                        Insurance: '#c0392b', Hosting: '#5865f2', Other: '#34495e'};
+// "every 6 months" for a bill covering several months, '' for one month
+function fmtPeriod(b) { return b.period_months > 1 ? `every ${b.period_months} months` : ''; }
 // Unit suggested when entering a bill by hand
 const USAGE_UNITS = {Electricity: 'kWh', Water: 'gal', Propane: 'gal', 'Natural Gas': 'therm'};
 function fmtUsage(b) {
@@ -13115,7 +13156,16 @@ _UTILITIES_PAGE = """\\
           <thead><tr><th>Billing date</th><th>Utility</th><th>Company</th><th class="num">Usage</th><th class="num">Cost per unit</th><th class="num">Amount</th></tr></thead>
           <tbody id="bills"><tr><td colspan="6" class="muted">Loading&hellip;</td></tr></tbody>
         </table>
-        <div class="muted" style="margin-top:.8rem">Photograph a paper bill with the app&rsquo;s receipt camera; it&rsquo;s recognized as a bill and shows up here.</div>
+        <div class="muted" style="margin-top:.8rem">Photograph a paper bill with the app&rsquo;s receipt camera; it&rsquo;s recognized as a bill and shows up here. A bill that covers several months is spread over them.</div>
+      </div>
+      <div class="card">
+        <h2>Bills from email</h2>
+        <div id="email-status" class="muted">Loading&hellip;</div>
+        <div class="actions" style="margin:.6rem 0"><button class="btn secondary" id="email-check">Check email now</button></div>
+        <table>
+          <thead><tr><th>Received</th><th>Email</th><th>Result</th><th></th></tr></thead>
+          <tbody id="emails"></tbody>
+        </table>
       </div>
     </div>
     <div>
@@ -13132,6 +13182,7 @@ _UTILITIES_PAGE = """\\
           <div><label for="f-total">Amount</label><input type="text" id="f-total" inputmode="decimal" placeholder="0.00"></div>
           <div class="wide"><label for="f-usage">Usage (optional)</label>
             <div class="usage"><input type="text" id="f-usage" inputmode="decimal" placeholder="e.g. 1440"><input type="text" id="f-unit" placeholder="unit"></div></div>
+          <div><label for="f-months">Months covered</label><input type="number" id="f-months" min="1" max="24" value="1"></div>
           <div class="wide actions"><button class="btn" id="f-save">Add bill</button> <span id="f-status" class="muted"></span></div>
         </div>
       </div>
@@ -13187,7 +13238,7 @@ function renderBills() {
       <td>${esc(b.merchant || '')}</td>
       <td class="num">${fmtUsage(b)}</td>
       <td class="num muted">${unitCost(b)}</td>
-      <td class="num">${money(b.total)}</td></tr>`).join('');
+      <td class="num">${money(b.total)}${fmtPeriod(b) ? `<div class="muted">${fmtPeriod(b)}</div>` : ''}</td></tr>`).join('');
   // Companies already billed for the chosen utility, for the hand-entry form
   updateCompanies();
 }
@@ -13220,6 +13271,61 @@ document.getElementById('periods').addEventListener('click', e => {
   document.querySelectorAll('#periods button').forEach(x => x.classList.toggle('active', x === b));
   load();
 });
+const EMAIL_RESULTS = {imported: 'Added', skipped: 'Skipped', error: 'Failed', processing: 'Reading\\u2026'};
+let emailTimer = null;
+async function loadEmail() {
+  clearTimeout(emailTimer);
+  const status = document.getElementById('email-status'), tbody = document.getElementById('emails');
+  let d;
+  try {
+    d = await fetchJSON('/api/utilities/email');
+  } catch (e) {
+    status.innerHTML = `<span class="err">Could not load email status: ${esc(e.message)}</span>`;
+    return;
+  }
+  document.getElementById('email-check').disabled = !d.connected || d.checking;
+  if (!d.connected) {
+    status.innerHTML = 'Gmail isn\\u2019t connected. On tank2, run <code>smart-home gmail-setup</code>.';
+    tbody.innerHTML = '';
+    return;
+  }
+  const last = d.checks[0];
+  let html = `Reads emails matching <code>${esc(d.query)}</code> every hour.`;
+  if (d.checking) html += ' Checking now\\u2026';
+  else if (!last) html += ' Not checked yet.';
+  else if (!last.ok) html += `<div class="warn err">The last check (${esc(last.ts)}) failed: ${esc(last.error)}</div>`;
+  else html += ` Last checked ${esc(last.ts)}: ${last.n_new} new, ${last.n_imported} added.`
+               + (last.error ? ` <span class="err">${esc(last.error)}</span>` : '');
+  status.innerHTML = html;
+  tbody.innerHTML = d.emails.length ? d.emails.map(e => `<tr>
+      <td class="muted">${esc(e.received_at.slice(0, 10))}</td>
+      <td>${esc(e.subject)}<div class="muted">${esc(e.sender)}</div></td>
+      <td class="${e.status === 'error' ? 'err' : ''}">${e.status === 'imported' && e.receipt_id
+          ? `<a href="/utilities/${e.receipt_id}">Added</a>` : esc(EMAIL_RESULTS[e.status] || e.status)}
+        ${e.reason ? `<div class="muted">${esc(e.reason)}</div>` : ''}</td>
+      <td>${e.status === 'processing' ? '' : `<button class="btn secondary" data-read="${esc(e.message_id)}">Read again</button>`}</td></tr>`).join('')
+    : '<tr><td colspan="4" class="muted">No bill emails found yet.</td></tr>';
+  if (d.checking || d.emails.some(e => e.status === 'processing')) emailTimer = setTimeout(() => { loadEmail(); load(); }, 5000);
+}
+document.getElementById('email-check').addEventListener('click', async () => {
+  try {
+    await fetchJSON('/api/utilities/email/check', {method: 'POST'});
+  } catch (e) {
+    showNetworkError(`Could not check email: ${e.message}`);
+  }
+  loadEmail();
+});
+document.getElementById('emails').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-read]');
+  if (!b) return;
+  b.disabled = true;
+  try {
+    await fetchJSON(`/api/utilities/email/${encodeURIComponent(b.dataset.read)}/read`, {method: 'POST'});
+  } catch (err) {
+    showNetworkError(`Could not read the email again: ${err.message}`);
+  }
+  loadEmail();
+});
 document.getElementById('bills').addEventListener('click', e => {
   const tr = e.target.closest('tr.bill');
   if (tr) location.href = `/utilities/${tr.dataset.id}`;
@@ -13239,12 +13345,14 @@ document.getElementById('f-save').addEventListener('click', async () => {
   if (!val('f-date')) { status.className = 'err'; status.textContent = 'Enter the billing date.'; return; }
   if (isNaN(total)) { status.className = 'err'; status.textContent = 'Enter the amount.'; return; }
   const body = {utility: utilitySel.value, merchant: val('f-merchant'), purchase_date: val('f-date'),
-                total, usage_amount: val('f-usage').replace(/,/g, '') || null, usage_unit: val('f-unit') || null};
+                total, usage_amount: val('f-usage').replace(/,/g, '') || null, usage_unit: val('f-unit') || null,
+                period_months: val('f-months') || null};
   status.className = 'muted'; status.textContent = 'Saving\\u2026';
   try {
     await sendJSON('/api/utilities/bills', 'POST', body);
     status.textContent = 'Added';
     ['f-merchant', 'f-total', 'f-usage'].forEach(id => { document.getElementById(id).value = ''; });
+    document.getElementById('f-months').value = 1;
     await load();
   } catch (e) {
     status.className = 'err'; status.textContent = 'Could not add bill: ' + e.message;
@@ -13258,6 +13366,7 @@ fetchJSON('/api/receipts/config')
   })
   .catch(e => showNetworkError(`Could not load utility types: ${e.message}`))
   .finally(load);
+loadEmail();
 </script>
 </body>
 </html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS) \
@@ -13291,6 +13400,7 @@ _UTILITY_BILL_PAGE = """\\
     .actions { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
     .photo { position: sticky; top: 1rem; }
     .photo img { width: 100%; border-radius: 8px; display: block; cursor: zoom-in; }
+    .email-body { white-space: pre-wrap; font: .82rem/1.45 inherit; max-height: 70vh; overflow: auto; margin: .6rem 0 0; color: #2c3e50; }
   </style>
 </head>
 <body>
@@ -13313,6 +13423,7 @@ _UTILITY_BILL_PAGE = """\\
           <div><label for="purchase_date">Billing date</label><input type="date" id="purchase_date"></div>
           <div><label for="usage_amount">Usage</label><div class="usage"><input type="text" id="usage_amount" inputmode="decimal" placeholder="e.g. 1440"><input type="text" id="usage_unit" placeholder="unit"></div></div>
           <div><label for="total">Amount</label><input type="text" id="total" inputmode="decimal" placeholder="0.00"></div>
+          <div><label for="period_months">Months covered</label><input type="number" id="period_months" min="1" max="24"></div>
         </div>
         <div class="actions">
           <button class="btn" id="save" disabled>Save</button>
@@ -13323,7 +13434,7 @@ _UTILITY_BILL_PAGE = """\\
       <div class="card">
         <div class="actions" id="retry-row">
           <button class="btn secondary" id="retry">Read again</button>
-          <span class="muted">Re-reads the photo and replaces your corrections.</span>
+          <span class="muted" id="retry-note">Re-reads the photo and replaces your corrections.</span>
         </div>
         <div class="actions" style="margin-top:.8rem">
           <button class="btn secondary" id="to-receipt">This is a store receipt</button>
@@ -13336,15 +13447,20 @@ _UTILITY_BILL_PAGE = """\\
       <a id="photo-link" target="_blank"><img id="photo" alt="Bill photo"></a>
       <div class="muted err" id="photo-error"></div>
     </div>
+    <div class="card photo" id="email-card" style="display:none">
+      <h2>Email</h2>
+      <div id="email-meta"></div>
+      <pre class="email-body" id="email-body"></pre>
+    </div>
   </div>
 <script>__COMMON_JS____UTILITY_JS__
 const RID = __RID__;
-const FIELDS = ['utility', 'merchant', 'purchase_date', 'usage_amount', 'usage_unit', 'total'];
+const FIELDS = ['utility', 'merchant', 'purchase_date', 'usage_amount', 'usage_unit', 'total', 'period_months'];
 let bill = null, pollTimer = null;
 
 function fieldValue(k) {
   const v = bill[k];
-  if (v == null) return k === 'utility' ? 'Other' : '';
+  if (v == null) return k === 'utility' ? 'Other' : k === 'period_months' ? '1' : '';
   return k === 'total' ? v.toFixed(2) : String(v);
 }
 function parseAmount(s) {
@@ -13386,11 +13502,22 @@ function render() {
   document.getElementById('bill-card').style.display = document.getElementById('edit-card').style.display =
     b.status === 'done' ? '' : 'none';
   document.getElementById('retry').disabled = reading;
-  document.getElementById('photo-card').style.display = b.manual ? 'none' : '';
+  const photo = !b.manual && !b.email_id;
+  document.getElementById('photo-card').style.display = photo ? '' : 'none';
+  document.getElementById('email-card').style.display = b.email_id ? '' : 'none';
   document.querySelector('.layout').style.gridTemplateColumns = b.manual ? '1fr' : '';
   document.getElementById('retry-row').style.display = b.manual ? 'none' : '';
+  document.getElementById('retry-note').textContent =
+    `Re-reads the ${b.email_id ? 'email' : 'photo'} and replaces your corrections.`;
+  if (b.email_id) {
+    const em = b.email;
+    document.getElementById('email-meta').innerHTML = em
+      ? `<div><strong>${esc(em.subject)}</strong></div><div class="muted">${esc(em.sender)} \\u00b7 ${esc(em.received_at)}</div>`
+      : '<span class="err">The email this bill came from is missing from the database.</span>';
+    document.getElementById('email-body').textContent = em ? em.body_text : '';
+  }
   const img = document.getElementById('photo');
-  if (!b.manual && !img.getAttribute('src')) img.src = document.getElementById('photo-link').href = `/api/receipts/${RID}/image`;
+  if (photo && !img.getAttribute('src')) img.src = document.getElementById('photo-link').href = `/api/receipts/${RID}/image`;
   if (b.status !== 'done') return;
 
   document.getElementById('eyebrow').textContent = `${b.utility || 'Other'} bill`;
@@ -13398,6 +13525,8 @@ function render() {
   const figures = [`<div class="figure"><div class="v">${money(b.total)}</div><div class="l">Amount</div></div>`];
   if (b.usage_amount != null) figures.push(`<div class="figure"><div class="v">${fmtUsage(b)}</div><div class="l">Used</div>
       ${unitCost(b) ? `<div class="s">${unitCost(b)}</div>` : ''}</div>`);
+  if (b.period_months > 1 && b.total != null) figures.push(`<div class="figure"><div class="v">${money(b.total / b.period_months)}</div>
+      <div class="l">A month</div><div class="s">Covers ${b.period_months} months</div></div>`);
   figures.push(`<div class="figure"><div class="v">${esc(b.purchase_date || '\\u2014')}</div><div class="l">Billing date</div></div>`);
   document.getElementById('figures').innerHTML = figures.join('');
   FIELDS.forEach(k => { const el = document.getElementById(k); el.value = fieldValue(k); el.classList.remove('dirty'); });
@@ -13442,7 +13571,7 @@ document.getElementById('save').addEventListener('click', async () => {
   try {
     await sendJSON(`/api/receipts/${RID}`, 'PATCH', {
       utility: val('utility'), merchant: val('merchant'), purchase_date: val('purchase_date') || null,
-      usage_amount: usage, usage_unit: val('usage_unit'), total});
+      usage_amount: usage, usage_unit: val('usage_unit'), total, period_months: val('period_months') || null});
     status.textContent = 'Saved';
     await load();
   } catch (e) {
@@ -13450,7 +13579,7 @@ document.getElementById('save').addEventListener('click', async () => {
   }
 });
 document.getElementById('retry').addEventListener('click', async () => {
-  if (!confirm('Read the photo again? This replaces your corrections.')) return;
+  if (!confirm(`Read the ${bill.email_id ? 'email' : 'photo'} again? This replaces your corrections.`)) return;
   try {
     await fetchJSON(`/api/receipts/${RID}/retry`, {method: 'POST'});
     await load();
@@ -13551,28 +13680,42 @@ def api_receipts_summary():
 def api_utilities_summary():
     """Utility bills per month per utility over the last N months (default 12),
     by billing date. A bill's amount is its total, or its charges + tax if no
-    total was read."""
+    total was read. A bill covering several months (period_months) is spread
+    evenly over them, starting with its billing month; months after this one
+    aren't counted yet."""
     months = max(1, min(int(request.args.get('months', 12)), 120))
-    start = _months_start(months)
+    start = _months_start(months)[:7]
+    this_month = datetime.date.today().strftime("%Y-%m")
     day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
     amount = ("COALESCE(r.total, (SELECT SUM(i.total_price) FROM receipt_items i WHERE i.receipt_id = r.id) "
               "+ COALESCE(r.tax, 0), 0)")
     with _conn() as conn:
-        rows = conn.execute(
-            f"SELECT substr({day}, 1, 7) AS month, COALESCE(r.utility, 'Other') AS utility, "
-            f"SUM({amount}) AS amount, COUNT(*) AS n_bills FROM receipts r "
-            f"WHERE r.status='done' AND r.kind='bill' AND {day} >= ? GROUP BY month, utility",
-            (start,),
+        bills = conn.execute(
+            f"SELECT {day} AS day, COALESCE(r.utility, 'Other') AS utility, {amount} AS amount, "
+            f"COALESCE(r.period_months, 1) AS n FROM receipts r WHERE r.status='done' AND r.kind='bill'"
         ).fetchall()
-    rows = [{'month': r['month'], 'utility': r['utility'], 'amount': round(r['amount'], 2),
-             'n_bills': r['n_bills']} for r in rows]
+    cells: dict[tuple[str, str], dict] = {}
+    for b in bills:
+        y, m = int(b['day'][:4]), int(b['day'][5:7])
+        counted = False
+        for _ in range(b['n']):
+            month = f"{y:04d}-{m:02d}"
+            if start <= month <= this_month:
+                c = cells.setdefault((month, b['utility']), {'amount': 0.0, 'n_bills': 0})
+                c['amount'] += b['amount'] / b['n']
+                if not counted:
+                    c['n_bills'] += 1  # each bill counted once, in its first month in range
+                    counted = True
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    rows = [{'month': k[0], 'utility': k[1], 'amount': round(c['amount'], 2), 'n_bills': c['n_bills']}
+            for k, c in cells.items()]
     totals: dict[str, dict] = {}
     for r in rows:
         t = totals.setdefault(r['utility'], {'utility': r['utility'], 'amount': 0.0, 'n_bills': 0})
         t['amount'] = round(t['amount'] + r['amount'], 2)
         t['n_bills'] += r['n_bills']
     return jsonify({
-        'start': start,
+        'start': start + '-01',
         'months': months,
         'n_bills': sum(t['n_bills'] for t in totals.values()),
         'rows': sorted(rows, key=lambda r: (r['month'], r['utility'])),
@@ -13581,11 +13724,66 @@ def api_utilities_summary():
     })
 
 
+@app.get("/api/utilities/email")
+def api_utilities_email():
+    """Whether Gmail is connected, the last few checks and the emails looked at."""
+    from smart_home import gmail as _gmail
+    cfg = _gmail.load_config()
+    stale = (datetime.datetime.now() - _gmail.STALE_AFTER).strftime("%Y-%m-%d %H:%M:%S")
+    with _conn() as conn:
+        checks = [dict(r) for r in conn.execute(
+            "SELECT ts, ok, error, n_new, n_imported FROM email_bill_checks ORDER BY id DESC LIMIT 5")]
+        emails = [dict(r) for r in conn.execute(
+            "SELECT message_id, received_at, sender, subject, status, email_type, reason, receipt_id "
+            "FROM email_bills ORDER BY received_at DESC LIMIT ?", (min(int(request.args.get('limit', 50)), 500),))]
+        for e in emails:
+            if e['status'] == 'processing' and not _gmail.is_rereading(e['message_id']):
+                row = conn.execute("SELECT processed_at FROM email_bills WHERE message_id=?",
+                                   (e['message_id'],)).fetchone()
+                if row['processed_at'] and row['processed_at'] < stale:
+                    e['status'] = 'error'
+                    e['reason'] = 'Reading was interrupted; it will be read again on the next check'
+    return jsonify({
+        'connected': cfg is not None,
+        'query': (cfg or {}).get('query') or _gmail.DEFAULT_QUERY,
+        'checking': _gmail.is_checking(),
+        'checks': checks,
+        'emails': emails,
+    })
+
+
+@app.post("/api/utilities/email/check")
+def api_utilities_email_check():
+    from smart_home import gmail as _gmail
+    if not _gmail.load_config():
+        return jsonify({'error': 'Gmail isn\'t connected. Run `smart-home gmail-setup` on tank2.'}), 409
+    if _gmail.is_checking():
+        return jsonify({'error': 'Already checking email'}), 409
+    _gmail.check_in_background(_db_path)
+    return jsonify({'ok': True, 'started': True}), 202
+
+
+@app.post("/api/utilities/email/<message_id>/read")
+def api_utilities_email_read(message_id):
+    """Read one email again (e.g. one that was skipped or failed)."""
+    from smart_home import gmail as _gmail
+    with _conn() as conn:
+        row = conn.execute("SELECT status FROM email_bills WHERE message_id=?", (message_id,)).fetchone()
+        if row is None:
+            return jsonify({'error': 'Email not found'}), 404
+        if _gmail.is_rereading(message_id):
+            return jsonify({'error': 'This email is already being read'}), 409
+        conn.execute("UPDATE email_bills SET status='processing', processed_at=? WHERE message_id=?",
+                     (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), message_id))
+    _gmail.reread_in_background(_db_path, message_id)
+    return jsonify({'ok': True, 'started': True}), 202
+
+
 @app.post("/api/utilities/bills")
 def api_utility_bill_add():
     """Enter a utility bill by hand (e.g. internet paid by autopay with no paper
     bill). Body: utility, merchant, purchase_date, total, and optionally
-    usage_amount + usage_unit."""
+    usage_amount + usage_unit and period_months."""
     from smart_home import receipts as _receipts
     data = request.get_json(silent=True) or {}
     utility = data.get('utility')
@@ -13613,13 +13811,16 @@ def api_utility_bill_add():
             return jsonify({'error': 'usage_amount must be a number'}), 400
         if not unit:
             return jsonify({'error': 'Give a unit for the usage, e.g. gal or kWh'}), 400
+    period, err = _period_months_field(data.get('period_months'))
+    if err:
+        return jsonify({'error': err}), 400
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with _conn() as conn:
         cur = conn.execute(
             "INSERT INTO receipts (uploaded_at, status, processed_at, image_path, media_type, merchant, "
-            "purchase_date, total, notes, kind, utility, usage_amount, usage_unit) "
-            "VALUES (?, 'done', ?, '', '', ?, ?, ?, 'Entered by hand', 'bill', ?, ?, ?)",
-            (now, now, merchant, date, total, utility, usage, unit),
+            "purchase_date, total, notes, kind, utility, usage_amount, usage_unit, period_months) "
+            "VALUES (?, 'done', ?, '', '', ?, ?, ?, 'Entered by hand', 'bill', ?, ?, ?, ?)",
+            (now, now, merchant, date, total, utility, usage, unit, period),
         )
     return jsonify({'ok': True, 'id': cur.lastrowid}), 201
 
