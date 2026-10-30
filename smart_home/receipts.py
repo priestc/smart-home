@@ -110,13 +110,13 @@ _SCHEMA = {
 
 _PROMPT = f"""This is a photo of a store or restaurant receipt, or of a utility bill. Extract it for a personal cost-of-living tracker.
 
-- document_type: "utility_bill" for a bill from a utility or service provider (water, electricity, propane or gas delivery, internet, phone, trash, sewer), otherwise "receipt".
+- document_type: "utility_bill" for a bill from a utility or service provider (water, electricity, propane or gas delivery, internet, phone, trash, sewer), otherwise "receipt". A dump, landfill or transfer station scale ticket is a utility bill for "Trash".
 - For a utility bill:
   - utility: one of {", ".join(UTILITIES)}. For a receipt use null, and null for usage, usage_unit and due_date too.
   - merchant: the company's name (e.g. "Moongate Water Co."). purchase_date: the billing or statement date.
-  - usage and usage_unit: the amount used this period as printed, e.g. GALLONS USED 1440 gives 1440, "gal"; 812 KWH gives 812, "kWh"; propane delivered in gallons gives "gal". Null for both if no usage is printed (e.g. internet).
+  - usage and usage_unit: the amount used this period as printed, e.g. GALLONS USED 1440 gives 1440, "gal"; 812 KWH gives 812, "kWh"; propane delivered in gallons gives "gal"; a transfer station's net weight "20 lb" gives 20, "lb". Null for both if no usage is printed (e.g. internet).
   - due_date: the payment due date as YYYY-MM-DD, or null.
-  - items: each charge for this period (e.g. "WATER CHRG.", "CONSERVATION FEE", "Monthly service") with category "{UTILITY_CATEGORY}". Do not include tax, meter readings, subtotal, balance forward, previous balance, payments or the total as items.
+  - items: each charge for this period (e.g. "WATER CHRG.", "CONSERVATION FEE", "Monthly service") with category "{UTILITY_CATEGORY}". Fees and surcharges are charges wherever they are printed, including below the subtotal (e.g. "Environmental Impact Fee", "Fuel Surcharge Fee"): include each one as an item, even when it is 0.00. Do not include tax, meter readings, subtotal, balance forward, previous balance, payments or the total as items.
   - tax: the tax charged. total: this period's charges plus tax (leave out any balance forward or past-due amount). subtotal: null. items_sold: null. Skip the store-receipt rules below.
 
 - merchant: the store or restaurant name as a person would say it (e.g. "Costco", not "COSTCO WHOLESALE #1234").
