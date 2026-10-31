@@ -757,6 +757,19 @@ def gmail_setup(query):
     click.echo("The monitor reads new ones every hour; /utilities has a 'Check email now' button.")
 
 
+@main.command("email-archive-sync")
+@click.option("--db", default=DEFAULT_DB, show_default=True, help="SQLite database path.")
+def email_archive_sync(db):
+    """Bring the local copy of the Gmail mailbox (/email-archive) up to date now."""
+    from smart_home import email_archive as _archive
+    click.echo(f"Archiving into {_archive.archive_dir(db)}")
+    try:
+        r = _archive.sync(db, progress=lambda n, f: click.echo(f"  {n} saved, {f} failed"))
+    except _archive.ArchiveError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"Done: {r['n_new']} new message(s), {r['n_failed']} couldn't be saved.")
+
+
 @main.command("firmware-dir")
 def firmware_dir():
     """Print the path to the relay firmware directory (useful for scripting)."""
@@ -2266,6 +2279,20 @@ def monitor(duration, verbose, db, no_db):
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
                 click.echo(f"[{ts}] Bill email check failed: {e}")
 
+    async def email_archive_loop():
+        """Keep the local copy of the Gmail mailbox up to date (if Gmail is connected)."""
+        from smart_home import email_archive as _archive
+        while True:
+            await asyncio.sleep(60)
+            if not conn:
+                continue
+            try:
+                if await asyncio.to_thread(_archive.sync_due, db):
+                    _archive.sync_in_background(db)
+            except Exception as e:
+                ts = datetime.datetime.now().strftime("%H:%M:%S")
+                click.echo(f"[{ts}] Email archive check failed: {e}")
+
     BLE_STALL_THRESHOLD = datetime.timedelta(minutes=10)
 
     async def ble_watchdog_loop():
@@ -2780,7 +2807,7 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
-        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), gas_price_loop(), gmail_bill_loop(), check_iphone_network(), check_iphone_bluetooth(), check_iphone_presence(), ble_watchdog_loop()]
+        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), gas_price_loop(), gmail_bill_loop(), email_archive_loop(), check_iphone_network(), check_iphone_bluetooth(), check_iphone_presence(), ble_watchdog_loop()]
         if cameras_cfg:
             extra.append(camera_watch_loop())
             extra.append(camera_vitals_loop())

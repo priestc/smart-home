@@ -5294,6 +5294,7 @@ def index():
     <a href="/camera"            class="chart-link"><span class="cl-title">Cameras</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/cost-of-living"    class="chart-link"><span class="cl-title">Cost of Living</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/email-archive"     class="chart-link"><span class="cl-title">Email Archive</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/gpu"               class="chart-link"><span class="cl-title">GPU Temperatures</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/water-chemistry"   class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Water Chemistry</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/rssi"              class="chart-link"><span class="cl-title">Bluetooth Signal</span><span class="cl-arrow">&#8594;</span></a>
@@ -14246,6 +14247,322 @@ load();
 @app.get("/cost-of-living")
 def cost_of_living_page():
     return Response(_COST_OF_LIVING_PAGE, mimetype="text/html")
+
+
+# ---- Email archive (smart_home/email_archive.py) ------------------------------
+
+@app.get("/api/email-archive/status")
+def api_email_archive_status():
+    from smart_home import email_archive as _archive
+    return jsonify(_archive.status(_db_path))
+
+
+@app.post("/api/email-archive/sync")
+def api_email_archive_sync():
+    from smart_home import email_archive as _archive, gmail as _gmail
+    if not _gmail.CONFIG_PATH.exists():
+        return jsonify({'error': "Gmail isn't connected. Run `smart-home gmail-setup` on tank2."}), 409
+    if _archive.is_syncing(_db_path):
+        return jsonify({'error': 'A sync is already running'}), 409
+    _archive.sync_in_background(_db_path)
+    return jsonify({'started': True}), 202
+
+
+@app.get("/api/email-archive/messages")
+def api_email_archive_messages():
+    """?q= searches subject, sender, recipients and body (each word as a prefix)."""
+    from smart_home import email_archive as _archive
+    try:
+        offset = max(0, int(request.args.get('offset', 0)))
+    except ValueError:
+        return jsonify({'error': 'offset must be a number'}), 400
+    try:
+        return jsonify(_archive.search(_db_path, request.args.get('q', ''), offset))
+    except sqlite3.OperationalError as e:
+        return jsonify({'error': f'Search failed: {e}'}), 400
+
+
+def _archived(message_id: str):
+    """(row, parsed message, raw) or an error response."""
+    from smart_home import email_archive as _archive
+    try:
+        found = _archive.get_message(_db_path, message_id)
+    except _archive.ArchiveError as e:
+        return None, (jsonify({'error': str(e)}), 500)
+    if not found:
+        return None, (jsonify({'error': 'That message isn’t in the archive'}), 404)
+    row, raw = found
+    return (row, _archive.parse(raw), raw), None
+
+
+@app.get("/api/email-archive/messages/<message_id>")
+def api_email_archive_message(message_id):
+    from smart_home import email_archive as _archive
+    found, err = _archived(message_id)
+    if err:
+        return err
+    row, msg, _ = found
+    return jsonify(dict(row,
+                        date=_archive._header(msg, 'Date'),
+                        to=_archive._header(msg, 'To'),
+                        cc=_archive._header(msg, 'Cc'),
+                        body=_archive.body_text(msg),
+                        attachments=_archive.attachments(msg)))
+
+
+@app.get("/api/email-archive/messages/<message_id>/raw")
+def api_email_archive_raw(message_id):
+    found, err = _archived(message_id)
+    if err:
+        return err
+    return Response(found[2], mimetype="message/rfc822",
+                    headers={'Content-Disposition': f'attachment; filename="{message_id}.eml"'})
+
+
+@app.get("/api/email-archive/messages/<message_id>/attachments/<int:index>")
+def api_email_archive_attachment(message_id, index):
+    import urllib.parse
+    from smart_home import email_archive as _archive
+    found, err = _archived(message_id)
+    if err:
+        return err
+    part = _archive.attachment(found[1], index)
+    if not part:
+        return jsonify({'error': 'No such attachment'}), 404
+    filename, content_type, data = part
+    return Response(data, mimetype=content_type,
+                    headers={'Content-Disposition':
+                             f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}"})
+
+
+_EMAIL_ARCHIVE_PAGE = """\\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Email Archive &mdash; Smart Home</title>
+  <style>__COMMON_CSS__
+    .stats { display: flex; gap: 2rem; flex-wrap: wrap; margin-bottom: .8rem; }
+    .stat .v { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .bar { height: .5rem; background: #e8eef4; border-radius: 999px; overflow: hidden; margin: .4rem 0 .8rem; }
+    .bar div { height: 100%; background: #2e7dd4; }
+    .actions { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+    .search { display: flex; gap: .5rem; margin-bottom: .9rem; }
+    .search input { flex: 1; }
+    tr.msg { cursor: pointer; }
+    tr.msg:hover td { background: #f7fafc; }
+    td.from { max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .snippet { color: #7a90a8; font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40rem; }
+    .label { font-size: .7rem; padding: .05rem .45rem; border-radius: 999px; background: #eef2f7; color: #4a6080; margin-right: .25rem; white-space: nowrap; }
+    .label.deleted { background: #fdeaea; color: #b00; }
+    .pager { display: flex; gap: .6rem; align-items: center; margin-top: .8rem; }
+    details { margin-top: .8rem; font-size: .85rem; }
+    summary { cursor: pointer; color: #2e7dd4; }
+  </style>
+</head>
+<body>
+  <h1>Email Archive</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div class="card">
+    <h2>Archive</h2>
+    <div id="status" class="muted">Loading&hellip;</div>
+  </div>
+  <div class="card">
+    <h2>Messages</h2>
+    <form class="search" id="search">
+      <input type="text" id="q" placeholder="Search subject, sender, recipients and text">
+      <button class="btn" type="submit">Search</button>
+    </form>
+    <div class="muted" id="count"></div>
+    <table>
+      <thead><tr><th>Date</th><th>From</th><th>Subject</th></tr></thead>
+      <tbody id="messages"><tr><td colspan="3" class="muted">Loading&hellip;</td></tr></tbody>
+    </table>
+    <div class="pager"><button class="btn secondary" id="prev">&larr; Newer</button><button class="btn secondary" id="next">Older &rarr;</button></div>
+  </div>
+<script>__COMMON_JS__
+const HIDDEN_LABELS = new Set(['UNREAD', 'CATEGORY_PERSONAL', 'CATEGORY_UPDATES', 'CATEGORY_PROMOTIONS',
+                               'CATEGORY_SOCIAL', 'CATEGORY_FORUMS', 'IMPORTANT']);
+let q = '', offset = 0, statusTimer = null, wasSyncing = false;
+
+function bytes(n) {
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+function labels(list) {
+  return list.filter(l => !HIDDEN_LABELS.has(l)).map(l => `<span class="label">${esc(l)}</span>`).join('');
+}
+
+function runText(r) {
+  const what = r.kind === 'full' ? 'Full listing' : r.kind === 'update' ? 'Update' : 'Sync';
+  if (!r.ended_at) return `${what} started ${esc(r.started_at)}: ${r.n_new} saved so far`;
+  if (!r.ok) return `<span class="err">${what} ${esc(r.started_at)} failed: ${esc(r.error)}</span>`;
+  return `${what} ${esc(r.started_at)}: ${r.n_new} new` + (r.error ? ` <span class="err">(${esc(r.error)})</span>` : '');
+}
+
+async function loadStatus() {
+  clearTimeout(statusTimer);
+  const el = document.getElementById('status');
+  let s;
+  try {
+    s = await fetchJSON('/api/email-archive/status');
+  } catch (e) {
+    el.innerHTML = `<span class="err">Could not load the archive status: ${esc(e.message)}</span>`;
+    statusTimer = setTimeout(loadStatus, 15000);
+    return;
+  }
+  if (!s.connected) {
+    el.innerHTML = 'Gmail isn\\u2019t connected. On tank2, run <code>smart-home gmail-setup</code>.';
+    return;
+  }
+  const pct = s.gmail_total ? Math.min(100, s.n_messages / s.gmail_total * 100) : 0;
+  const last = s.runs[0];
+  let html = `<div class="stats">
+      <div class="stat"><div class="v">${s.n_messages.toLocaleString()}</div><div class="muted">messages saved${s.gmail_total ? ` of about ${s.gmail_total.toLocaleString()} in Gmail` : ''}</div></div>
+      <div class="stat"><div class="v">${bytes(s.size)}</div><div class="muted">on tank2</div></div>
+      ${s.oldest ? `<div class="stat"><div class="v">${esc(s.oldest.slice(0, 4))}&ndash;${esc(s.newest.slice(0, 4))}</div><div class="muted">oldest to newest</div></div>` : ''}
+      ${s.n_deleted ? `<div class="stat"><div class="v">${s.n_deleted.toLocaleString()}</div><div class="muted">deleted from Gmail, kept here</div></div>` : ''}
+    </div>`;
+  if (!s.full_listing_done) html += `<div class="bar"><div style="width:${pct.toFixed(1)}%"></div></div>
+      <div class="muted" style="margin-bottom:.6rem">The first sync is copying the whole mailbox, newest first. It picks up where it left off after a restart.</div>`;
+  if (last && !last.ok && last.ended_at) html += `<div class="warn err">The last sync (${esc(last.started_at)}) failed: ${esc(last.error)}</div>`;
+  if (s.n_failed) html += `<div class="warn">${s.n_failed} message(s) couldn\\u2019t be saved. Each is tried again on every sync, up to ${s.max_attempts} times.</div>`;
+  html += `<div class="actions"><button class="btn secondary" id="sync" ${s.syncing ? 'disabled' : ''}>${s.syncing ? 'Syncing\\u2026' : 'Sync now'}</button>
+      <span class="muted">${last ? runText(last) : 'Not synced yet.'} Syncs every ${s.interval_minutes} minutes into <code>${esc(s.path)}</code>.</span></div>`;
+  if (s.runs.length > 1 || s.failed.length) html += `<details><summary>Recent syncs${s.failed.length ? ' and failures' : ''}</summary>
+      <table style="margin-top:.5rem"><tbody>${s.runs.map(r => `<tr><td>${runText(r)}</td></tr>`).join('')}</tbody></table>
+      ${s.failed.length ? `<table style="margin-top:.5rem"><thead><tr><th>Message</th><th>Error</th><th class="num">Tries</th></tr></thead><tbody>
+        ${s.failed.map(f => `<tr><td><code>${esc(f.message_id)}</code></td><td class="err">${esc(f.error)}</td><td class="num">${f.attempts}</td></tr>`).join('')}</tbody></table>` : ''}
+    </details>`;
+  el.innerHTML = html;
+  document.getElementById('sync').addEventListener('click', syncNow);
+  // While syncing, keep the numbers moving; refresh the list once it finishes
+  if (s.syncing) statusTimer = setTimeout(loadStatus, 5000);
+  else if (wasSyncing && !q && !offset) loadMessages();
+  wasSyncing = s.syncing;
+}
+
+async function syncNow() {
+  try {
+    await fetchJSON('/api/email-archive/sync', {method: 'POST'});
+  } catch (e) {
+    showNetworkError(`Could not start a sync: ${e.message}`);
+  }
+  loadStatus();
+}
+
+async function loadMessages() {
+  const tbody = document.getElementById('messages');
+  let d;
+  try {
+    d = await fetchJSON(`/api/email-archive/messages?q=${encodeURIComponent(q)}&offset=${offset}`);
+    clearNetworkError();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="3" class="err">Could not load messages: ${esc(e.message)}</td></tr>`;
+    return;
+  }
+  document.getElementById('count').textContent = d.total
+    ? `${(offset + 1).toLocaleString()}\\u2013${(offset + d.messages.length).toLocaleString()} of ${d.total.toLocaleString()}${q ? ' matching' : ''}`
+    : '';
+  tbody.innerHTML = d.messages.length ? d.messages.map(m => `<tr class="msg" data-id="${esc(m.message_id)}">
+      <td class="muted" style="white-space:nowrap">${esc(m.received_at.slice(0, 10))}</td>
+      <td class="from" title="${esc(m.sender)}">${esc(m.sender)}</td>
+      <td>${labels(m.labels)}${m.deleted_at ? '<span class="label deleted">Deleted from Gmail</span>' : ''}${esc(m.subject || '(no subject)')}
+        <div class="snippet">${esc(m.snippet)}</div></td></tr>`).join('')
+    : `<tr><td colspan="3" class="muted">${q ? 'Nothing matches.' : 'Nothing archived yet.'}</td></tr>`;
+  document.getElementById('prev').disabled = offset === 0;
+  document.getElementById('next').disabled = offset + d.messages.length >= d.total;
+}
+
+document.getElementById('search').addEventListener('submit', e => {
+  e.preventDefault();
+  q = document.getElementById('q').value.trim();
+  offset = 0;
+  loadMessages();
+});
+document.getElementById('prev').addEventListener('click', () => { offset = Math.max(0, offset - 50); loadMessages(); });
+document.getElementById('next').addEventListener('click', () => { offset += 50; loadMessages(); });
+document.getElementById('messages').addEventListener('click', e => {
+  const tr = e.target.closest('tr.msg');
+  if (tr) location.href = `/email-archive/${encodeURIComponent(tr.dataset.id)}`;
+});
+loadStatus();
+loadMessages();
+</script>
+</body>
+</html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS)
+
+
+_EMAIL_MESSAGE_PAGE = """\\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Email &mdash; Smart Home</title>
+  <style>__COMMON_CSS__
+    h1 { overflow-wrap: anywhere; }
+    .headers td:first-child { color: #7a90a8; width: 5rem; font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; vertical-align: top; }
+    .headers td { overflow-wrap: anywhere; }
+    .body { white-space: pre-wrap; font: .88rem/1.5 system-ui, sans-serif; overflow-wrap: anywhere; color: #2c3e50; }
+    .links a { color: #2e7dd4; text-decoration: none; margin-right: 1rem; font-size: .88rem; }
+    .links a:hover { text-decoration: underline; }
+    .label { font-size: .7rem; padding: .05rem .45rem; border-radius: 999px; background: #eef2f7; color: #4a6080; margin-right: .25rem; }
+  </style>
+</head>
+<body>
+  <h1 id="title">Email</h1>
+  <div class="nav"><a href="/email-archive">&larr; Email Archive</a></div>
+  <div id="banners"></div>
+  <div class="card">
+    <table class="headers"><tbody id="headers"><tr><td colspan="2" class="muted">Loading&hellip;</td></tr></tbody></table>
+    <div class="links" style="margin-top:.8rem" id="links"></div>
+  </div>
+  <div class="card"><div class="body" id="body"></div></div>
+<script>__COMMON_JS__
+const MID = decodeURIComponent(location.pathname.split('/').pop());
+const API = `/api/email-archive/messages/${encodeURIComponent(MID)}`;
+function bytes(n) {
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+(async () => {
+  let m;
+  try {
+    m = await fetchJSON(API);
+  } catch (e) {
+    document.getElementById('headers').innerHTML = `<tr><td colspan="2" class="err">Could not load this email: ${esc(e.message)}</td></tr>`;
+    return;
+  }
+  document.title = `${m.subject || 'Email'} \\u2014 Smart Home`;
+  document.getElementById('title').textContent = m.subject || '(no subject)';
+  if (m.deleted_at) document.getElementById('banners').innerHTML =
+    `<div class="warn">Deleted from Gmail (noticed ${esc(m.deleted_at)}). This is the archived copy.</div>`;
+  const rows = [['From', m.sender], ['To', m.to], ['Cc', m.cc], ['Date', m.date || m.received_at]].filter(r => r[1]);
+  document.getElementById('headers').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${esc(v)}</td></tr>`).join('')
+    + (m.labels.length ? `<tr><td>Labels</td><td>${m.labels.map(l => `<span class="label">${esc(l)}</span>`).join('')}</td></tr>` : '');
+  document.getElementById('links').innerHTML = `<a href="${API}/raw">Download .eml (${bytes(m.size)})</a>`
+    + m.attachments.map(a => `<a href="${API}/attachments/${a.index}">&#128206; ${esc(a.filename)} (${bytes(a.size)})</a>`).join('');
+  document.getElementById('body').textContent = m.body || '(No text in this email.)';
+})();
+</script>
+</body>
+</html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS)
+
+
+@app.get("/email-archive")
+def email_archive_page():
+    return Response(_EMAIL_ARCHIVE_PAGE, mimetype="text/html")
+
+
+@app.get("/email-archive/<message_id>")
+def email_archive_message_page(message_id):
+    return Response(_EMAIL_MESSAGE_PAGE, mimetype="text/html")
 
 
 def run(db_path: str, host: str, port: int, debug: bool) -> None:
