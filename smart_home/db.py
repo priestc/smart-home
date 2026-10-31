@@ -372,7 +372,7 @@ def open_db(path: str) -> sqlite3.Connection:
     """)
     # raw_text and item_code are the line as printed (e.g. Walmart's 12-digit
     # item number); name_key is derived from them and links the item to a
-    # human-friendly name in receipt_known_items. NULL for hand-added items.
+    # product (see product_keys). NULL for hand-added items.
     for col in ("raw_text TEXT", "item_code TEXT", "name_key TEXT"):
         try:
             conn.execute(f"ALTER TABLE receipt_items ADD COLUMN {col}")
@@ -382,7 +382,7 @@ def open_db(path: str) -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS receipt_items_name_key ON receipt_items (name_key)")
     # A line's quantity is an amount of product in `unit` ('ea', 'oz' or 'lb'),
     # set when the receipt prints a weight or count, or entered by hand. It
-    # overrides the item's default quantity in receipt_known_items.
+    # overrides the product's default quantity.
     try:
         conn.execute("ALTER TABLE receipt_items ADD COLUMN unit TEXT")
         # Earlier readings put a guessed count of 1 on nearly every line
@@ -391,17 +391,6 @@ def open_db(path: str) -> sqlite3.Connection:
         conn.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
-    # Per-item settings keyed by receipt_items.name_key: a friendly name and a
-    # default quantity (e.g. a frozen pizza is 21.7 oz). Either may be NULL.
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS receipt_known_items (
-            name_key   TEXT PRIMARY KEY,
-            name       TEXT,
-            quantity   REAL,
-            unit       TEXT,
-            updated_at TEXT NOT NULL
-        )
-    """)
     # GPU/CPU temperatures recorded once a second while a receipt is read
     # (smart_home/gpu_monitor.py). A run with no ended_at never finished:
     # the machine crashed or the service was restarted mid-scan.
@@ -431,12 +420,113 @@ def open_db(path: str) -> sqlite3.Connection:
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS gpu_samples_run ON gpu_samples (run_id)")
+    # Before products existed, friendly names and default quantities were kept
+    # per printed line in receipt_known_items (earlier still, receipt_item_names);
+    # _migrate_known_items_to_products turns them into products.
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_item_names'").fetchone():
+        conn.execute("CREATE TABLE IF NOT EXISTS receipt_known_items (name_key TEXT PRIMARY KEY, name TEXT, "
+                     "quantity REAL, unit TEXT, updated_at TEXT NOT NULL)")
         conn.execute("INSERT OR IGNORE INTO receipt_known_items (name_key, name, updated_at) "
                      "SELECT name_key, name, updated_at FROM receipt_item_names")
         conn.execute("DROP TABLE receipt_item_names")
+    # A product is the thing a receipt-item (a line on a receipt) describes.
+    # Many receipt-items point to one product, including lines from different
+    # stores (the same pizza bought at Walmart and at Albertsons). quantity +
+    # unit is the amount in one purchase (e.g. 21.7 oz); a receipt-item's own
+    # quantity overrides it. receipt_items.description mirrors the product name.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            quantity   REAL,
+            unit       TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    # Which product a printed line (receipt_items.name_key) is. Kept apart from
+    # receipt_items so the link survives a receipt being re-read or deleted,
+    # and the next receipt printing the same line finds its product.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS product_keys (
+            name_key   TEXT PRIMARY KEY,
+            product_id INTEGER NOT NULL REFERENCES products(id)
+        )
+    """)
+    try:
+        conn.execute("ALTER TABLE receipt_items ADD COLUMN product_id INTEGER REFERENCES products(id)")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    conn.execute("CREATE INDEX IF NOT EXISTS receipt_items_product ON receipt_items (product_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS product_keys_product ON product_keys (product_id)")
+    _migrate_known_items_to_products(conn)
     conn.commit()
     return conn
+
+
+def _now() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _migrate_known_items_to_products(conn: sqlite3.Connection) -> None:
+    """One-time: every name_key in receipt_known_items (and every receipt-item
+    without a product) gets a product, keeping its friendly name and default
+    quantity. receipt_known_items is dropped afterwards."""
+    known = {}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_known_items'").fetchone():
+        known = {r[0]: r[1:] for r in conn.execute("SELECT name_key, name, quantity, unit FROM receipt_known_items")}
+    if not known and conn.execute("SELECT 1 FROM receipt_items WHERE product_id IS NULL LIMIT 1").fetchone() is None:
+        conn.execute("DROP TABLE IF EXISTS receipt_known_items")
+        return
+    now = _now()
+    for key, (name, qty, unit) in known.items():
+        if conn.execute("SELECT 1 FROM product_keys WHERE name_key=?", (key,)).fetchone():
+            continue
+        latest = conn.execute("SELECT description FROM receipt_items WHERE name_key=? ORDER BY id DESC LIMIT 1",
+                              (key,)).fetchone()
+        name = name or (latest[0] if latest else None)
+        if not name:
+            continue
+        pid = conn.execute("INSERT INTO products (name, quantity, unit, created_at, updated_at) VALUES (?,?,?,?,?)",
+                           (name, qty, unit, now, now)).lastrowid
+        conn.execute("INSERT INTO product_keys (name_key, product_id) VALUES (?,?)", (key, pid))
+    # Most recent line first, so a new product takes the latest reading's name
+    for iid, key, desc in conn.execute(
+            "SELECT id, name_key, description FROM receipt_items WHERE product_id IS NULL ORDER BY id DESC").fetchall():
+        pid = match_product(conn, key, desc)
+        conn.execute("UPDATE receipt_items SET product_id=?, description=(SELECT name FROM products WHERE id=?) "
+                     "WHERE id=?", (pid, pid, iid))
+    conn.execute("DROP TABLE IF EXISTS receipt_known_items")
+
+
+def match_product(conn: sqlite3.Connection, name_key: str | None, description: str) -> int:
+    """The product a receipt-item describes: the one its printed line
+    (name_key) is linked to, else a product with exactly the same name (so
+    "Bananas" from two stores is one product), else a new product named
+    `description`. A keyed line is linked to the result for next time."""
+    pid = None
+    if name_key:
+        row = conn.execute("SELECT product_id FROM product_keys WHERE name_key=?", (name_key,)).fetchone()
+        pid = row[0] if row else None
+    if pid is None:
+        row = conn.execute("SELECT id FROM products WHERE name = ? COLLATE NOCASE ORDER BY id LIMIT 1",
+                           (description.strip(),)).fetchone()
+        pid = row[0] if row else None
+    if pid is None:
+        now = _now()
+        pid = conn.execute("INSERT INTO products (name, created_at, updated_at) VALUES (?,?,?)",
+                           (description.strip(), now, now)).lastrowid
+    if name_key:
+        conn.execute("INSERT OR REPLACE INTO product_keys (name_key, product_id) VALUES (?,?)", (name_key, pid))
+    return pid
+
+
+def prune_products(conn: sqlite3.Connection) -> None:
+    """Delete products nothing points to any more (no receipt-item and no
+    printed line), e.g. after a receipt-item was moved to another product."""
+    conn.execute("DELETE FROM products WHERE id NOT IN (SELECT product_id FROM receipt_items WHERE product_id IS NOT NULL) "
+                 "AND id NOT IN (SELECT product_id FROM product_keys)")
 
 
 def upsert_ble_rssi(conn: sqlite3.Connection, label: str, address: str | None, rssi: int) -> None:

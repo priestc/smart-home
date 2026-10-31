@@ -7,17 +7,20 @@ as structured JSON. Items are stored in receipt_items so spending can be
 summed by category over time. A small local model will misread some lines, so
 everything it extracts can be corrected by hand in the app.
 
-Each item keeps the text and item number exactly as printed. Those form its
-name_key, which links it to a human-friendly name set on the /receipts/items
-web page; the next time the same item shows up it gets that name automatically.
+Each receipt-item (a line on a receipt) keeps the text and item number
+exactly as printed. Those form its name_key, and every receipt-item points to
+a product (see db.match_product): the product its printed line was linked to
+before, else one with the same name, else a new one. Several printed lines,
+e.g. from different stores, can point to the same product; that's set with
+"Change product" on the receipt page.
 
 Utility bills (water, electricity, propane, internet...) are photographed the
 same way. The model tells them apart from store receipts; they're stored in
 the same table with kind='bill': the utility, the company, the billing date,
 the usage printed on the bill (e.g. 1440 gallons) and the amount (total).
 A bill has no items. Bills are shown on the /utilities pages instead.
-That page also sets an item's default quantity (e.g. 21.7 oz); a quantity on
-the receipt line itself (a printed weight, or one entered by hand) overrides it.
+A product has a default quantity (e.g. 21.7 oz); a quantity on the
+receipt-item itself (a printed weight, or one entered by hand) overrides it.
 
 Faded or torn receipts: items already seen on earlier receipts from the same
 store form a catalog. Partly readable lines are matched against it (filling
@@ -38,7 +41,7 @@ import re
 import sqlite3
 import threading
 
-from smart_home import delegated, gpu_monitor
+from smart_home import db, delegated, gpu_monitor
 
 # Photos are read through the service delegator on this machine (see
 # delegated.py). Its "receipt-reader" task picks the model (a local Ollama
@@ -265,7 +268,7 @@ def _catalog(conn: sqlite3.Connection, rid: int, merchant: str | None) -> list[d
     by_code: dict[str, dict] = {}
     for code, raw, price, m, name in conn.execute(
         "SELECT i.item_code, i.raw_text, i.total_price, r.merchant, n.name FROM receipt_items i "
-        "JOIN receipts r ON r.id = i.receipt_id LEFT JOIN receipt_known_items n ON n.name_key = i.name_key "
+        "JOIN receipts r ON r.id = i.receipt_id LEFT JOIN products n ON n.id = i.product_id "
         "WHERE i.item_code IS NOT NULL AND i.total_price > 0 AND r.status = 'done' AND r.id != ? "
         "ORDER BY i.id DESC", (rid,)
     ):
@@ -416,7 +419,6 @@ def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
     except ValueError:
         date = None
     bill = data.get("document_type") == "utility_bill"
-    names = dict(conn.execute("SELECT name_key, name FROM receipt_known_items WHERE name IS NOT NULL").fetchall())
     rows = []
     for i, it in enumerate(data.get("items") or []):
         code = re.sub(r"\D", "", it.get("item_code") or "") or None
@@ -427,15 +429,19 @@ def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
         qty, unit = it.get("quantity"), it.get("unit")
         if qty is None or unit not in UNITS or qty <= 0:
             qty, unit = None, None
-        rows.append((rid, i, names.get(key) or it["description"], qty, unit, price,
+        # First match the line to an existing product; a new one is made if none fits
+        pid = db.match_product(conn, key, it["description"])
+        pname = conn.execute("SELECT name FROM products WHERE id=?", (pid,)).fetchone()[0]
+        rows.append((rid, i, pname, qty, unit, price,
                      it["category"] if it["category"] in CATEGORIES else "Other",
-                     it.get("raw_text"), code, key))
+                     it.get("raw_text"), code, key, pid))
     conn.execute("DELETE FROM receipt_items WHERE receipt_id=?", (rid,))
     conn.executemany(
         "INSERT INTO receipt_items (receipt_id, position, description, quantity, unit, total_price, category, "
-        "raw_text, item_code, name_key) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "raw_text, item_code, name_key, product_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         rows,
     )
+    db.prune_products(conn)
     utility = usage = usage_unit = None
     if bill:
         utility = data.get("utility") if data.get("utility") in UTILITIES else "Other"

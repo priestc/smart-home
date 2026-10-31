@@ -3,7 +3,7 @@ import datetime
 import sqlite3
 from flask import Flask, jsonify, redirect, request, Response
 from flask_compress import Compress
-from smart_home.db import open_db
+from smart_home.db import open_db, match_product, prune_products
 
 app = Flask(__name__)
 Compress(app)
@@ -11832,12 +11832,15 @@ def api_receipt_detail(rid):
             em = conn.execute("SELECT sender, subject, received_at, body_text FROM email_bills WHERE message_id=?",
                               (r['email_id'],)).fetchone()
             r['email'] = dict(em) if em else None
-        # default_quantity/default_unit come from the item's settings and apply
-        # when the line has no quantity of its own
+        # default_quantity/default_unit come from the receipt-item's product and
+        # apply when the line has no quantity of its own. product_lines is how
+        # many receipt-items (on any receipt) point to that product.
         r['items'] = [dict(i) for i in conn.execute(
             "SELECT i.id, i.description, i.quantity, i.unit, i.total_price, i.category, i.raw_text, i.item_code, "
-            "i.name_key, k.quantity AS default_quantity, k.unit AS default_unit "
-            "FROM receipt_items i LEFT JOIN receipt_known_items k ON k.name_key = i.name_key "
+            "i.name_key, i.product_id, p.name AS product_name, p.quantity AS default_quantity, "
+            "p.unit AS default_unit, "
+            "(SELECT COUNT(*) FROM receipt_items i2 WHERE i2.product_id = i.product_id) AS product_lines "
+            "FROM receipt_items i LEFT JOIN products p ON p.id = i.product_id "
             "WHERE i.receipt_id=? ORDER BY i.position", (rid,)
         ).fetchall()]
         return jsonify(r)
@@ -11890,6 +11893,7 @@ def api_receipt_delete(rid):
             return jsonify({'error': 'Receipt not found'}), 404
         conn.execute("DELETE FROM receipt_items WHERE receipt_id=?", (rid,))
         conn.execute("DELETE FROM receipts WHERE id=?", (rid,))
+        prune_products(conn)
         # The email stays seen, so the next Gmail check doesn't bring it back
         conn.execute("UPDATE email_bills SET status='skipped', reason='Bill deleted by hand', receipt_id=NULL "
                      "WHERE receipt_id=?", (rid,))
@@ -12041,28 +12045,138 @@ def api_receipt_item_add(rid):
         pos = conn.execute(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM receipt_items WHERE receipt_id=?", (rid,)
         ).fetchone()[0]
+        # A hand-added line has no printed text, so it's matched by name
+        pid = match_product(conn, None, fields['description'])
+        name = conn.execute("SELECT name FROM products WHERE id=?", (pid,)).fetchone()[0]
         cur = conn.execute(
-            "INSERT INTO receipt_items (receipt_id, position, description, quantity, unit, total_price, category) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (rid, pos, fields['description'], fields.get('quantity'), fields.get('unit'),
-             fields['total_price'], fields['category']),
+            "INSERT INTO receipt_items (receipt_id, position, description, quantity, unit, total_price, category, "
+            "product_id) VALUES (?,?,?,?,?,?,?,?)",
+            (rid, pos, name, fields.get('quantity'), fields.get('unit'),
+             fields['total_price'], fields['category'], pid),
         )
-    return jsonify({'ok': True, 'id': cur.lastrowid}), 201
+    return jsonify({'ok': True, 'id': cur.lastrowid, 'product_id': pid}), 201
 
 
 @app.patch("/api/receipts/items/<int:item_id>")
 def api_receipt_item_update(item_id):
+    """A receipt-item's description is its product's name, so changing it
+    renames the product on every receipt (`renamed` says how many lines)."""
     fields, err = _receipt_item_fields(request.get_json(silent=True) or {}, partial=True)
     if err:
         return jsonify({'error': err}), 400
     if not fields:
         return jsonify({'error': 'Nothing to update'}), 400
     with _conn() as conn:
-        sets = ', '.join(f'{k}=?' for k in fields)
-        cur = conn.execute(f"UPDATE receipt_items SET {sets} WHERE id=?", (*fields.values(), item_id))
-        if cur.rowcount == 0:
+        row = conn.execute("SELECT product_id, description FROM receipt_items WHERE id=?", (item_id,)).fetchone()
+        if row is None:
             return jsonify({'error': 'Item not found'}), 404
-    return jsonify({'ok': True})
+        renamed = 0
+        desc = fields.pop('description', None)
+        if desc is not None and desc != row['description']:
+            if row['product_id'] is None:
+                fields['description'] = desc
+            else:
+                renamed = _rename_product(conn, row['product_id'], desc)
+        if fields:
+            sets = ', '.join(f'{k}=?' for k in fields)
+            conn.execute(f"UPDATE receipt_items SET {sets} WHERE id=?", (*fields.values(), item_id))
+    return jsonify({'ok': True, 'renamed': renamed})
+
+
+def _rename_product(conn: sqlite3.Connection, pid: int, name: str) -> int:
+    """Rename a product and every receipt-item pointing to it. Returns how many lines."""
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("UPDATE products SET name=?, updated_at=? WHERE id=?", (name, now, pid))
+    return conn.execute("UPDATE receipt_items SET description=? WHERE product_id=?", (name, pid)).rowcount
+
+
+@app.post("/api/receipts/items/<int:item_id>/product")
+def api_receipt_item_set_product(item_id):
+    """Change which product a receipt-item describes. Body: {product_id} for
+    an existing product, or {new: true, name} to make a new one. A line with
+    printed text moves together with every other receipt-item printed the same
+    way (they're the same product), and future receipts follow. A product left
+    with nothing pointing to it is deleted."""
+    data = request.get_json(silent=True) or {}
+    with _conn() as conn:
+        item = conn.execute("SELECT name_key, product_id FROM receipt_items WHERE id=?", (item_id,)).fetchone()
+        if item is None:
+            return jsonify({'error': 'Item not found'}), 404
+        if data.get('new'):
+            name = (data.get('name') or '').strip()
+            if not name:
+                return jsonify({'error': 'Give the new product a name'}), 400
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            pid = conn.execute("INSERT INTO products (name, created_at, updated_at) VALUES (?,?,?)",
+                               (name, now, now)).lastrowid
+        else:
+            pid = data.get('product_id')
+            if not isinstance(pid, int):
+                return jsonify({'error': 'product_id (a number) or new is required'}), 400
+            if conn.execute("SELECT 1 FROM products WHERE id=?", (pid,)).fetchone() is None:
+                return jsonify({'error': 'Product not found'}), 404
+        name = conn.execute("SELECT name FROM products WHERE id=?", (pid,)).fetchone()[0]
+        if item['name_key']:
+            conn.execute("INSERT OR REPLACE INTO product_keys (name_key, product_id) VALUES (?,?)",
+                         (item['name_key'], pid))
+            moved = conn.execute("UPDATE receipt_items SET product_id=?, description=? WHERE name_key=?",
+                                 (pid, name, item['name_key'])).rowcount
+        else:
+            moved = conn.execute("UPDATE receipt_items SET product_id=?, description=? WHERE id=?",
+                                 (pid, name, item_id)).rowcount
+        prune_products(conn)
+    return jsonify({'ok': True, 'product_id': pid, 'moved': moved})
+
+
+@app.get("/api/products")
+def api_products():
+    """Every product, with the stores and printed lines that point to it."""
+    day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
+    with _conn() as conn:
+        rows = conn.execute(f"""
+            SELECT p.id, p.name, p.quantity, p.unit, COUNT(i.id) AS times_bought, MAX({day}) AS last_bought,
+                   (SELECT i2.total_price FROM receipt_items i2 WHERE i2.product_id = p.id
+                    ORDER BY i2.id DESC LIMIT 1) AS last_price,
+                   GROUP_CONCAT(DISTINCT r.merchant) AS merchants,
+                   (SELECT GROUP_CONCAT(t, ' | ') FROM (SELECT DISTINCT TRIM(COALESCE(i3.raw_text, '') || ' ' ||
+                        COALESCE(i3.item_code, '')) AS t FROM receipt_items i3
+                        WHERE i3.product_id = p.id AND (i3.raw_text IS NOT NULL OR i3.item_code IS NOT NULL))) AS printed
+            FROM products p
+            LEFT JOIN receipt_items i ON i.product_id = p.id
+            LEFT JOIN receipts r ON r.id = i.receipt_id
+            GROUP BY p.id
+            ORDER BY p.name COLLATE NOCASE
+        """).fetchall()
+    return jsonify({'products': [dict(r) for r in rows]})
+
+
+@app.patch("/api/products/<int:pid>")
+def api_product_update(pid):
+    """Update a product: `name` (renames every receipt-item pointing to it)
+    and/or `quantity` + `unit` (null clears it), the amount in one purchase."""
+    data = request.get_json(silent=True) or {}
+    fields = {}
+    if 'name' in data:
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'error': 'A product needs a name'}), 400
+        fields['name'] = name
+    if 'quantity' in data or 'unit' in data:
+        qty, err = _quantity_fields(data)
+        if err:
+            return jsonify({'error': err}), 400
+        fields.update(qty)
+    if not fields:
+        return jsonify({'error': 'Nothing to update'}), 400
+    with _conn() as conn:
+        if conn.execute("SELECT 1 FROM products WHERE id=?", (pid,)).fetchone() is None:
+            return jsonify({'error': 'Product not found'}), 404
+        renamed = _rename_product(conn, pid, fields.pop('name')) if 'name' in fields else 0
+        if fields:
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            sets = ', '.join(f'{k}=?' for k in fields)
+            conn.execute(f"UPDATE products SET {sets}, updated_at=? WHERE id=?", (*fields.values(), now, pid))
+    return jsonify({'ok': True, 'renamed': renamed})
 
 
 @app.delete("/api/receipts/items/<int:item_id>")
@@ -12071,6 +12185,7 @@ def api_receipt_item_delete(item_id):
         cur = conn.execute("DELETE FROM receipt_items WHERE id=?", (item_id,))
         if cur.rowcount == 0:
             return jsonify({'error': 'Item not found'}), 404
+        prune_products(conn)
     return jsonify({'ok': True})
 
 
@@ -12158,7 +12273,7 @@ _RECEIPTS_PAGE = """\\
 </head>
 <body>
   <h1>Receipts</h1>
-  <div class="nav"><a href="/cost-of-living">&larr; Cost of Living</a><a href="/receipts/items">Item names &rarr;</a><a href="/receipts/new">+ Add receipt by hand</a></div>
+  <div class="nav"><a href="/cost-of-living">&larr; Cost of Living</a><a href="/receipts/items">Products &rarr;</a><a href="/receipts/new">+ Add receipt by hand</a></div>
   <div class="periods" id="periods">
     <button data-months="1" class="active">This month</button>
     <button data-months="3">3 months</button>
@@ -12314,11 +12429,27 @@ _RECEIPT_DETAIL_PAGE = """\\
     .icon-btn { background: none; border: none; color: #b0bccb; cursor: pointer; font-size: 1.1rem; padding: 0 .3rem; }
     .icon-btn:hover { color: #b00; }
     tfoot td { font-weight: 600; border-top: 1px solid #e8eef4; }
+    .link-btn { background: none; border: none; color: #2e7dd4; cursor: pointer; font-size: .76rem; padding: 0; margin-top: .25rem; font-family: inherit; }
+    .link-btn:hover { text-decoration: underline; }
+    .shared { font-size: .74rem; color: #7a90a8; margin-left: .5rem; }
+    dialog#product-dialog { border: none; border-radius: 12px; padding: 1.2rem 1.4rem; width: min(40rem, calc(100vw - 2rem));
+      box-shadow: 0 8px 32px rgba(0,0,0,.25); }
+    dialog#product-dialog::backdrop { background: rgba(20,30,45,.4); }
+    #product-dialog h2 { font-size: 1rem; margin-bottom: .3rem; }
+    #product-dialog .printed { margin-bottom: .7rem; }
+    #product-search { width: 100%; margin-bottom: .6rem; }
+    .product-list { max-height: 60vh; overflow-y: auto; border: 1px solid #e8eef4; border-radius: 8px; }
+    .product-opt { padding: .55rem .8rem; border-bottom: 1px solid #f0f4f8; cursor: pointer; }
+    .product-opt:last-child { border-bottom: none; }
+    .product-opt:hover { background: #f0f6fd; }
+    .product-opt.current { background: #eef7f1; cursor: default; }
+    .product-opt .meta { font-size: .76rem; color: #7a90a8; margin-top: .15rem; }
+    .product-opt.new { color: #2e7dd4; font-weight: 600; }
   </style>
 </head>
 <body>
   <h1 id="title">Receipt</h1>
-  <div class="nav"><a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Item names</a></div>
+  <div class="nav"><a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Products</a></div>
   <div id="banners"></div>
   <div class="layout">
     <div>
@@ -12341,7 +12472,7 @@ _RECEIPT_DETAIL_PAGE = """\\
       <div class="card" id="items-card">
         <h2>Items</h2>
         <table>
-          <thead><tr><th>Description</th><th title="Amount bought on this line. Leave empty to use the item&rsquo;s default from the Item names page.">Quantity</th><th class="num">Price</th><th>Category</th><th></th><th></th></tr></thead>
+          <thead><tr><th title="The product this line describes. Editing the name renames the product on every receipt.">Product</th><th title="Amount bought on this line. Leave empty to use the product&rsquo;s default from the Products page.">Quantity</th><th class="num">Price</th><th>Category</th><th></th><th></th></tr></thead>
           <tbody id="items"></tbody>
           <tfoot><tr><td>Items total</td><td></td><td class="num" id="items-sum"></td><td colspan="3"></td></tr></tfoot>
         </table>
@@ -12366,6 +12497,16 @@ _RECEIPT_DETAIL_PAGE = """\\
       <div class="muted err" id="photo-error"></div>
     </div>
   </div>
+  <dialog id="product-dialog">
+    <h2>Change product</h2>
+    <div class="printed" id="product-dialog-line"></div>
+    <input type="search" id="product-search" placeholder="Search products by name, store or printed text">
+    <div class="product-list" id="product-list"></div>
+    <div class="actions" style="margin-top:.8rem">
+      <button class="btn secondary" id="product-cancel">Cancel</button>
+      <span id="product-status" class="muted"></span>
+    </div>
+  </dialog>
 <script>__COMMON_JS__
 const RID = __RID__;
 let receipt = null, categories = [], pollTimer = null;
@@ -12423,12 +12564,14 @@ function itemRow(it) {
   const printed = [it.raw_text, it.item_code].filter(Boolean).join(' \\u00b7 ');
   const opts = categories.map(c => `<option${c === it.category ? ' selected' : ''}>${esc(c)}</option>`).join('');
   return `<tr data-id="${it.id ?? ''}">
-    <td><input type="text" data-f="description" value="${esc(it.description)}">
-        ${printed && printed !== it.description ? `<div class="printed">${esc(printed)}</div>` : ''}</td>
+    <td><input type="text" data-f="description" value="${esc(it.description)}"
+          title="${it.product_lines > 1 ? `Renames this product on all ${it.product_lines} lines that point to it` : 'Product name'}">
+        ${printed && printed !== it.description ? `<div class="printed">${esc(printed)}</div>` : ''}
+        ${it.id != null ? `<button class="link-btn" data-change-product>Change product</button>` : ''}${it.product_lines > 1 ? `<span class="shared">on ${it.product_lines} lines</span>` : ''}</td>
     <td class="qty-cell"><input type="text" class="qty" data-f="quantity" inputmode="decimal" value="${it.quantity ?? ''}"
-          placeholder="${it.default_quantity ?? ''}" title="${it.default_quantity != null ? `Item default: ${fmtQty(it.default_quantity, it.default_unit)}. Type here to override it for this line.` : 'Amount bought on this line'}"
+          placeholder="${it.default_quantity ?? ''}" title="${it.default_quantity != null ? `Product default: ${fmtQty(it.default_quantity, it.default_unit)}. Type here to override it for this line.` : 'Amount bought on this line'}"
         ><select class="unit" data-f="unit">${UNITS.map(u => `<option value="${u}"${u === (it.unit || it.default_unit || 'ea') ? ' selected' : ''}>${u}</option>`).join('')}</select>
-        ${it.quantity == null && it.default_quantity != null ? '<div class="unit-price">item default</div>' : ''}</td>
+        ${it.quantity == null && it.default_quantity != null ? '<div class="unit-price">product default</div>' : ''}</td>
     <td class="num"><input type="text" class="price" data-f="total_price" inputmode="decimal" value="${it.id == null ? '' : it.total_price.toFixed(2)}">
         <div class="unit-price">${unitPrice(it)}</div></td>
     <td><select data-f="category">${opts}</select></td>
@@ -12440,7 +12583,7 @@ const UNITS = ['ea', 'oz', 'lb'];
 function fmtQty(q, unit) {
   return `${+q.toFixed(3)} ${unit || 'ea'}`;
 }
-// Price per unit using the line's own quantity, or the item's default
+// Price per unit using the line's own quantity, or the product's default
 function unitPrice(it) {
   const q = it.quantity ?? it.default_quantity;
   const unit = it.quantity != null ? it.unit : it.default_unit;
@@ -12526,14 +12669,24 @@ async function saveRow(tr) {
   if (Number.isNaN(qty) || (qty != null && qty <= 0)) { status.className = 'row-status err'; status.textContent = 'Bad quantity'; return; }
   status.className = 'row-status muted'; status.textContent = 'Saving\\u2026';
   try {
+    let res;
     if (tr.dataset.id) {
-      await sendJSON(`/api/receipts/items/${tr.dataset.id}`, 'PATCH', body);
+      res = await sendJSON(`/api/receipts/items/${tr.dataset.id}`, 'PATCH', body);
     } else {
-      const res = await sendJSON(`/api/receipts/${RID}/items`, 'POST', body);
+      res = await sendJSON(`/api/receipts/${RID}/items`, 'POST', body);
       tr.dataset.id = res.id;
+      // A new line was matched to (or made into) a product: redraw to show it
+      await load();
+      return;
     }
-    status.className = 'row-status ok'; status.textContent = 'Saved';
+    status.className = 'row-status ok'; status.textContent = res.renamed > 1 ? `Renamed on ${res.renamed} lines` : 'Saved';
     await refreshStatus();
+    // Other lines on this receipt may share the renamed product
+    if (res.renamed > 1) itemsEl.querySelectorAll('tr[data-id]').forEach(row => {
+      const it = (receipt.items || []).find(x => String(x.id) === row.dataset.id);
+      const input = row.querySelector('[data-f="description"]');
+      if (it && row !== tr && input) input.value = it.description;
+    });
     const saved = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
     if (saved) {
       tr.querySelector('td.num .unit-price').textContent = unitPrice(saved);
@@ -12549,6 +12702,7 @@ const itemsEl = document.getElementById('items');
 itemsEl.addEventListener('change', e => { if (e.target.dataset.f) saveRow(e.target.closest('tr')); });
 itemsEl.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.dataset.f) e.target.blur(); });
 itemsEl.addEventListener('click', async e => {
+  if (e.target.matches('[data-change-product]')) { openProductDialog(e.target.closest('tr').dataset.id); return; }
   if (!e.target.matches('[data-delete]')) return;
   const tr = e.target.closest('tr');
   if (!tr.dataset.id) { tr.remove(); return; }
@@ -12560,6 +12714,65 @@ itemsEl.addEventListener('click', async e => {
     showNetworkError(`Could not delete item: ${e2.message}`);
   }
 });
+// "Change product": pick any existing product for a line, or make a new one
+const dialog = document.getElementById('product-dialog');
+let products = null, dialogItem = null;
+function renderProducts() {
+  const typed = document.getElementById('product-search').value.trim();
+  const q = typed.toLowerCase();
+  const shown = products.filter(p => !q || [p.name, p.merchants, p.printed]
+    .some(v => v && String(v).toLowerCase().includes(q)));
+  document.getElementById('product-list').innerHTML =
+    `<div class="product-opt new" data-new>+ New product named \u201c${esc(typed || dialogItem.description)}\u201d</div>` +
+    shown.map(p => {
+      const current = p.id === dialogItem.product_id;
+      const meta = [p.merchants, p.times_bought ? `bought ${p.times_bought}\u00d7` : '',
+                    p.quantity != null ? fmtQty(p.quantity, p.unit) : '', p.last_price != null ? `last ${money(p.last_price)}` : '']
+        .filter(Boolean).join(' \u00b7 ');
+      return `<div class="product-opt${current ? ' current' : ''}" data-pid="${p.id}">
+        <div>${esc(p.name)}${current ? ' <span class="muted">(current)</span>' : ''}</div>
+        <div class="meta">${esc(meta)}</div>
+        ${p.printed ? `<div class="meta printed">${esc(p.printed)}</div>` : ''}</div>`;
+    }).join('');
+}
+async function openProductDialog(itemId) {
+  dialogItem = receipt.items.find(x => String(x.id) === String(itemId));
+  if (!dialogItem) { showNetworkError('That line isn\u2019t loaded yet; reload the page.'); return; }
+  const printed = [dialogItem.raw_text, dialogItem.item_code].filter(Boolean).join(' \u00b7 ');
+  document.getElementById('product-dialog-line').textContent =
+    (printed ? `Printed as ${printed}. ` : '') + `Currently: ${dialogItem.product_name || dialogItem.description}.` +
+    (dialogItem.name_key ? ' Every line printed this way moves too, including on future receipts.' : '');
+  document.getElementById('product-search').value = '';
+  document.getElementById('product-status').textContent = '';
+  document.getElementById('product-list').innerHTML = '<div class="product-opt muted">Loading\u2026</div>';
+  dialog.showModal();
+  document.getElementById('product-search').focus();
+  try {
+    products = (await fetchJSON('/api/products')).products;
+    renderProducts();
+  } catch (e) {
+    document.getElementById('product-list').innerHTML = `<div class="product-opt err">Could not load products: ${esc(e.message)}</div>`;
+  }
+}
+document.getElementById('product-search').addEventListener('input', () => { if (products) renderProducts(); });
+document.getElementById('product-cancel').addEventListener('click', () => dialog.close());
+document.getElementById('product-list').addEventListener('click', async e => {
+  const opt = e.target.closest('.product-opt[data-pid], .product-opt[data-new]');
+  if (!opt || opt.classList.contains('current')) return;
+  const body = opt.hasAttribute('data-new')
+    ? {new: true, name: document.getElementById('product-search').value.trim() || dialogItem.description}
+    : {product_id: +opt.dataset.pid};
+  const status = document.getElementById('product-status');
+  status.className = 'muted'; status.textContent = 'Saving\u2026';
+  try {
+    await sendJSON(`/api/receipts/items/${dialogItem.id}/product`, 'POST', body);
+    dialog.close();
+    await load();
+  } catch (e2) {
+    status.className = 'err'; status.textContent = 'Could not change product: ' + e2.message;
+  }
+});
+
 document.getElementById('add-item').addEventListener('click', () => {
   if (itemsEl.querySelector('td[colspan]')) itemsEl.innerHTML = '';
   itemsEl.insertAdjacentHTML('beforeend', itemRow({id: null, description: '', quantity: null, total_price: 0, category: 'Other'}));
@@ -12628,7 +12841,7 @@ _RECEIPT_NEW_PAGE = """\
 </head>
 <body>
   <h1>Add Receipt by Hand</h1>
-  <div class="nav"><a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Item names</a></div>
+  <div class="nav"><a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Products</a></div>
   <p class="muted" style="margin-bottom:1rem">For a purchase that didn&rsquo;t come with a receipt. Pick the store, then add
   items you&rsquo;ve bought there before. Prices start at what you paid last time.</p>
   <div class="layout">
@@ -12867,7 +13080,6 @@ def api_receipt_manual():
         if conn.execute("SELECT 1 FROM receipts WHERE merchant=? AND status='done' AND kind='receipt' LIMIT 1",
                         (merchant,)).fetchone() is None:
             return jsonify({'error': f'{merchant!r} is not a store in the system'}), 400
-        names = dict(conn.execute("SELECT name_key, name FROM receipt_known_items WHERE name IS NOT NULL"))
         for n, line in enumerate(lines, 1):
             key = line.get('name_key')
             known = conn.execute(
@@ -12877,12 +13089,13 @@ def api_receipt_manual():
             if known is None:
                 return jsonify({'error': f'Item {n} is not a known item'}), 400
             fields, err = _receipt_item_fields(
-                {'description': names.get(key) or known['description'], 'category': known['category'], **line},
-                partial=False)
+                {'description': known['description'], 'category': known['category'], **line}, partial=False)
             if err:
                 return jsonify({'error': f'Item {n}: {err}'}), 400
-            rows.append((fields, known, key))
-        subtotal = round(sum(f['total_price'] for f, _, _ in rows), 2)
+            pid = match_product(conn, key, fields['description'])
+            fields['description'] = conn.execute("SELECT name FROM products WHERE id=?", (pid,)).fetchone()[0]
+            rows.append((fields, known, key, pid))
+        subtotal = round(sum(f['total_price'] for f, _, _, _ in rows), 2)
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cur = conn.execute(
             "INSERT INTO receipts (uploaded_at, status, processed_at, image_path, media_type, merchant, "
@@ -12892,18 +13105,18 @@ def api_receipt_manual():
         rid = cur.lastrowid
         conn.executemany(
             "INSERT INTO receipt_items (receipt_id, position, description, quantity, unit, total_price, category, "
-            "raw_text, item_code, name_key) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "raw_text, item_code, name_key, product_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             [(rid, i, f['description'], f.get('quantity'), f.get('unit'), f['total_price'], f['category'],
-              k['raw_text'], k['item_code'], key) for i, (f, k, key) in enumerate(rows)],
+              k['raw_text'], k['item_code'], key, pid) for i, (f, k, key, pid) in enumerate(rows)],
         )
     return jsonify({'ok': True, 'id': rid}), 201
 
 
 @app.get("/api/receipts/known-items")
 def api_receipt_known_items():
-    """Every distinct item read off a receipt (grouped by name_key), with its
-    human-friendly name if one has been set. ?store=<merchant> limits it to
-    items bought at that store's chain (e.g. any Walmart)."""
+    """Every distinct printed line read off a receipt (grouped by name_key),
+    with the product it points to (name, quantity). ?store=<merchant> limits
+    it to lines bought at that store's chain (e.g. any Walmart)."""
     from smart_home import receipts as _receipts
     day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
     store_filter, params = "", []
@@ -12919,7 +13132,7 @@ def api_receipt_known_items():
                             f"ON r3.id = i3.receipt_id WHERE r3.merchant IN ({','.join('?' * len(merchants))}))")
             params = merchants
         rows = conn.execute(f"""
-            SELECT i.name_key, n.name, n.quantity, n.unit, COUNT(*) AS times_bought,
+            SELECT i.name_key, n.id AS product_id, n.name, n.quantity, n.unit, COUNT(*) AS times_bought,
                    MAX({day}) AS last_bought,
                    (SELECT i2.raw_text FROM receipt_items i2 WHERE i2.name_key = i.name_key
                     ORDER BY i2.id DESC LIMIT 1) AS raw_text,
@@ -12934,47 +13147,13 @@ def api_receipt_known_items():
                    GROUP_CONCAT(DISTINCT r.merchant) AS merchants
             FROM receipt_items i
             JOIN receipts r ON r.id = i.receipt_id
-            LEFT JOIN receipt_known_items n ON n.name_key = i.name_key
+            LEFT JOIN product_keys k ON k.name_key = i.name_key
+            LEFT JOIN products n ON n.id = k.product_id
             WHERE i.name_key IS NOT NULL {store_filter}
             GROUP BY i.name_key
-            ORDER BY (n.name IS NOT NULL), last_bought DESC, raw_text
+            ORDER BY last_bought DESC, raw_text
         """, params).fetchall()
     return jsonify({'items': [dict(r) for r in rows]})
-
-
-@app.patch("/api/receipts/known-items")
-def api_receipt_known_item_update():
-    """Update an item's settings by name_key: `name` (empty clears it) and/or
-    `quantity` + `unit` (null clears it). Setting a name also renames every
-    existing receipt line with that key."""
-    data = request.get_json(silent=True) or {}
-    key = data.get('name_key')
-    if not isinstance(key, str) or not key:
-        return jsonify({'error': 'name_key is required'}), 400
-    fields = {}
-    if 'name' in data:
-        fields['name'] = (data.get('name') or '').strip() or None
-    if 'quantity' in data or 'unit' in data:
-        qty, err = _quantity_fields(data)
-        if err:
-            return jsonify({'error': err}), 400
-        fields.update(qty)
-    if not fields:
-        return jsonify({'error': 'Nothing to update'}), 400
-    with _conn() as conn:
-        if conn.execute("SELECT 1 FROM receipt_items WHERE name_key=? LIMIT 1", (key,)).fetchone() is None:
-            return jsonify({'error': 'No receipt item has that key'}), 404
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        conn.execute("INSERT OR IGNORE INTO receipt_known_items (name_key, updated_at) VALUES (?,?)", (key, now))
-        sets = ', '.join(f'{k}=?' for k in fields)
-        conn.execute(f"UPDATE receipt_known_items SET {sets}, updated_at=? WHERE name_key=?",
-                     (*fields.values(), now, key))
-        renamed = 0
-        if fields.get('name'):
-            # Clearing a name leaves existing lines' descriptions as they are
-            renamed = conn.execute("UPDATE receipt_items SET description=? WHERE name_key=?",
-                                   (fields['name'], key)).rowcount
-    return jsonify({'ok': True, 'renamed': renamed})
 
 
 _RECEIPT_ITEMS_PAGE = """\
@@ -12983,7 +13162,7 @@ _RECEIPT_ITEMS_PAGE = """\
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Receipt Items &mdash; Smart Home</title>
+  <title>Products &mdash; Smart Home</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
@@ -13020,25 +13199,24 @@ _RECEIPT_ITEMS_PAGE = """\
   </style>
 </head>
 <body>
-  <h1>Receipt Items</h1>
+  <h1>Products</h1>
   <div class="nav"><a href="/cost-of-living">&larr; Cost of Living</a><a href="/receipts">&larr; Receipts</a></div>
-  <p class="intro">Every item that has appeared on a scanned receipt. Give an item a friendly name and it replaces
-  the description on all of its receipts. The text and item number as printed are kept, so the next receipt with the
-  same item gets the name automatically. Items with an item number (Walmart prints one per line) are matched by that
-  number; others by their printed text. The default quantity is the amount in one purchase (e.g. a 21.7&nbsp;oz pizza);
-  a quantity on a receipt line, such as a weight printed on the receipt, overrides it for that line.</p>
+  <p class="intro">Every line on a receipt points to a product. Lines printed differently, even at different stores,
+  can point to the same product: use <b>Change product</b> on a receipt to pick which one. A new receipt line is matched
+  to the product its printed text or item number was linked to before, else to a product with the same name, else a
+  new product is made. Renaming a product renames it on every receipt. The default quantity is the amount in one
+  purchase (e.g. a 21.7&nbsp;oz pizza); a quantity on a receipt line, such as a printed weight, overrides it.</p>
   <div class="toolbar">
-    <input type="search" id="filter" placeholder="Filter by printed text, number, name or store">
-    <label><input type="checkbox" id="unnamed-only"> Unnamed only</label>
+    <input type="search" id="filter" placeholder="Filter by name, printed text or store">
     <span class="count" id="count"></span>
   </div>
   <div class="wrap">
     <table>
       <thead><tr>
-        <th>As printed</th><th>Item #</th><th>Store</th><th class="num">Bought</th><th class="num">Last price</th>
-        <th>Friendly name</th><th>Default quantity</th><th></th><th></th>
+        <th>Product</th><th>Printed as</th><th>Store</th><th class="num">Bought</th><th class="num">Last price</th>
+        <th>Default quantity</th><th></th><th></th>
       </tr></thead>
-      <tbody id="rows"><tr><td colspan="9" class="empty">Loading&hellip;</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="8" class="empty">Loading&hellip;</td></tr></tbody>
     </table>
   </div>
 <script>
@@ -13071,33 +13249,24 @@ let items = [];
 
 function render() {
   const q = document.getElementById('filter').value.trim().toLowerCase();
-  const unnamedOnly = document.getElementById('unnamed-only').checked;
-  const shown = items.filter(it => {
-    if (unnamedOnly && it.name) return false;
-    if (!q) return true;
-    return [it.raw_text, it.item_code, it.name, it.description, it.merchants]
-      .some(v => v && String(v).toLowerCase().includes(q));
-  });
-  const named = items.filter(it => it.name).length;
-  document.getElementById('count').textContent =
-    `${shown.length} shown \u00b7 ${named} of ${items.length} named`;
+  const shown = items.filter(it => !q || [it.name, it.printed, it.merchants]
+    .some(v => v && String(v).toLowerCase().includes(q)));
+  document.getElementById('count').textContent = `${shown.length} of ${items.length} products`;
   const tbody = document.getElementById('rows');
   if (!shown.length) {
-    tbody.innerHTML = `<tr><td colspan="9" class="empty">${items.length ? 'No items match.' : 'No receipt items yet. Scan a receipt in the app.'}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="empty">${items.length ? 'No products match.' : 'No products yet. Scan a receipt in the app.'}</td></tr>`;
     return;
   }
   tbody.innerHTML = shown.map(it => {
     const idx = items.indexOf(it);
     return `<tr data-idx="${idx}">
-      <td><div class="raw">${esc(it.raw_text) || '<span class="muted">(none)</span>'}</div>
-          ${!it.name && it.description ? `<div class="muted">read as: ${esc(it.description)}</div>` : ''}</td>
-      <td class="code">${esc(it.item_code) || '&mdash;'}</td>
+      <td><div class="name-cell">
+        <input type="text" data-f="name" value="${esc(it.name || '')}">
+      </div></td>
+      <td>${it.printed ? it.printed.split(' | ').map(t => `<div class="raw">${esc(t)}</div>`).join('') : '<span class="muted">(entered by hand)</span>'}</td>
       <td class="muted">${esc(it.merchants) || '&mdash;'}</td>
       <td class="num">${it.times_bought}&times;<div class="muted">${esc(it.last_bought)}</div></td>
-      <td class="num">$${Number(it.last_price).toFixed(2)}</td>
-      <td><div class="name-cell">
-        <input type="text" data-f="name" value="${esc(it.name || '')}" placeholder="${esc(it.description || '')}">
-      </div></td>
+      <td class="num">${it.last_price == null ? '&mdash;' : '$' + Number(it.last_price).toFixed(2)}</td>
       <td><div class="qty-cell">
         <input type="text" data-f="quantity" inputmode="decimal" value="${it.quantity ?? ''}" placeholder="none">
         <select data-f="unit">${UNITS.map(u => `<option${u === (it.unit || 'oz') ? ' selected' : ''}>${u}</option>`).join('')}</select>
@@ -13147,26 +13316,24 @@ async function save(tr) {
   status.className = 'status';
   status.textContent = 'Saving\u2026';
   try {
-    const res = await fetchJSON('/api/receipts/known-items', {
+    if ('name' in body && !body.name) throw new Error('A product needs a name');
+    const res = await fetchJSON(`/api/products/${it.id}`, {
       method: 'PATCH',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name_key: it.name_key, ...body}),
+      body: JSON.stringify(body),
     });
-    if ('name' in body) {
-      it.name = body.name || null;
-      if (it.name) it.description = it.name;
-    }
+    if ('name' in body) it.name = body.name;
     if ('quantity' in body) { it.quantity = body.quantity; it.unit = body.unit; }
     tr.querySelector('[data-f="name"]').value = it.name || '';
     tr.querySelector('[data-f="quantity"]').value = it.quantity ?? '';
     markDirty(tr);
     status.className = 'status ok';
-    status.textContent = res.renamed ? `Saved (${res.renamed} renamed)` : 'Saved';
+    status.textContent = res.renamed ? `Saved (${res.renamed} lines renamed)` : 'Saved';
   } catch (e) {
     markDirty(tr);
     status.className = 'status err';
     status.textContent = 'Failed';
-    showNetworkError(`Could not save item: ${e.message}`);
+    showNetworkError(`Could not save product: ${e.message}`);
   }
 }
 
@@ -13180,14 +13347,13 @@ rowsEl.addEventListener('click', e => {
   if (e.target.matches('[data-save]')) save(e.target.closest('tr'));
 });
 document.getElementById('filter').addEventListener('input', render);
-document.getElementById('unnamed-only').addEventListener('change', render);
 
-fetchJSON('/api/receipts/known-items')
-  .then(data => { items = data.items; clearNetworkError(); render(); })
+fetchJSON('/api/products')
+  .then(data => { items = data.products; clearNetworkError(); render(); })
   .catch(e => {
-    showNetworkError(`Could not load receipt items: ${e.message}`);
+    showNetworkError(`Could not load products: ${e.message}`);
     document.getElementById('rows').innerHTML =
-      `<tr><td colspan="9" class="empty">Could not load receipt items: ${esc(e.message)}</td></tr>`;
+      `<tr><td colspan="8" class="empty">Could not load products: ${esc(e.message)}</td></tr>`;
   });
 </script>
 </body>
@@ -14271,7 +14437,7 @@ const SECTIONS = [
   {key: 'receipts', title: 'Receipts', href: '/receipts', api: '/api/receipts/summary', color: '#2e7dd4',
    desc: 'Everything you buy, read from receipt photos or entered by hand.', nameKey: 'category',
    count: s => `${s.n_receipts} receipt${s.n_receipts === 1 ? '' : 's'}`,
-   links: [['/receipts', 'Receipts &amp; spending'], ['/receipts/new', '+ Add by hand'], ['/receipts/items', 'Item names']]},
+   links: [['/receipts', 'Receipts &amp; spending'], ['/receipts/new', '+ Add by hand'], ['/receipts/items', 'Products']]},
   {key: 'utilities', title: 'Utilities', href: '/utilities', api: '/api/utilities/summary', color: '#e07820',
    desc: 'Recurring costs for services: water, electricity, propane, internet\\u2026', nameKey: 'utility',
    count: s => `${s.n_bills} bill${s.n_bills === 1 ? '' : 's'}`,
