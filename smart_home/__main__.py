@@ -23,6 +23,7 @@ from smart_home import smart_plug as _smart_plug
 from smart_home import pool as _pool
 from smart_home import relay as _relay_mod
 from smart_home import gas as _gas
+from smart_home import reboot as _reboot
 from smart_home.battery import dump_gatt
 from smart_home.db import open_db, insert_reading, bulk_insert, insert_no_reading, insert_plug_reading, insert_pool_reading
 
@@ -1874,6 +1875,7 @@ def monitor(duration, verbose, db, no_db):
     conn = None if no_db else open_db(db)
     if conn:
         click.echo(f"Logging to {db}")
+    _reboot.check_for_reboot(None if no_db else db)
     if _iphone_devices_cache:
         click.echo(f"Tracking iPhone presence for: {', '.join(_iphone_devices_cache.keys())}")
 

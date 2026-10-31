@@ -62,34 +62,38 @@ def _make_jwt(key_file: str, key_id: str, team_id: str) -> str:
     return jwt.encode(payload, private_key, algorithm="ES256", headers={"kid": key_id})
 
 
-def send_notification(title: str, body: str) -> None:
-    """Send an APNs push notification to all registered devices."""
+def send_notification(title: str, body: str) -> bool:
+    """Send an APNs push notification to all registered devices.
+
+    Returns True if at least one device accepted it.
+    """
     creds = load_credentials()
     tokens = load_tokens()
     if not creds or not tokens:
         print(f"[push] skipped '{title}': no creds={bool(creds)} tokens={len(tokens)}")
-        return
+        return False
     required = {"key_file", "key_id", "team_id", "bundle_id"}
     if not required.issubset(creds):
         print(f"[push] skipped '{title}': missing keys {required - creds.keys()}")
-        return
+        return False
 
     try:
         import httpx
         from smart_home import delegated
     except ImportError:
         print("[push] httpx not installed. Run: pip install 'httpx[http2]'")
-        return
+        return False
 
     try:
         bearer = _make_jwt(creds["key_file"], creds["key_id"], creds["team_id"])
     except Exception as e:
         print(f"[push] JWT error: {e}")
-        return
+        return False
 
     host = APNS_DEV_HOST if creds.get("sandbox") else APNS_PROD_HOST
     print(f"[push] sending '{title}' via {'sandbox' if creds.get('sandbox') else 'production'} to {len(tokens)} device(s)")
     dead: list[str] = []
+    delivered = False
 
     with httpx.Client(http2=True) as client:
         for token in tokens:
@@ -107,6 +111,7 @@ def send_notification(title: str, body: str) -> None:
                 )
                 if resp.status_code == 200:
                     print(f"[push] OK: '{title}'")
+                    delivered = True
                 elif resp.status_code == 410:    # token expired / unregistered
                     print(f"[push] token expired, removing")
                     dead.append(token)
@@ -117,3 +122,4 @@ def send_notification(title: str, body: str) -> None:
 
     if dead:
         save_tokens([t for t in tokens if t not in dead])
+    return delivered
