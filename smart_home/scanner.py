@@ -58,13 +58,18 @@ async def scan(
     on_device=None,
     extra_tasks: list | None = None,
     scanner_ref: list | None = None,
+    on_status=None,
 ):
     """Scan all BLE devices. For every device seen, on_device(device, adv) is called.
     For supported temperature sensors, callback(Reading) is also called.
     If duration is None, scan indefinitely.
-    extra_tasks is a list of coroutines to run concurrently with the scanner.
-    If scanner_ref is a list, the BleakScanner instance will be appended to it so
-    callers can call scanner.stop()/scanner.start() to pause scanning (e.g. for GATT).
+    extra_tasks is a list of coroutines to run concurrently with the scanner; they
+    start right away and keep running if the scanner can't start.
+    If scanner_ref is a list, it holds the running BleakScanner (empty while it
+    isn't running) so callers can call scanner.stop()/scanner.start() to pause
+    scanning (e.g. for GATT).
+    on_status(error) is called with None when the scanner starts, or with the
+    reason each time it fails to start.
     """
     def detection_callback(device: BLEDevice, adv: AdvertisementData):
         if on_device:
@@ -105,37 +110,41 @@ async def scan(
             elif verbose:
                 print(f"  [decode failed — could not parse PVVX advertisement]")
 
-    async def _run():
+    async def _scan_forever():
         # BlueZ can hold a stale scan registration for several seconds after a
-        # crash/restart. Retry indefinitely with a fixed wait until it clears.
+        # crash/restart; that clears in 15s. Any other failure (no adapter,
+        # bluetoothd not running) is retried every minute, so the scanner
+        # attaches by itself once the adapter is back.
         attempt = 0
         while True:
             try:
                 scanner = BleakScanner(detection_callback=detection_callback)
-                if scanner_ref is not None:
-                    if attempt == 0:
-                        scanner_ref.append(scanner)
-                    else:
-                        scanner_ref[0] = scanner
                 async with scanner:
-                    coros = list(extra_tasks or [])
-                    if duration is not None:
-                        coros.append(asyncio.sleep(duration))
-                        if coros:
-                            await asyncio.gather(*coros)
-                    else:
-                        async def _forever():
-                            while True:
-                                await asyncio.sleep(1)
-                        coros.append(_forever())
-                        await asyncio.gather(*coros)
-                return  # clean exit
+                    # Only a started scanner is handed out: other tasks stop/start it
+                    if scanner_ref is not None:
+                        scanner_ref[:] = [scanner]
+                    attempt = 0
+                    if on_status:
+                        on_status(None)
+                    await asyncio.get_running_loop().create_future()  # until cancelled
             except Exception as e:
+                if scanner_ref is not None:
+                    scanner_ref.clear()
                 if "InProgress" in str(e) or "Operation already in progress" in str(e):
                     attempt += 1
                     print(f"BLE scanner busy (BlueZ stale registration), retrying in 15s... (attempt {attempt})")
                     await asyncio.sleep(15)
-                else:
-                    raise
+                    continue
+                msg = f"{type(e).__name__}: {e}"
+                print(f"BLE scanner couldn't start ({msg}); retrying in 60s", flush=True)
+                if on_status:
+                    on_status(msg)
+                await asyncio.sleep(60)
 
-    await _run()
+    # The other tasks run whether or not Bluetooth works
+    scan_task = asyncio.ensure_future(_scan_forever())
+    try:
+        until = asyncio.sleep(duration) if duration is not None else asyncio.get_running_loop().create_future()
+        await asyncio.gather(*(extra_tasks or []), until)
+    finally:
+        scan_task.cancel()

@@ -3,6 +3,7 @@ import asyncio
 import csv
 import datetime
 import io
+import json
 import shutil
 import zipfile
 import os
@@ -2134,6 +2135,22 @@ def monitor(duration, verbose, db, no_db):
     # a USB reset of the Bluetooth dongle killed advertisement delivery with no
     # exception raised, silently taking all temperature sensors offline).
     last_ble_activity = {"ts": datetime.datetime.now()}
+    # Whether the scanner is running; the watchdog only counts silence while it is
+    ble_scanning = {"on": False, "since": None}
+
+    def on_ble_status(error):
+        """Record whether the BLE scanner is running, for the dashboard's banner.
+        ts is when it started, or when it first failed to (not the latest retry)."""
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if error is None or ble_scanning["on"] or not ble_scanning["since"]:
+            ble_scanning["since"] = now
+        ble_scanning["on"] = error is None
+        if error is None:
+            last_ble_activity["ts"] = datetime.datetime.now()
+        if conn:
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('ble_scanner_status', ?)",
+                         (json.dumps({"ok": error is None, "error": error, "ts": ble_scanning["since"]}),))
+            conn.commit()
 
     def on_reading(reading):
         db_label = label_map.get(reading.address)
@@ -2307,6 +2324,8 @@ def monitor(duration, verbose, db, no_db):
         """
         while True:
             await asyncio.sleep(60)
+            if not ble_scanning["on"]:
+                continue  # no adapter: the scanner retries by itself, restarting won't help
             stale_for = datetime.datetime.now() - last_ble_activity["ts"]
             if stale_for > BLE_STALL_THRESHOLD:
                 ts = datetime.datetime.now().strftime("%H:%M:%S")
@@ -2826,6 +2845,7 @@ def monitor(duration, verbose, db, no_db):
             on_device=on_device,
             extra_tasks=extra,
             scanner_ref=scanner_ref,
+            on_status=on_ble_status,
         ))
     except KeyboardInterrupt:
         click.echo(f"\nDone. Saw {len(seen)} device(s).")

@@ -5268,6 +5268,7 @@ def index():
 </head>
 <body>
   <div id="error-bar"></div>
+  <div id="ble-bar" style="display:none;background:#fde8e8;color:#c0392b;border-radius:8px;padding:.6rem 1rem;margin-bottom:1rem;font-size:.85rem;font-weight:500"></div>
   <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a>&nbsp;<a href="/devices" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Devices &#9881;</a>&nbsp;<a href="/zones" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Zones</a>&nbsp;<a href="/map" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Map</a>&nbsp;<a href="/gas" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Gas</a></h1>
 
   <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem">
@@ -5339,6 +5340,17 @@ function showError(section) {
   const bar = document.getElementById("error-bar");
   bar.style.display = "";
   bar.textContent = "Failed to load: " + [..._errors].join(", ") + ". Check network connection.";
+}
+async function loadBleStatus() {
+  const bar = document.getElementById("ble-bar");
+  try {
+    const s = await fetchJSON("/api/ble-status");
+    bar.style.display = s.ok === false ? "" : "none";
+    if (s.ok === false) bar.textContent = `\u26a0 Bluetooth isn\u2019t working since ${s.ts}, so no sensor readings are coming in. `
+      + `The monitor retries every minute. (${s.error})`;
+  } catch (e) {
+    showError("Bluetooth status");
+  }
 }
 async function loadCurrent() {
   try {
@@ -5592,6 +5604,8 @@ async function loadGpu() {
   }).join('');
 }
 loadCurrent();
+loadBleStatus();
+setInterval(loadBleStatus, 60000);
 loadEvents();
 loadGarage();
 loadPool();
@@ -14247,6 +14261,15 @@ load();
 @app.get("/cost-of-living")
 def cost_of_living_page():
     return Response(_COST_OF_LIVING_PAGE, mimetype="text/html")
+
+
+@app.get("/api/ble-status")
+def api_ble_status():
+    """Whether the monitor's BLE scanner is running ({} if it hasn't said yet)."""
+    import json
+    with _conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key='ble_scanner_status'").fetchone()
+    return jsonify(json.loads(row[0]) if row else {})
 
 
 # ---- Email archive (smart_home/email_archive.py) ------------------------------
