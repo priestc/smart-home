@@ -43,9 +43,11 @@ import httpx
 from smart_home import gmail
 
 SYNC_INTERVAL = datetime.timedelta(minutes=15)
-# Messages fetched at once. Gmail allows 250 quota units a second per user and
-# a raw message costs 5, so this stays well under it.
+# Messages fetched at once, and Gmail calls allowed a second between them. A
+# raw message costs 5 quota units and the project's per-user quota is counted
+# per minute, so going faster only gets requests refused.
 WORKERS = 8
+MAX_PER_SECOND = 20
 MAX_ATTEMPTS = 5
 # Longest body text kept in the search index
 MAX_BODY = 100_000
@@ -206,6 +208,26 @@ def attachment(msg: Message, index: int) -> tuple[str, str, bytes] | None:
 
 # ---- Syncing -------------------------------------------------------------------
 
+class _Pacer:
+    """Spaces out the workers' Gmail calls, and pauses all of them when Gmail
+    says the quota is used up."""
+    def __init__(self, per_second: float):
+        self.gap = 1 / per_second
+        self.next = time.monotonic()
+        self.lock = threading.Lock()
+
+    def wait(self) -> None:
+        with self.lock:
+            now = time.monotonic()
+            t = max(now, self.next)
+            self.next = t + self.gap
+        time.sleep(t - now)
+
+    def pause(self, seconds: float) -> None:
+        with self.lock:
+            self.next = max(self.next, time.monotonic() + seconds)
+
+
 class _Sync:
     def __init__(self, cfg: dict, client: httpx.Client, conn: sqlite3.Connection, root: str,
                  run_id: int, progress):
@@ -213,28 +235,32 @@ class _Sync:
         self.run_id, self.progress = run_id, progress
         self.n_new = self.n_failed = 0
         self.labels: dict[str, str] = {}
+        self.pacer = _Pacer(MAX_PER_SECOND)
 
     def get(self, path: str, params: dict | None = None) -> dict:
         """A Gmail API call, retried with backoff when Gmail is busy or unreachable."""
-        for attempt in range(6):
-            last = attempt == 5
+        for attempt in range(8):
+            last = attempt == 7
+            self.pacer.wait()
             try:
                 resp = self.client.get(f"{gmail.API_BASE}{path}", params=params,
                                        headers={"Authorization": f"Bearer {gmail._access_token(self.cfg)}"})
             except httpx.HTTPError as e:
                 if last:
                     raise ArchiveError(f"Could not reach Gmail: {e}")
-                time.sleep(2 ** attempt)
+                time.sleep(min(60, 2 ** attempt))
                 continue
             if resp.status_code == 200:
                 return resp.json()
             busy = resp.status_code in (429, 500, 502, 503, 504) or (
-                resp.status_code == 403 and "rateLimitExceeded" in resp.text)
+                resp.status_code == 403 and ("RateLimitExceeded" in resp.text or "rateLimitExceeded" in resp.text
+                                             or "Quota exceeded" in resp.text))
             if resp.status_code == 401 and attempt == 0:
                 gmail._access["token"] = None  # expired early; get a new one
                 continue
             if busy and not last:
-                time.sleep(2 ** attempt)
+                # The quota is per minute, so wait long enough for it to come back
+                self.pacer.pause(min(60, 5 * 2 ** attempt))
                 continue
             try:
                 msg = resp.json()["error"]["message"]
