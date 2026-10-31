@@ -5230,6 +5230,14 @@ def index():
     .gpu-card .gpu-t { font-size: 1.6rem; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
     .gpu-card .gpu-tl { font-size: .7rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-top: .2rem; }
     .gpu-card .gpu-stats { font-size: .85rem; color: #1a2535; font-weight: 500; }
+    .disk-card { min-width: 280px; }
+    .disk-card .disk { margin-top: .6rem; }
+    .disk-card .disk-head { display: flex; justify-content: space-between; gap: 1rem; font-size: .85rem; font-weight: 600; }
+    .disk-card .disk-pct { font-variant-numeric: tabular-nums; }
+    .disk-card .disk-bar { height: 10px; background: #e3eaf1; border-radius: 5px; overflow: hidden; margin: .3rem 0 .2rem; }
+    .disk-card .disk-fill { height: 100%; border-radius: 5px; }
+    .disk-card .disk-sub { font-size: .72rem; color: #7a90a8; font-variant-numeric: tabular-nums; }
+    .disk-card .disk.stale { opacity: .55; }
     .sun-time { font-size: 2.4rem; font-weight: 700; margin: .2rem 0 .1rem; line-height: 1; font-variant-numeric: tabular-nums; }
     .section-title { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .75rem; }
     .events-list { display: flex; flex-direction: column; gap: .4rem; margin-bottom: 2rem; }
@@ -5277,6 +5285,7 @@ def index():
     <div class="garage-cards" id="garage-cards" style="margin-bottom:0"></div>
     <div id="gas-widget"></div>
     <div id="gpu-widget" style="display:flex;gap:1rem;flex-wrap:wrap"></div>
+    <div id="disk-widget"></div>
   </div>
   <div class="pool-cards"    id="pool-cards"    style="display:none"></div>
 
@@ -5603,7 +5612,42 @@ async function loadGpu() {
       <div class="gpu-stats"${idle ? ' style="color:#aabbc8"' : ''}>${stats}</div>${ts}</div>`;
   }).join('');
 }
+async function loadDisks() {
+  const el = document.getElementById('disk-widget');
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const fmtBytes = b => b >= 1e12 ? (b / 1e12).toFixed(b >= 1e13 ? 1 : 2) + ' TB' : Math.round(b / 1e9) + ' GB';
+  let r, data;
+  try {
+    r = await fetch('/api/disks');
+    data = await r.json();
+  } catch (e) {
+    showError('drive space');
+    return;
+  }
+  if (!r.ok) {
+    el.innerHTML = `<div class="card disk-card"><div class="label">Storage</div>
+      <div class="ts" style="font-size:.85rem;color:#c0392b">${esc(data.error || 'HTTP ' + r.status)}</div></div>`;
+    return;
+  }
+  const rows = data.drives.map(d => {
+    if (d.error) {
+      return `<div class="disk"><div class="disk-head"><span>${esc(d.label)}</span></div>
+        <div class="disk-sub" style="color:#c0392b">&#9888; ${esc(d.error)}</div></div>`;
+    }
+    // Percent of the space actually usable, as df reports it (ext4 reserves ~5% for root)
+    const pct = d.used / (d.used + d.free) * 100;
+    const color = pct >= 90 ? '#c0392b' : pct >= 75 ? '#e07820' : '#2a9d6e';
+    const stale = d.stale ? ` &middot; <span style="color:#c0392b">reported ${timeSince(Date.now() - d.age_s * 1000)}</span>` : '';
+    return `<div class="disk${d.stale ? ' stale' : ''}" title="${esc(d.mount || d.label)}">
+      <div class="disk-head"><span>${esc(d.label)}</span><span class="disk-pct" style="color:${color}">${Math.round(pct)}%</span></div>
+      <div class="disk-bar"><div class="disk-fill" style="width:${pct.toFixed(1)}%;background:${color}"></div></div>
+      <div class="disk-sub">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}${stale}</div></div>`;
+  }).join('');
+  el.innerHTML = `<div class="card disk-card"><div class="label">Storage</div>${rows}</div>`;
+}
 loadCurrent();
+loadDisks();
+setInterval(loadDisks, 60000);
 loadBleStatus();
 setInterval(loadBleStatus, 60000);
 loadEvents();
@@ -11095,6 +11139,64 @@ def api_gpu():
     if not gpus:
         return jsonify({'error': 'No GPU with hwmon sensors found'}), 404
     return jsonify({'gpus': gpus})
+
+
+# Drives on this server shown in the dashboard Storage widget, as (label, mount point).
+_LOCAL_DRIVES = [("tank2 SSD", "/"), ("tank2 RAID", "/mnt/md0")]
+# Other machines push their own drive usage here (macos/report-disk.sh); a report
+# older than this is shown as stale rather than current.
+_DISK_REPORT_STALE_S = 15 * 60
+
+
+@app.post("/api/disks/report")
+def api_disks_report():
+    """Receive a drive usage report (label, total, free in bytes) from another machine."""
+    import json
+    data = request.get_json(silent=True) or request.form
+    label = (data.get("label") or "").strip()
+    try:
+        total, free = int(data.get("total")), int(data.get("free"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "total and free must be integers (bytes)"}), 400
+    if not label or total <= 0 or not 0 <= free <= total:
+        return jsonify({"error": "need a label, total > 0 and 0 <= free <= total"}), 400
+    report = {"label": label, "total": total, "used": total - free, "free": free,
+              "ts": datetime.datetime.now().isoformat(timespec="seconds")}
+    with _conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                     (f"disk_report:{label}", json.dumps(report)))
+    return "", 204
+
+
+@app.get("/api/disks")
+def api_disks():
+    """Used/free space for this server's drives plus the latest report from each other machine."""
+    import json
+    import os
+    import shutil
+
+    drives = []
+    for label, mount in _LOCAL_DRIVES:
+        # An unmounted array leaves an empty directory on the root drive, which would
+        # otherwise silently report the root drive's numbers.
+        if mount != "/" and not os.path.ismount(mount):
+            drives.append({"label": label, "mount": mount, "error": f"{mount} is not mounted"})
+            continue
+        try:
+            u = shutil.disk_usage(mount)
+        except OSError as e:
+            drives.append({"label": label, "mount": mount, "error": f"{mount}: {e.strerror}"})
+            continue
+        drives.append({"label": label, "mount": mount, "total": u.total, "used": u.used, "free": u.free})
+
+    with _conn() as conn:
+        rows = conn.execute("SELECT value FROM settings WHERE key LIKE 'disk_report:%' ORDER BY key").fetchall()
+    now = datetime.datetime.now()
+    for row in rows:
+        r = json.loads(row["value"])
+        age = (now - datetime.datetime.fromisoformat(r["ts"])).total_seconds()
+        drives.insert(0, {**r, "age_s": int(age), "stale": age > _DISK_REPORT_STALE_S})
+    return jsonify({"drives": drives})
 
 
 _GAS_PAGE = r"""<!DOCTYPE html>
