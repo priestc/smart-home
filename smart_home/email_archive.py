@@ -43,11 +43,16 @@ import httpx
 from smart_home import gmail
 
 SYNC_INTERVAL = datetime.timedelta(minutes=15)
-# Messages fetched at once, and Gmail calls allowed a second between them. A
-# raw message costs 5 quota units and the project's per-user quota is counted
-# per minute, so going faster only gets requests refused.
+# Messages fetched at once. The project's Gmail quota is 6,000 units a minute
+# per user, and a raw message costs far more than the documented 5 (about 40
+# going by the rate that gets through), so the calls are paced: START_PER_SECOND
+# at first, slowed on each refusal and sped up while they succeed, between
+# MIN_PER_SECOND and MAX_PER_SECOND. Refused calls seem to count against the
+# quota too, so retrying at full speed keeps it used up.
 WORKERS = 8
-MAX_PER_SECOND = 20
+START_PER_SECOND = 2.0
+MIN_PER_SECOND = 0.2
+MAX_PER_SECOND = 20.0
 MAX_ATTEMPTS = 5
 # Longest body text kept in the search index
 MAX_BODY = 100_000
@@ -209,23 +214,34 @@ def attachment(msg: Message, index: int) -> tuple[str, str, bytes] | None:
 # ---- Syncing -------------------------------------------------------------------
 
 class _Pacer:
-    """Spaces out the workers' Gmail calls, and pauses all of them when Gmail
-    says the quota is used up."""
-    def __init__(self, per_second: float):
-        self.gap = 1 / per_second
+    """Spaces out the workers' Gmail calls at a rate that finds Gmail's quota:
+    a little faster after each call that gets through, and when one is refused,
+    0.7 times as fast with every worker waiting for the next quota minute."""
+    def __init__(self):
+        self.rate = START_PER_SECOND
         self.next = time.monotonic()
+        self.refused_until = 0.0
         self.lock = threading.Lock()
 
     def wait(self) -> None:
         with self.lock:
             now = time.monotonic()
             t = max(now, self.next)
-            self.next = t + self.gap
+            self.next = t + 1 / self.rate
         time.sleep(t - now)
 
-    def pause(self, seconds: float) -> None:
+    def ok(self) -> None:
         with self.lock:
-            self.next = max(self.next, time.monotonic() + seconds)
+            self.rate = min(MAX_PER_SECOND, self.rate + 0.01)
+
+    def refused(self) -> None:
+        with self.lock:
+            now = time.monotonic()
+            if now < self.refused_until:
+                return  # the other workers' calls refused in the same minute
+            self.rate = max(MIN_PER_SECOND, self.rate * 0.7)
+            self.refused_until = now + 61
+            self.next = max(self.next, self.refused_until)
 
 
 class _Sync:
@@ -235,7 +251,7 @@ class _Sync:
         self.run_id, self.progress = run_id, progress
         self.n_new = self.n_failed = 0
         self.labels: dict[str, str] = {}
-        self.pacer = _Pacer(MAX_PER_SECOND)
+        self.pacer = _Pacer()
 
     def get(self, path: str, params: dict | None = None) -> dict:
         """A Gmail API call, retried with backoff when Gmail is busy or unreachable."""
@@ -251,6 +267,7 @@ class _Sync:
                 time.sleep(min(60, 2 ** attempt))
                 continue
             if resp.status_code == 200:
+                self.pacer.ok()
                 return resp.json()
             busy = resp.status_code in (429, 500, 502, 503, 504) or (
                 resp.status_code == 403 and ("RateLimitExceeded" in resp.text or "rateLimitExceeded" in resp.text
@@ -259,8 +276,7 @@ class _Sync:
                 gmail._access["token"] = None  # expired early; get a new one
                 continue
             if busy and not last:
-                # The quota is per minute, so wait long enough for it to come back
-                self.pacer.pause(min(60, 5 * 2 ** attempt))
+                self.pacer.refused()
                 continue
             try:
                 msg = resp.json()["error"]["message"]
