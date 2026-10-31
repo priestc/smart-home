@@ -5293,8 +5293,7 @@ def index():
     <a href="/chart/db-sizes"   class="chart-link"><span class="cl-title">Database Growth</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/camera"            class="chart-link"><span class="cl-title">Cameras</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/garage"            class="chart-link"><span class="cl-title">Garage Door</span><span class="cl-arrow">&#8594;</span></a>
-    <a href="/receipts"          class="chart-link"><span class="cl-title">Receipts &amp; Spending</span><span class="cl-arrow">&#8594;</span></a>
-    <a href="/utilities"         class="chart-link"><span class="cl-title">Utilities</span><span class="cl-arrow">&#8594;</span></a>
+    <a href="/cost-of-living"    class="chart-link"><span class="cl-title">Cost of Living</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/gpu"               class="chart-link"><span class="cl-title">GPU Temperatures</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/water-chemistry"   class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Water Chemistry</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/rssi"              class="chart-link"><span class="cl-title">Bluetooth Signal</span><span class="cl-arrow">&#8594;</span></a>
@@ -12049,7 +12048,7 @@ _RECEIPTS_PAGE = """\\
 </head>
 <body>
   <h1>Receipts</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a><a href="/receipts/items">Item names &rarr;</a><a href="/receipts/new">+ Add receipt by hand</a><a href="/utilities">Utilities &rarr;</a></div>
+  <div class="nav"><a href="/cost-of-living">&larr; Cost of Living</a><a href="/receipts/items">Item names &rarr;</a><a href="/receipts/new">+ Add receipt by hand</a></div>
   <div class="periods" id="periods">
     <button data-months="1" class="active">This month</button>
     <button data-months="3">3 months</button>
@@ -12912,7 +12911,7 @@ _RECEIPT_ITEMS_PAGE = """\
 </head>
 <body>
   <h1>Receipt Items</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a> &nbsp; <a href="/receipts">&larr; Receipts</a></div>
+  <div class="nav"><a href="/cost-of-living">&larr; Cost of Living</a><a href="/receipts">&larr; Receipts</a></div>
   <p class="intro">Every item that has appeared on a scanned receipt. Give an item a friendly name and it replaces
   the description on all of its receipts. The text and item number as printed are kept, so the next receipt with the
   same item gets the name automatically. Items with an item number (Walmart prints one per line) are matched by that
@@ -13134,7 +13133,7 @@ _UTILITIES_PAGE = """\\
 </head>
 <body>
   <h1>Utilities</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a><a href="/receipts">Receipts &amp; Spending</a></div>
+  <div class="nav"><a href="/cost-of-living">&larr; Cost of Living</a></div>
   <div class="periods" id="periods">
     <button data-months="1">This month</button>
     <button data-months="3">3 months</button>
@@ -14111,6 +14110,142 @@ load();
 @app.get("/utilities")
 def utilities_page():
     return Response(_UTILITIES_PAGE, mimetype="text/html")
+
+
+# The hub for everything that costs money to live here. Each section in
+# SECTIONS has its own page and a summary API returning grand_total, rows
+# ({month, amount}) and totals; add a section by adding an entry there.
+_COST_OF_LIVING_PAGE = """\\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cost of Living &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>__COMMON_CSS__
+    .periods { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .periods button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; }
+    .periods button.active { background: #e07820; color: #fff; border-color: #e07820; }
+    .grand { font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .sections { display: grid; grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr)); gap: 1.2rem; align-items: start; }
+    .section h2 a { color: inherit; text-decoration: none; }
+    .section h2 a:hover { color: #2e7dd4; }
+    .section .amount { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .section .desc { margin: .2rem 0 .8rem; }
+    .section table { margin-bottom: .8rem; }
+    .section .links a { color: #2e7dd4; text-decoration: none; font-size: .85rem; margin-right: 1rem; }
+    .section .links a:hover { text-decoration: underline; }
+    .swatch { display: inline-block; width: .7rem; height: .7rem; border-radius: 2px; margin-right: .5rem; vertical-align: middle; }
+  </style>
+</head>
+<body>
+  <h1>Cost of Living</h1>
+  <div class="nav"><a href="/">&larr; Dashboard</a></div>
+  <div class="periods" id="periods">
+    <button data-months="1">This month</button>
+    <button data-months="3">3 months</button>
+    <button data-months="6">6 months</button>
+    <button data-months="12" class="active">12 months</button>
+    <button data-months="120">All</button>
+  </div>
+  <div class="card">
+    <h2>Total cost of living</h2>
+    <div class="grand" id="grand">&hellip;</div>
+    <div class="muted" id="grand-sub"></div>
+    <div id="chart-wrap" style="margin-top:1rem;display:none"><canvas id="chart" height="90"></canvas></div>
+  </div>
+  <div class="sections" id="sections"></div>
+<script>__COMMON_JS__
+const SECTIONS = [
+  {key: 'receipts', title: 'Receipts', href: '/receipts', api: '/api/receipts/summary', color: '#2e7dd4',
+   desc: 'Everything you buy, read from receipt photos or entered by hand.', nameKey: 'category',
+   count: s => `${s.n_receipts} receipt${s.n_receipts === 1 ? '' : 's'}`,
+   links: [['/receipts', 'Receipts &amp; spending'], ['/receipts/new', '+ Add by hand'], ['/receipts/items', 'Item names']]},
+  {key: 'utilities', title: 'Utilities', href: '/utilities', api: '/api/utilities/summary', color: '#e07820',
+   desc: 'Recurring costs for services: water, electricity, propane, internet\\u2026', nameKey: 'utility',
+   count: s => `${s.n_bills} bill${s.n_bills === 1 ? '' : 's'}`,
+   links: [['/utilities', 'Bills &amp; usage']]},
+];
+let months = 12, chart = null;
+
+document.getElementById('sections').innerHTML = SECTIONS.map(sec => `
+  <div class="card section">
+    <h2><span class="swatch" style="background:${sec.color}"></span><a href="${sec.href}">${sec.title} &rarr;</a></h2>
+    <div class="amount" id="amt-${sec.key}">&hellip;</div>
+    <div class="muted desc" id="sub-${sec.key}">${esc(sec.desc)}</div>
+    <table><tbody id="top-${sec.key}"></tbody></table>
+    <div class="links">${sec.links.map(([h, t]) => `<a href="${h}">${t}</a>`).join('')}</div>
+  </div>`).join('');
+
+function renderSection(sec, s) {
+  document.getElementById(`amt-${sec.key}`).textContent = money(s.grand_total);
+  document.getElementById(`sub-${sec.key}`).textContent = `${sec.count(s)} \\u00b7 ${sec.desc}`;
+  const top = s.totals.slice(0, 5);
+  document.getElementById(`top-${sec.key}`).innerHTML = top.length ? top.map(t => `<tr>
+      <td>${esc(t[sec.nameKey])}</td>
+      <td class="num muted">${s.grand_total > 0 ? Math.round(t.amount / s.grand_total * 100) + '%' : ''}</td>
+      <td class="num">${money(t.amount)}</td></tr>`).join('')
+    : '<tr><td class="muted">Nothing in this period.</td></tr>';
+}
+
+function renderTotal(results) {
+  const grand = results.reduce((a, s) => a + s.grand_total, 0);
+  document.getElementById('grand').textContent = money(grand);
+  const start = results.map(s => s.start).sort()[0];
+  const monthsSeen = [...new Set(results.flatMap(s => s.rows.map(r => r.month)))].sort();
+  const perMonth = monthsSeen.length ? ` \\u00b7 ${money(grand / monthsSeen.length)} a month on average` : '';
+  document.getElementById('grand-sub').textContent = `Since ${start}${perMonth}`;
+
+  const wrap = document.getElementById('chart-wrap');
+  if (monthsSeen.length < 2) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  const datasets = SECTIONS.map((sec, i) => ({
+    label: sec.title, backgroundColor: sec.color,
+    data: monthsSeen.map(m => results[i].rows.filter(r => r.month === m).reduce((a, r) => a + r.amount, 0)),
+  }));
+  const labels = monthsSeen.map(m => new Date(m + '-15').toLocaleDateString(undefined, {month: 'short', year: 'numeric'}));
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('chart'), {
+    type: 'bar', data: {labels, datasets},
+    options: {
+      animation: false,
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
+                 tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${money(ctx.raw)}` } } },
+      scales: { x: { stacked: true, grid: { display: false } },
+                y: { stacked: true, ticks: { callback: v => '$' + v } } },
+    },
+  });
+}
+
+async function load() {
+  try {
+    const results = await Promise.all(SECTIONS.map(sec => fetchJSON(`${sec.api}?months=${months}`)
+      .catch(e => { throw new Error(`${sec.title}: ${e.message}`); })));
+    clearNetworkError();
+    SECTIONS.forEach((sec, i) => renderSection(sec, results[i]));
+    renderTotal(results);
+  } catch (e) {
+    showNetworkError(`Could not load cost of living: ${e.message}`);
+  }
+}
+
+document.getElementById('periods').addEventListener('click', e => {
+  const b = e.target.closest('button[data-months]');
+  if (!b) return;
+  months = +b.dataset.months;
+  document.querySelectorAll('#periods button').forEach(x => x.classList.toggle('active', x === b));
+  load();
+});
+load();
+</script>
+</body>
+</html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS)
+
+
+@app.get("/cost-of-living")
+def cost_of_living_page():
+    return Response(_COST_OF_LIVING_PAGE, mimetype="text/html")
 
 
 def run(db_path: str, host: str, port: int, debug: bool) -> None:
