@@ -11839,7 +11839,8 @@ def api_receipt_detail(rid):
             "SELECT i.id, i.description, i.quantity, i.unit, i.total_price, i.category, i.raw_text, i.item_code, "
             "i.name_key, i.product_id, p.name AS product_name, p.quantity AS default_quantity, "
             "p.unit AS default_unit, "
-            "(SELECT COUNT(*) FROM receipt_items i2 WHERE i2.product_id = i.product_id) AS product_lines "
+            "(SELECT COUNT(*) FROM receipt_items i2 WHERE i2.product_id = i.product_id) AS product_lines, "
+            "(SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = i.product_id) AS photo_id "
             "FROM receipt_items i LEFT JOIN products p ON p.id = i.product_id "
             "WHERE i.receipt_id=? ORDER BY i.position", (rid,)
         ).fetchall()]
@@ -12124,6 +12125,12 @@ def api_receipt_item_set_product(item_id):
         else:
             moved = conn.execute("UPDATE receipt_items SET product_id=?, description=? WHERE id=?",
                                  (pid, name, item_id)).rowcount
+        old = item['product_id']
+        # A product merged away entirely takes its pictures along
+        if old is not None and old != pid and not conn.execute(
+                "SELECT 1 FROM receipt_items WHERE product_id=? UNION SELECT 1 FROM product_keys WHERE product_id=?",
+                (old, old)).fetchone():
+            conn.execute("UPDATE product_photos SET product_id=? WHERE product_id=?", (pid, old))
         prune_products(conn)
     return jsonify({'ok': True, 'product_id': pid, 'moved': moved})
 
@@ -12135,6 +12142,7 @@ def api_products():
     with _conn() as conn:
         rows = conn.execute(f"""
             SELECT p.id, p.name, p.quantity, p.unit, COUNT(i.id) AS times_bought, MAX({day}) AS last_bought,
+                   (SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = p.id) AS photo_id,
                    (SELECT i2.total_price FROM receipt_items i2 WHERE i2.product_id = p.id
                     ORDER BY i2.id DESC LIMIT 1) AS last_price,
                    GROUP_CONCAT(DISTINCT r.merchant) AS merchants,
@@ -12445,6 +12453,8 @@ _RECEIPT_DETAIL_PAGE = """\\
     .product-opt.current { background: #eef7f1; cursor: default; }
     .product-opt .meta { font-size: .76rem; color: #7a90a8; margin-top: .15rem; }
     .product-opt.new { color: #2e7dd4; font-weight: 600; }
+    .product-opt[data-pid] { display: flex; gap: .7rem; align-items: center; }
+    .product-opt .thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; flex: none; background: #f0f4f8; }
   </style>
 </head>
 <body>
@@ -12730,9 +12740,10 @@ function renderProducts() {
                     p.quantity != null ? fmtQty(p.quantity, p.unit) : '', p.last_price != null ? `last ${money(p.last_price)}` : '']
         .filter(Boolean).join(' \u00b7 ');
       return `<div class="product-opt${current ? ' current' : ''}" data-pid="${p.id}">
-        <div>${esc(p.name)}${current ? ' <span class="muted">(current)</span>' : ''}</div>
+        ${p.photo_id ? `<img class="thumb" loading="lazy" src="/api/product-photos/${p.photo_id}/image" alt="">` : ''}
+        <div><div>${esc(p.name)}${current ? ' <span class="muted">(current)</span>' : ''}</div>
         <div class="meta">${esc(meta)}</div>
-        ${p.printed ? `<div class="meta printed">${esc(p.printed)}</div>` : ''}</div>`;
+        ${p.printed ? `<div class="meta printed">${esc(p.printed)}</div>` : ''}</div></div>`;
     }).join('');
 }
 async function openProductDialog(itemId) {
@@ -13156,6 +13167,144 @@ def api_receipt_known_items():
     return jsonify({'items': [dict(r) for r in rows]})
 
 
+_PHOTO_COLS = ("ph.id, ph.uploaded_at, ph.status, ph.error, ph.processed_at, ph.product_id, ph.match_source, "
+               "ph.model_product_id, ph.model_seen, ph.model_notes, p.name AS product_name, "
+               "mp.name AS model_product_name")
+_PHOTO_FROM = ("FROM product_photos ph LEFT JOIN products p ON p.id = ph.product_id "
+               "LEFT JOIN products mp ON mp.id = ph.model_product_id")
+
+
+def _photo_json(row: sqlite3.Row) -> dict:
+    from smart_home import product_photos as _photos
+    r = dict(row)
+    # A 'processing' row with no live worker was interrupted (e.g. by a server restart)
+    if r['status'] == 'processing' and not _photos.is_running(r['id']):
+        r['status'] = 'error'
+        r['error'] = 'Matching was interrupted; tap Retry'
+    return r
+
+
+@app.post("/api/product-photos")
+def api_product_photo_upload():
+    """Body is the raw image bytes, with Content-Type set to the image type.
+    The photo is matched to a product without a picture in the background."""
+    from smart_home import product_photos as _photos
+    image = request.get_data()
+    if not image:
+        return jsonify({'error': 'No image in request body'}), 400
+    if len(image) > 20 * 1024 * 1024:
+        return jsonify({'error': 'Image is larger than 20 MB'}), 413
+    media_type = (request.content_type or '').split(';')[0].strip().lower()
+    try:
+        photo_id = _photos.save_upload(_db_path, image, media_type)
+    except _photos.PhotoError as e:
+        return jsonify({'error': str(e)}), 400
+    _photos.process_in_background(_db_path, photo_id)
+    return jsonify({'ok': True, 'id': photo_id}), 202
+
+
+@app.get("/api/product-photos")
+def api_product_photos_list():
+    limit = min(int(request.args.get('limit', 100)), 1000)
+    with _conn() as conn:
+        rows = conn.execute(f"SELECT {_PHOTO_COLS} {_PHOTO_FROM} ORDER BY ph.id DESC LIMIT ?", (limit,)).fetchall()
+    return jsonify({'photos': [_photo_json(r) for r in rows]})
+
+
+@app.get("/api/product-photos/<int:photo_id>")
+def api_product_photo_detail(photo_id):
+    with _conn() as conn:
+        row = conn.execute(f"SELECT {_PHOTO_COLS} {_PHOTO_FROM} WHERE ph.id=?", (photo_id,)).fetchone()
+    if row is None:
+        return jsonify({'error': 'Photo not found'}), 404
+    return jsonify(_photo_json(row))
+
+
+def _send_photo(row):
+    if row is None:
+        return jsonify({'error': 'Photo not found'}), 404
+    try:
+        with open(row['image_path'], 'rb') as f:
+            resp = Response(f.read(), mimetype=row['media_type'])
+    except OSError as e:
+        return jsonify({'error': f'Image file missing: {e}'}), 500
+    resp.headers['Cache-Control'] = 'max-age=86400'
+    return resp
+
+
+@app.get("/api/product-photos/<int:photo_id>/image")
+def api_product_photo_image(photo_id):
+    with _conn() as conn:
+        row = conn.execute("SELECT image_path, media_type FROM product_photos WHERE id=?", (photo_id,)).fetchone()
+    return _send_photo(row)
+
+
+@app.post("/api/product-photos/<int:photo_id>/product")
+def api_product_photo_set_product(photo_id):
+    """Correct which product a photo shows. Body: {product_id}, or
+    {product_id: null} to take it off its product."""
+    data = request.get_json(silent=True) or {}
+    if 'product_id' not in data:
+        return jsonify({'error': 'product_id is required (null to clear)'}), 400
+    pid = data['product_id']
+    if pid is not None and not isinstance(pid, int):
+        return jsonify({'error': 'product_id must be a number or null'}), 400
+    with _conn() as conn:
+        row = conn.execute("SELECT status FROM product_photos WHERE id=?", (photo_id,)).fetchone()
+        if row is None:
+            return jsonify({'error': 'Photo not found'}), 404
+        if pid is not None and conn.execute("SELECT 1 FROM products WHERE id=?", (pid,)).fetchone() is None:
+            return jsonify({'error': 'Product not found'}), 404
+        conn.execute("UPDATE product_photos SET product_id=?, match_source=?, status=?, error=NULL WHERE id=?",
+                     (pid, 'manual' if pid else None, 'matched' if pid else 'unmatched', photo_id))
+        prune_products(conn)
+        out = conn.execute(f"SELECT {_PHOTO_COLS} {_PHOTO_FROM} WHERE ph.id=?", (photo_id,)).fetchone()
+    return jsonify(_photo_json(out))
+
+
+@app.post("/api/product-photos/<int:photo_id>/retry")
+def api_product_photo_retry(photo_id):
+    """Ask the model again (against the products still missing a picture)."""
+    from smart_home import product_photos as _photos
+    with _conn() as conn:
+        if conn.execute("SELECT 1 FROM product_photos WHERE id=?", (photo_id,)).fetchone() is None:
+            return jsonify({'error': 'Photo not found'}), 404
+        if _photos.is_running(photo_id):
+            return jsonify({'error': 'This photo is already being matched'}), 409
+        # Its current product would otherwise not be a candidate
+        conn.execute("UPDATE product_photos SET product_id=NULL, match_source=NULL, status='processing' WHERE id=?",
+                     (photo_id,))
+    _photos.process_in_background(_db_path, photo_id)
+    return jsonify({'ok': True}), 202
+
+
+@app.delete("/api/product-photos/<int:photo_id>")
+def api_product_photo_delete(photo_id):
+    import os
+    with _conn() as conn:
+        row = conn.execute("SELECT image_path FROM product_photos WHERE id=?", (photo_id,)).fetchone()
+        if row is None:
+            return jsonify({'error': 'Photo not found'}), 404
+        conn.execute("DELETE FROM product_photos WHERE id=?", (photo_id,))
+        prune_products(conn)
+    try:
+        os.remove(row['image_path'])
+    except FileNotFoundError:
+        pass  # already gone; the row was the important part
+    return jsonify({'ok': True})
+
+
+@app.get("/api/products/<int:pid>/photo")
+def api_product_photo(pid):
+    """A product's picture: its most recent photo."""
+    with _conn() as conn:
+        row = conn.execute("SELECT image_path, media_type FROM product_photos WHERE product_id=? "
+                           "ORDER BY id DESC LIMIT 1", (pid,)).fetchone()
+    if row is None:
+        return jsonify({'error': 'This product has no picture'}), 404
+    return _send_photo(row)
+
+
 _RECEIPT_ITEMS_PAGE = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -13196,12 +13345,14 @@ _RECEIPT_ITEMS_PAGE = """\
     .status.ok { color: #2db37a; }
     .status.err { color: #b00; }
     .empty { padding: 2rem; text-align: center; color: #7a90a8; }
+    .thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; display: block; background: #f0f4f8; }
+    .no-thumb { width: 44px; height: 44px; border-radius: 6px; border: 1px dashed #d0dce8; }
   </style>
 </head>
 <body>
   <h1>Products</h1>
   <div class="nav"><a href="/cost-of-living">&larr; Cost of Living</a><a href="/receipts">&larr; Receipts</a></div>
-  <p class="intro">Every line on a receipt points to a product. Lines printed differently, even at different stores,
+  <p class="intro">Pictures come from the Products tab in the app. Every line on a receipt points to a product. Lines printed differently, even at different stores,
   can point to the same product: use <b>Change product</b> on a receipt to pick which one. A new receipt line is matched
   to the product its printed text or item number was linked to before, else to a product with the same name, else a
   new product is made. Renaming a product renames it on every receipt. The default quantity is the amount in one
@@ -13213,10 +13364,10 @@ _RECEIPT_ITEMS_PAGE = """\
   <div class="wrap">
     <table>
       <thead><tr>
-        <th>Product</th><th>Printed as</th><th>Store</th><th class="num">Bought</th><th class="num">Last price</th>
+        <th></th><th>Product</th><th>Printed as</th><th>Store</th><th class="num">Bought</th><th class="num">Last price</th>
         <th>Default quantity</th><th></th><th></th>
       </tr></thead>
-      <tbody id="rows"><tr><td colspan="8" class="empty">Loading&hellip;</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="9" class="empty">Loading&hellip;</td></tr></tbody>
     </table>
   </div>
 <script>
@@ -13254,12 +13405,13 @@ function render() {
   document.getElementById('count').textContent = `${shown.length} of ${items.length} products`;
   const tbody = document.getElementById('rows');
   if (!shown.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="empty">${items.length ? 'No products match.' : 'No products yet. Scan a receipt in the app.'}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">${items.length ? 'No products match.' : 'No products yet. Scan a receipt in the app.'}</td></tr>`;
     return;
   }
   tbody.innerHTML = shown.map(it => {
     const idx = items.indexOf(it);
     return `<tr data-idx="${idx}">
+      <td>${it.photo_id ? `<a href="/api/product-photos/${it.photo_id}/image" target="_blank"><img class="thumb" loading="lazy" src="/api/product-photos/${it.photo_id}/image" alt=""></a>` : '<div class="no-thumb" title="No picture yet. Take one in the Products tab of the app."></div>'}</td>
       <td><div class="name-cell">
         <input type="text" data-f="name" value="${esc(it.name || '')}">
       </div></td>
@@ -13353,7 +13505,7 @@ fetchJSON('/api/products')
   .catch(e => {
     showNetworkError(`Could not load products: ${e.message}`);
     document.getElementById('rows').innerHTML =
-      `<tr><td colspan="8" class="empty">Could not load products: ${esc(e.message)}</td></tr>`;
+      `<tr><td colspan="9" class="empty">Could not load products: ${esc(e.message)}</td></tr>`;
   });
 </script>
 </body>

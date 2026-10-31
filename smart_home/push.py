@@ -6,6 +6,9 @@ from pathlib import Path
 _CONFIG_DIR = Path.home() / ".config" / "smart-home"
 _CREDS_FILE = _CONFIG_DIR / "apns_credentials.json"
 _TOKENS_FILE = _CONFIG_DIR / "push_tokens.json"
+# Which APNs server each token belongs to: "sandbox" for a build run from
+# Xcode, "production" for TestFlight / App Store builds. Learned on send.
+_TOKEN_ENVS_FILE = _CONFIG_DIR / "push_token_envs.json"
 
 APNS_PROD_HOST = "https://api.push.apple.com"
 APNS_DEV_HOST  = "https://api.sandbox.push.apple.com"
@@ -41,6 +44,23 @@ def save_tokens(tokens: list[str]) -> None:
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(_TOKENS_FILE, "w") as f:
         json.dump(tokens, f, indent=2)
+
+
+def _load_token_envs() -> dict[str, str]:
+    try:
+        with open(_TOKEN_ENVS_FILE) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"[push] ignoring unreadable {_TOKEN_ENVS_FILE}: {e}")
+        return {}
+
+
+def _save_token_envs(envs: dict[str, str]) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_TOKEN_ENVS_FILE, "w") as f:
+        json.dump(envs, f, indent=2)
 
 
 def register_token(token: str) -> None:
@@ -90,26 +110,37 @@ def send_notification(title: str, body: str) -> bool:
         print(f"[push] JWT error: {e}")
         return False
 
-    host = APNS_DEV_HOST if creds.get("sandbox") else APNS_PROD_HOST
-    print(f"[push] sending '{title}' via {'sandbox' if creds.get('sandbox') else 'production'} to {len(tokens)} device(s)")
+    hosts = {"sandbox": APNS_DEV_HOST, "production": APNS_PROD_HOST}
+    default_env = "sandbox" if creds.get("sandbox") else "production"
+    envs = _load_token_envs()
+    envs_before = dict(envs)
+    print(f"[push] sending '{title}' to {len(tokens)} device(s)")
     dead: list[str] = []
     delivered = False
 
     with httpx.Client(http2=True) as client:
         for token in tokens:
             try:
-                resp = delegated.request(
-                    "POST", f"{host}/3/device/{token}", client=client,
-                    headers={
-                        "authorization": f"bearer {bearer}",
-                        "apns-topic": creds["bundle_id"],
-                        "apns-push-type": "alert",
-                        "apns-priority": "10",
-                    },
-                    json={"aps": {"alert": {"title": title, "body": body}, "sound": "default"}},
-                    timeout=10,
-                )
+                # A token only works on the server its build was signed for; if
+                # APNs says it's the wrong one, try the other and remember it.
+                env = envs.get(token, default_env)
+                for attempt_env in (env, "production" if env == "sandbox" else "sandbox"):
+                    resp = delegated.request(
+                        "POST", f"{hosts[attempt_env]}/3/device/{token}", client=client,
+                        headers={
+                            "authorization": f"bearer {bearer}",
+                            "apns-topic": creds["bundle_id"],
+                            "apns-push-type": "alert",
+                            "apns-priority": "10",
+                        },
+                        json={"aps": {"alert": {"title": title, "body": body}, "sound": "default"}},
+                        timeout=10,
+                    )
+                    if not (resp.status_code == 400 and "BadDeviceToken" in resp.text):
+                        break
+                    print(f"[push] token rejected by {attempt_env} APNs (BadDeviceToken)")
                 if resp.status_code == 200:
+                    envs[token] = attempt_env
                     print(f"[push] OK: '{title}'")
                     delivered = True
                 elif resp.status_code == 410:    # token expired / unregistered
@@ -122,4 +153,8 @@ def send_notification(title: str, body: str) -> bool:
 
     if dead:
         save_tokens([t for t in tokens if t not in dead])
+        for t in dead:
+            envs.pop(t, None)
+    if envs != envs_before:
+        _save_token_envs(envs)
     return delivered

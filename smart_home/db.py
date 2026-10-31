@@ -460,6 +460,29 @@ def open_db(path: str) -> sqlite3.Connection:
         pass  # column already exists
     conn.execute("CREATE INDEX IF NOT EXISTS receipt_items_product ON receipt_items (product_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS product_keys_product ON product_keys (product_id)")
+    # Photos of products taken in the iOS app. The vision model matches each
+    # to one of the products that have no picture yet. status is 'processing',
+    # 'matched' (product_id set), 'unmatched' (the model found no match; pick
+    # one by hand) or 'error'. match_source is 'model' or 'manual';
+    # model_product_id is what the model picked, kept after a correction.
+    # A product's picture is its most recent photo.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS product_photos (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            uploaded_at      TEXT NOT NULL,
+            status           TEXT NOT NULL,
+            error            TEXT,
+            processed_at     TEXT,
+            image_path       TEXT NOT NULL,
+            media_type       TEXT NOT NULL,
+            product_id       INTEGER REFERENCES products(id),
+            match_source     TEXT,
+            model_product_id INTEGER,
+            model_seen       TEXT,
+            model_notes      TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS product_photos_product ON product_photos (product_id)")
     _migrate_known_items_to_products(conn)
     conn.commit()
     return conn
@@ -526,7 +549,8 @@ def prune_products(conn: sqlite3.Connection) -> None:
     """Delete products nothing points to any more (no receipt-item and no
     printed line), e.g. after a receipt-item was moved to another product."""
     conn.execute("DELETE FROM products WHERE id NOT IN (SELECT product_id FROM receipt_items WHERE product_id IS NOT NULL) "
-                 "AND id NOT IN (SELECT product_id FROM product_keys)")
+                 "AND id NOT IN (SELECT product_id FROM product_keys) "
+                 "AND id NOT IN (SELECT product_id FROM product_photos WHERE product_id IS NOT NULL)")
 
 
 def upsert_ble_rssi(conn: sqlite3.Connection, label: str, address: str | None, rssi: int) -> None:
