@@ -5237,7 +5237,6 @@ def index():
     .disk-card .disk-bar { height: 10px; background: #e3eaf1; border-radius: 5px; overflow: hidden; margin: .3rem 0 .2rem; }
     .disk-card .disk-fill { height: 100%; border-radius: 5px; }
     .disk-card .disk-sub { font-size: .72rem; color: #7a90a8; font-variant-numeric: tabular-nums; }
-    .disk-card .disk.stale { opacity: .55; }
     .sun-time { font-size: 2.4rem; font-weight: 700; margin: .2rem 0 .1rem; line-height: 1; font-variant-numeric: tabular-nums; }
     .section-title { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .75rem; }
     .events-list { display: flex; flex-direction: column; gap: .4rem; margin-bottom: 2rem; }
@@ -5637,11 +5636,10 @@ async function loadDisks() {
     // Percent of the space actually usable, as df reports it (ext4 reserves ~5% for root)
     const pct = d.used / (d.used + d.free) * 100;
     const color = pct >= 90 ? '#c0392b' : pct >= 75 ? '#e07820' : '#2a9d6e';
-    const stale = d.stale ? ` &middot; <span style="color:#c0392b">reported ${timeSince(Date.now() - d.age_s * 1000)}</span>` : '';
-    return `<div class="disk${d.stale ? ' stale' : ''}" title="${esc(d.mount || d.label)}">
+    return `<div class="disk" title="${esc(d.mount)}">
       <div class="disk-head"><span>${esc(d.label)}</span><span class="disk-pct" style="color:${color}">${Math.round(pct)}%</span></div>
       <div class="disk-bar"><div class="disk-fill" style="width:${pct.toFixed(1)}%;background:${color}"></div></div>
-      <div class="disk-sub">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}${stale}</div></div>`;
+      <div class="disk-sub">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</div></div>`;
   }).join('');
   el.innerHTML = `<div class="card disk-card"><div class="label">Storage</div>${rows}</div>`;
 }
@@ -11143,39 +11141,42 @@ def api_gpu():
 
 # Drives on this server shown in the dashboard Storage widget, as (label, mount point).
 _LOCAL_DRIVES = [("tank2 SSD", "/"), ("tank2 RAID", "/mnt/md0")]
-# Other machines push their own drive usage here (macos/report-disk.sh); a report
-# older than this is shown as stale rather than current.
-_DISK_REPORT_STALE_S = 15 * 60
+# Drives on other machines, read over SSH as (label, ssh destination). The Mac's
+# authorized_keys entry for tank2 forces `df -k /System/Volumes/Data`, so the key can
+# run nothing else. That volume's Available is the free space of the whole APFS
+# container, so used = total - free covers the system volume, snapshots and the rest.
+_REMOTE_DRIVES = [("Mac mini", "chrispriest@chriss-Mac-mini.local")]
+_REMOTE_DISK_CACHE_S = 60
+_remote_disk_cache: dict[str, tuple[float, dict]] = {}
 
 
-@app.post("/api/disks/report")
-def api_disks_report():
-    """Receive a drive usage report (label, total, free in bytes) from another machine."""
-    import json
-    data = request.get_json(silent=True) or request.form
-    label = (data.get("label") or "").strip()
+def _remote_disk(label: str, dest: str) -> dict:
+    import subprocess
+    import time
+    cached = _remote_disk_cache.get(dest)
+    if cached and time.monotonic() - cached[0] < _REMOTE_DISK_CACHE_S:
+        return cached[1]
     try:
-        total, free = int(data.get("total")), int(data.get("free"))
-    except (TypeError, ValueError):
-        return jsonify({"error": "total and free must be integers (bytes)"}), 400
-    if not label or total <= 0 or not 0 <= free <= total:
-        return jsonify({"error": "need a label, total > 0 and 0 <= free <= total"}), 400
-    report = {"label": label, "total": total, "used": total - free, "free": free,
-              "ts": datetime.datetime.now().isoformat(timespec="seconds")}
-    with _conn() as conn:
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                     (f"disk_report:{label}", json.dumps(report)))
-    return "", 204
+        p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", dest],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+        if p.returncode != 0:
+            raise RuntimeError(p.stderr.strip().splitlines()[-1] if p.stderr.strip() else f"ssh exited {p.returncode}")
+        fields = p.stdout.strip().splitlines()[-1].split()
+        total, free = int(fields[1]) * 1024, int(fields[3]) * 1024
+        result = {"label": label, "mount": dest, "total": total, "used": total - free, "free": free}
+    except (subprocess.TimeoutExpired, RuntimeError, IndexError, ValueError) as e:
+        result = {"label": label, "mount": dest, "error": f"Can't read over SSH: {e}"}
+    _remote_disk_cache[dest] = (time.monotonic(), result)
+    return result
 
 
 @app.get("/api/disks")
 def api_disks():
-    """Used/free space for this server's drives plus the latest report from each other machine."""
-    import json
+    """Used/free space for this server's drives and for other machines' drives read over SSH."""
     import os
     import shutil
 
-    drives = []
+    drives = [_remote_disk(label, dest) for label, dest in _REMOTE_DRIVES]
     for label, mount in _LOCAL_DRIVES:
         # An unmounted array leaves an empty directory on the root drive, which would
         # otherwise silently report the root drive's numbers.
@@ -11188,14 +11189,6 @@ def api_disks():
             drives.append({"label": label, "mount": mount, "error": f"{mount}: {e.strerror}"})
             continue
         drives.append({"label": label, "mount": mount, "total": u.total, "used": u.used, "free": u.free})
-
-    with _conn() as conn:
-        rows = conn.execute("SELECT value FROM settings WHERE key LIKE 'disk_report:%' ORDER BY key").fetchall()
-    now = datetime.datetime.now()
-    for row in rows:
-        r = json.loads(row["value"])
-        age = (now - datetime.datetime.fromisoformat(r["ts"])).total_seconds()
-        drives.insert(0, {**r, "age_s": int(age), "stale": age > _DISK_REPORT_STALE_S})
     return jsonify({"drives": drives})
 
 
