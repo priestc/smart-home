@@ -12170,11 +12170,14 @@ def api_receipt_item_set_product(item_id):
 
 @app.get("/api/products")
 def api_products():
-    """Every product, with the stores and printed lines that point to it."""
+    """Every product, with the stores and printed lines that point to it.
+    category is the one most of its receipt lines are in."""
     day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
     with _conn() as conn:
         rows = conn.execute(f"""
-            SELECT p.id, p.name, p.quantity, p.unit, COUNT(i.id) AS times_bought, MAX({day}) AS last_bought,
+            SELECT p.id, p.name, p.quantity, p.unit, p.subcategory_id, COUNT(i.id) AS times_bought, MAX({day}) AS last_bought,
+                   (SELECT i4.category FROM receipt_items i4 WHERE i4.product_id = p.id
+                    GROUP BY i4.category ORDER BY COUNT(*) DESC, MAX(i4.id) DESC LIMIT 1) AS category,
                    (SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = p.id) AS photo_id,
                    (SELECT ROUND(i2.total_price / CASE WHEN i2.unit = 'ea' AND i2.quantity > 0 THEN i2.quantity ELSE 1 END, 2) FROM receipt_items i2 WHERE i2.product_id = p.id
                     ORDER BY i2.id DESC LIMIT 1) AS last_price,
@@ -13470,6 +13473,8 @@ _RECEIPT_ITEMS_PAGE = """\
     .empty { padding: 2rem; text-align: center; color: #7a90a8; }
     .thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; display: block; background: #f0f4f8; }
     .no-thumb { width: 44px; height: 44px; border-radius: 6px; border: 1px dashed #d0dce8; }
+    .cat-cell { min-width: 10rem; }
+    .cat-cell select, .cat-cell input { display: block; margin-top: .25rem; width: 100%; padding: .35rem .4rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .82rem; background: #fff; }
   </style>
 </head>
 <body>
@@ -13488,9 +13493,9 @@ _RECEIPT_ITEMS_PAGE = """\
     <table>
       <thead><tr>
         <th></th><th>Product</th><th>Printed as</th><th>Store</th><th class="num">Bought</th><th class="num">Last price</th>
-        <th>Default quantity</th><th></th><th></th>
+        <th title="Category of most of its receipt lines, and the product&rsquo;s sub-category">Category</th><th>Default quantity</th><th></th><th></th>
       </tr></thead>
-      <tbody id="rows"><tr><td colspan="9" class="empty">Loading&hellip;</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="10" class="empty">Loading&hellip;</td></tr></tbody>
     </table>
   </div>
 <script>
@@ -13519,16 +13524,28 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-let items = [];
+let items = [], subcategories = [];
+
+function subName(sid) {
+  const s = subcategories.find(x => x.id === sid);
+  return s ? s.name : '';
+}
+// Sub-categories in the product's category (plus its current one), or a new one
+function subSelect(it) {
+  const opts = subcategories.filter(s => s.category === it.category || s.id === it.subcategory_id)
+    .map(s => `<option value="${s.id}"${s.id === it.subcategory_id ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
+  return `<select data-sub title="Saves as soon as you pick one">
+    <option value="">${it.subcategory_id == null ? 'No sub-category' : '(none)'}</option>${opts}<option value="new">+ New sub-category\u2026</option></select>`;
+}
 
 function render() {
   const q = document.getElementById('filter').value.trim().toLowerCase();
-  const shown = items.filter(it => !q || [it.name, it.printed, it.merchants]
+  const shown = items.filter(it => !q || [it.name, it.printed, it.merchants, it.category, subName(it.subcategory_id)]
     .some(v => v && String(v).toLowerCase().includes(q)));
   document.getElementById('count').textContent = `${shown.length} of ${items.length} products`;
   const tbody = document.getElementById('rows');
   if (!shown.length) {
-    tbody.innerHTML = `<tr><td colspan="9" class="empty">${items.length ? 'No products match.' : 'No products yet. Scan a receipt in the app.'}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="empty">${items.length ? 'No products match.' : 'No products yet. Scan a receipt in the app.'}</td></tr>`;
     return;
   }
   tbody.innerHTML = shown.map(it => {
@@ -13542,6 +13559,7 @@ function render() {
       <td class="muted">${esc(it.merchants) || '&mdash;'}</td>
       <td class="num">${it.times_bought}&times;<div class="muted">${esc(it.last_bought)}</div></td>
       <td class="num">${it.last_price == null ? '&mdash;' : '$' + Number(it.last_price).toFixed(2)}</td>
+      <td class="cat-cell">${it.category ? esc(it.category) + subSelect(it) : '<span class="muted">&mdash;</span>'}</td>
       <td><div class="qty-cell">
         <input type="text" data-f="quantity" inputmode="decimal" value="${it.quantity ?? ''}" placeholder="none">
         <select data-f="unit">${UNITS.map(u => `<option${u === (it.unit || 'oz') ? ' selected' : ''}>${u}</option>`).join('')}</select>
@@ -13614,8 +13632,61 @@ async function save(tr) {
 
 const rowsEl = document.getElementById('rows');
 rowsEl.addEventListener('input', e => { if (e.target.dataset.f) markDirty(e.target.closest('tr')); });
-rowsEl.addEventListener('change', e => { if (e.target.dataset.f) markDirty(e.target.closest('tr')); });
+rowsEl.addEventListener('change', e => {
+  const tr = e.target.closest('tr');
+  if (e.target.matches('[data-sub]')) {
+    if (e.target.value !== 'new') { setSub(tr, e.target.value ? +e.target.value : null); return; }
+    e.target.outerHTML = '<input type="text" data-sub-new placeholder="New sub-category name" maxlength="60">';
+    tr.querySelector('[data-sub-new]').focus();
+    return;
+  }
+  if (e.target.dataset.f) markDirty(tr);
+});
+function redrawSub(tr) {
+  const el = tr.querySelector('[data-sub], [data-sub-new]');
+  if (el) el.outerHTML = subSelect(items[+tr.dataset.idx]);
+}
+async function setSub(tr, sid) {
+  const it = items[+tr.dataset.idx], status = tr.querySelector('.status');
+  status.className = 'status'; status.textContent = 'Saving\u2026';
+  try {
+    await fetchJSON(`/api/products/${it.id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                                              body: JSON.stringify({subcategory_id: sid})});
+    it.subcategory_id = sid;
+    status.className = 'status ok'; status.textContent = 'Saved';
+  } catch (e) {
+    status.className = 'status err'; status.textContent = 'Failed';
+    showNetworkError(`Could not save sub-category: ${e.message}`);
+  }
+  redrawSub(tr);
+}
+async function createSub(tr, input) {
+  const it = items[+tr.dataset.idx], name = input.value.trim();
+  if (!name) { redrawSub(tr); return; }
+  try {
+    const res = await fetchJSON('/api/subcategories', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                       body: JSON.stringify({category: it.category, name})});
+    subcategories = res.subcategories;
+    await setSub(tr, res.subcategory.id);
+  } catch (e) {
+    const status = tr.querySelector('.status');
+    status.className = 'status err'; status.textContent = 'Not created';
+    showNetworkError(`Could not create sub-category: ${e.message}`);
+  }
+}
+// A new sub-category name is saved when its box loses focus (Enter blurs it)
+rowsEl.addEventListener('focusout', e => {
+  if (e.target.matches('[data-sub-new]') && e.target.isConnected && !e.target.dataset.done) {
+    e.target.dataset.done = '1';
+    createSub(e.target.closest('tr'), e.target);
+  }
+});
 rowsEl.addEventListener('keydown', e => {
+  if (e.target.matches('[data-sub-new]')) {
+    if (e.key === 'Enter') e.target.blur();
+    if (e.key === 'Escape') { e.target.dataset.done = '1'; redrawSub(e.target.closest('tr')); }
+    return;
+  }
   if (e.key === 'Enter' && e.target.dataset.f) save(e.target.closest('tr'));
 });
 rowsEl.addEventListener('click', e => {
@@ -13623,12 +13694,12 @@ rowsEl.addEventListener('click', e => {
 });
 document.getElementById('filter').addEventListener('input', render);
 
-fetchJSON('/api/products')
-  .then(data => { items = data.products; clearNetworkError(); render(); })
+Promise.all([fetchJSON('/api/products'), fetchJSON('/api/receipts/config')])
+  .then(([data, cfg]) => { items = data.products; subcategories = cfg.subcategories; clearNetworkError(); render(); })
   .catch(e => {
     showNetworkError(`Could not load products: ${e.message}`);
     document.getElementById('rows').innerHTML =
-      `<tr><td colspan="9" class="empty">Could not load products: ${esc(e.message)}</td></tr>`;
+      `<tr><td colspan="10" class="empty">Could not load products: ${esc(e.message)}</td></tr>`;
   });
 </script>
 </body>
