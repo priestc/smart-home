@@ -12143,7 +12143,7 @@ def api_products():
         rows = conn.execute(f"""
             SELECT p.id, p.name, p.quantity, p.unit, COUNT(i.id) AS times_bought, MAX({day}) AS last_bought,
                    (SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = p.id) AS photo_id,
-                   (SELECT i2.total_price FROM receipt_items i2 WHERE i2.product_id = p.id
+                   (SELECT ROUND(i2.total_price / CASE WHEN i2.unit = 'ea' AND i2.quantity > 0 THEN i2.quantity ELSE 1 END, 2) FROM receipt_items i2 WHERE i2.product_id = p.id
                     ORDER BY i2.id DESC LIMIT 1) AS last_price,
                    GROUP_CONCAT(DISTINCT r.merchant) AS merchants,
                    (SELECT GROUP_CONCAT(t, ' | ') FROM (SELECT DISTINCT TRIM(COALESCE(i3.raw_text, '') || ' ' ||
@@ -13151,7 +13151,7 @@ def api_receipt_known_items():
                     ORDER BY i2.id DESC LIMIT 1) AS item_code,
                    (SELECT i2.description FROM receipt_items i2 WHERE i2.name_key = i.name_key
                     ORDER BY i2.id DESC LIMIT 1) AS description,
-                   (SELECT i2.total_price FROM receipt_items i2 WHERE i2.name_key = i.name_key
+                   (SELECT ROUND(i2.total_price / CASE WHEN i2.unit = 'ea' AND i2.quantity > 0 THEN i2.quantity ELSE 1 END, 2) FROM receipt_items i2 WHERE i2.name_key = i.name_key
                     ORDER BY i2.id DESC LIMIT 1) AS last_price,
                    (SELECT i2.category FROM receipt_items i2 WHERE i2.name_key = i.name_key
                     ORDER BY i2.id DESC LIMIT 1) AS category,

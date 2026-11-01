@@ -96,7 +96,7 @@ def candidates(conn: sqlite3.Connection) -> list[dict]:
                     WHERE i.product_id = p.id AND i.raw_text IS NOT NULL)) AS printed,
                (SELECT GROUP_CONCAT(DISTINCT r.merchant) FROM receipt_items i JOIN receipts r ON r.id = i.receipt_id
                     WHERE i.product_id = p.id) AS stores,
-               (SELECT i.total_price FROM receipt_items i WHERE i.product_id = p.id
+               (SELECT ROUND(i.total_price / CASE WHEN i.unit = 'ea' AND i.quantity > 0 THEN i.quantity ELSE 1 END, 2) FROM receipt_items i WHERE i.product_id = p.id
                     ORDER BY i.id DESC LIMIT 1) AS last_price
         FROM products p
         WHERE p.id NOT IN (SELECT product_id FROM product_photos WHERE product_id IS NOT NULL)

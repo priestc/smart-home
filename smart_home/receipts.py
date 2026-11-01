@@ -266,8 +266,10 @@ def _catalog(conn: sqlite3.Connection, rid: int, merchant: str | None) -> list[d
     if not family:
         return []
     by_code: dict[str, dict] = {}
+    # price is per item: a line for 3 of something is its total divided by 3
     for code, raw, price, m, name in conn.execute(
-        "SELECT i.item_code, i.raw_text, i.total_price, r.merchant, n.name FROM receipt_items i "
+        "SELECT i.item_code, i.raw_text, ROUND(i.total_price / CASE WHEN i.unit = 'ea' AND i.quantity > 0 "
+        "THEN i.quantity ELSE 1 END, 2), r.merchant, n.name FROM receipt_items i "
         "JOIN receipts r ON r.id = i.receipt_id LEFT JOIN products n ON n.id = i.product_id "
         "WHERE i.item_code IS NOT NULL AND i.total_price > 0 AND r.status = 'done' AND r.id != ? "
         "ORDER BY i.id DESC", (rid,)
@@ -326,7 +328,9 @@ def _reconcile(data: dict, catalog: list[dict]) -> list[str]:
             it["item_code"] = e["code"]
             it["raw_text"] = e["raw_text"]
         if it.get("total_price") is None:
-            it["total_price"] = e["price"]
+            qty = it.get("quantity")
+            each = it.get("unit") == "ea" and isinstance(qty, (int, float)) and qty > 0
+            it["total_price"] = round(e["price"] * (qty if each else 1), 2)
             filled_prices.append(e["raw_text"])
     changes = []
     if fixed_codes:
@@ -363,7 +367,7 @@ def _retry_hint(problems: list[str], catalog: list[dict]) -> str:
     lines += [f"- {p}" for p in problems]
     lines.append("Read every line again carefully. The paper may be faded or torn.")
     if catalog:
-        lines.append("Items bought at this store before (item number, printed name, last price). "
+        lines.append("Items bought at this store before (item number, printed name, last price for one). "
                      "A partly readable line is very likely one of these; use its full item number:")
         for e in catalog[:80]:
             lines.append(f'{e["code"]}  {e["raw_text"]}  {e["price"]:.2f}')
