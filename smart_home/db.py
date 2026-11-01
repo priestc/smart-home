@@ -459,6 +459,28 @@ def open_db(path: str) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         pass  # column already exists
     conn.execute("CREATE INDEX IF NOT EXISTS receipt_items_product ON receipt_items (product_id)")
+    # Sub-categories within a receipt category (e.g. "Frozen pizza" in
+    # Groceries). A product belongs to at most one, so tagging it once covers
+    # every receipt it's on. New ones are made from the receipt page.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS subcategories (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            category   TEXT NOT NULL,
+            name       TEXT NOT NULL COLLATE NOCASE,
+            created_at TEXT NOT NULL,
+            UNIQUE (category, name)
+        )
+    """)
+    try:
+        conn.execute("ALTER TABLE products ADD COLUMN subcategory_id INTEGER REFERENCES subcategories(id)")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    if conn.execute("SELECT COUNT(*) FROM subcategories").fetchone()[0] == 0:
+        now = _now()
+        conn.executemany("INSERT INTO subcategories (category, name, created_at) VALUES ('Groceries', ?, ?)",
+                         [(n, now) for n in ("Frozen pizza", "Cream cheese", "Raw chicken", "Condiments")])
+        conn.commit()
     conn.execute("CREATE INDEX IF NOT EXISTS product_keys_product ON product_keys (product_id)")
     # Photos of products taken in the iOS app. The vision model matches each
     # to one of the products that have no picture yet. status is 'processing',

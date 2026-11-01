@@ -11783,7 +11783,40 @@ def api_receipts_config():
         'categories': _receipts.CATEGORIES,
         'tax_category': _receipts.TAX_CATEGORY,
         'utilities': _receipts.UTILITIES,
+        'subcategories': _subcategories(),
     })
+
+
+def _subcategories() -> list[dict]:
+    with _conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT id, category, name FROM subcategories ORDER BY category, name COLLATE NOCASE")]
+
+
+@app.post("/api/subcategories")
+def api_subcategory_add():
+    """Make a sub-category: body {category, name}. An existing one with the
+    same name (ignoring case) in that category is returned instead."""
+    from smart_home import receipts as _receipts
+    data = request.get_json(silent=True) or {}
+    category, name = data.get('category'), ' '.join((data.get('name') or '').split())
+    if category not in _receipts.CATEGORIES:
+        return jsonify({'error': f'category must be one of: {", ".join(_receipts.CATEGORIES)}'}), 400
+    if not name:
+        return jsonify({'error': 'Give the sub-category a name'}), 400
+    if len(name) > 60:
+        return jsonify({'error': 'Sub-category names are at most 60 characters'}), 400
+    name = name[0].upper() + name[1:]
+    with _conn() as conn:
+        row = conn.execute("SELECT id FROM subcategories WHERE category=? AND name=?", (category, name)).fetchone()
+        if row:
+            sid, created = row['id'], False
+        else:
+            sid = conn.execute("INSERT INTO subcategories (category, name, created_at) VALUES (?,?,?)",
+                               (category, name, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))).lastrowid
+            created = True
+    return jsonify({'ok': True, 'subcategory': {'id': sid, 'category': category, 'name': name},
+                    'subcategories': _subcategories()}), 201 if created else 200
 
 
 @app.post("/api/receipts")
@@ -11838,7 +11871,7 @@ def api_receipt_detail(rid):
         r['items'] = [dict(i) for i in conn.execute(
             "SELECT i.id, i.description, i.quantity, i.unit, i.total_price, i.category, i.raw_text, i.item_code, "
             "i.name_key, i.product_id, p.name AS product_name, p.quantity AS default_quantity, "
-            "p.unit AS default_unit, "
+            "p.unit AS default_unit, p.subcategory_id, "
             "(SELECT COUNT(*) FROM receipt_items i2 WHERE i2.product_id = i.product_id) AS product_lines, "
             "(SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = i.product_id) AS photo_id "
             "FROM receipt_items i LEFT JOIN products p ON p.id = i.product_id "
@@ -12161,7 +12194,8 @@ def api_products():
 @app.patch("/api/products/<int:pid>")
 def api_product_update(pid):
     """Update a product: `name` (renames every receipt-item pointing to it)
-    and/or `quantity` + `unit` (null clears it), the amount in one purchase."""
+    and/or `quantity` + `unit` (null clears it), the amount in one purchase,
+    and/or `subcategory_id` (null clears it)."""
     data = request.get_json(silent=True) or {}
     fields = {}
     if 'name' in data:
@@ -12174,11 +12208,19 @@ def api_product_update(pid):
         if err:
             return jsonify({'error': err}), 400
         fields.update(qty)
+    if 'subcategory_id' in data:
+        sid = data['subcategory_id']
+        if sid is not None and (not isinstance(sid, int) or isinstance(sid, bool)):
+            return jsonify({'error': 'subcategory_id must be a number or null'}), 400
+        fields['subcategory_id'] = sid
     if not fields:
         return jsonify({'error': 'Nothing to update'}), 400
     with _conn() as conn:
         if conn.execute("SELECT 1 FROM products WHERE id=?", (pid,)).fetchone() is None:
             return jsonify({'error': 'Product not found'}), 404
+        if fields.get('subcategory_id') is not None and conn.execute(
+                "SELECT 1 FROM subcategories WHERE id=?", (fields['subcategory_id'],)).fetchone() is None:
+            return jsonify({'error': 'Sub-category not found'}), 404
         renamed = _rename_product(conn, pid, fields.pop('name')) if 'name' in fields else 0
         if fields:
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -12433,6 +12475,7 @@ _RECEIPT_DETAIL_PAGE = """\\
     td input.price { width: 6rem; text-align: right; }
     .printed { font-family: ui-monospace, Menlo, monospace; font-size: .76rem; color: #7a90a8; margin-top: .2rem; }
     .row-status { font-size: .75rem; white-space: nowrap; }
+    .sub-cell select, .sub-cell input { display: block; margin-top: .3rem; font-size: .8rem; width: 100%; }
     .row-status.ok { color: #2db37a; }
     .icon-btn { background: none; border: none; color: #b0bccb; cursor: pointer; font-size: 1.1rem; padding: 0 .3rem; }
     .icon-btn:hover { color: #b00; }
@@ -12519,7 +12562,7 @@ _RECEIPT_DETAIL_PAGE = """\\
   </dialog>
 <script>__COMMON_JS__
 const RID = __RID__;
-let receipt = null, categories = [], pollTimer = null;
+let receipt = null, categories = [], subcategories = [], pollTimer = null;
 const HEADER_FIELDS = ['kind', 'merchant', 'purchase_date', 'subtotal', 'tax', 'total'];
 
 function headerValue(k) {
@@ -12584,9 +12627,59 @@ function itemRow(it) {
         ${it.quantity == null && it.default_quantity != null ? '<div class="unit-price">product default</div>' : ''}</td>
     <td class="num"><input type="text" class="price" data-f="total_price" inputmode="decimal" value="${it.id == null ? '' : it.total_price.toFixed(2)}">
         <div class="unit-price">${unitPrice(it)}</div></td>
-    <td><select data-f="category">${opts}</select></td>
+    <td class="sub-cell"><select data-f="category">${opts}</select>${subSelect(it.category, it.subcategory_id, it.product_id)}</td>
     <td class="row-status"></td>
     <td><button class="icon-btn" title="Delete item" data-delete>&times;</button></td></tr>`;
+}
+
+// Sub-category of the line's product, chosen from those in the line's
+// category, or a new one typed in. Only lines with a product can have one.
+function subSelect(category, sid, pid) {
+  if (pid == null) return '';
+  const opts = subcategories.filter(s => s.category === category || s.id === sid)
+    .map(s => `<option value="${s.id}"${s.id === sid ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
+  return `<select data-sub title="Sub-category of this product (applies on every receipt it&rsquo;s on)">
+    <option value="">${sid == null ? 'No sub-category' : '(none)'}</option>${opts}<option value="new">+ New sub-category\\u2026</option></select>`;
+}
+function redrawSub(tr, sid) {
+  const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
+  const old = tr.querySelector('[data-sub], [data-sub-new]');
+  if (!it || !old) return;
+  old.outerHTML = subSelect(tr.querySelector('[data-f="category"]').value, sid, it.product_id);
+}
+async function setSubcategory(tr, sid) {
+  const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
+  const status = tr.querySelector('.row-status');
+  status.className = 'row-status muted'; status.textContent = 'Saving\\u2026';
+  try {
+    await sendJSON(`/api/products/${it.product_id}`, 'PATCH', {subcategory_id: sid});
+    status.className = 'row-status ok'; status.textContent = 'Saved';
+    // Every line of the same product shares the sub-category
+    receipt.items.forEach(x => { if (x.product_id === it.product_id) x.subcategory_id = sid; });
+    itemsEl.querySelectorAll('tr[data-id]').forEach(row => {
+      const x = receipt.items.find(y => String(y.id) === row.dataset.id);
+      if (x && x.product_id === it.product_id) redrawSub(row, sid);
+    });
+  } catch (e) {
+    status.className = 'row-status err'; status.textContent = 'Save failed';
+    showNetworkError(`Could not save sub-category: ${e.message}`);
+    redrawSub(tr, it.subcategory_id);
+  }
+}
+async function createSubcategory(tr, input) {
+  const name = input.value.trim();
+  const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
+  if (!name) { redrawSub(tr, it.subcategory_id); return; }
+  const category = tr.querySelector('[data-f="category"]').value;
+  try {
+    const res = await sendJSON('/api/subcategories', 'POST', {category, name});
+    subcategories = res.subcategories;
+    await setSubcategory(tr, res.subcategory.id);
+  } catch (e) {
+    const status = tr.querySelector('.row-status');
+    status.className = 'row-status err'; status.textContent = 'Not created';
+    showNetworkError(`Could not create sub-category: ${e.message}`);
+  }
 }
 
 const UNITS = ['ea', 'oz', 'lb'];
@@ -12709,8 +12802,38 @@ async function saveRow(tr) {
   }
 }
 const itemsEl = document.getElementById('items');
-itemsEl.addEventListener('change', e => { if (e.target.dataset.f) saveRow(e.target.closest('tr')); });
-itemsEl.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.dataset.f) e.target.blur(); });
+itemsEl.addEventListener('change', e => {
+  const tr = e.target.closest('tr');
+  if (e.target.matches('[data-sub]')) {
+    if (e.target.value !== 'new') { setSubcategory(tr, e.target.value ? +e.target.value : null); return; }
+    e.target.outerHTML = '<input type="text" data-sub-new placeholder="New sub-category name" maxlength="60">';
+    tr.querySelector('[data-sub-new]').focus();
+    return;
+  }
+  if (!e.target.dataset.f) return;
+  saveRow(tr);
+  // The sub-category choices follow the line's category
+  if (e.target.dataset.f === 'category' && tr.dataset.id) {
+    const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
+    if (it) redrawSub(tr, it.subcategory_id);
+  }
+});
+itemsEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.target.dataset.f || e.target.matches('[data-sub-new]'))) e.target.blur();
+  if (e.key === 'Escape' && e.target.matches('[data-sub-new]')) {
+    const tr = e.target.closest('tr');
+    const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
+    e.target.dataset.done = '1';
+    if (it) redrawSub(tr, it.subcategory_id);
+  }
+});
+// A new sub-category name is saved when the box loses focus
+itemsEl.addEventListener('focusout', e => {
+  if (e.target.matches('[data-sub-new]') && e.target.isConnected && !e.target.dataset.done) {
+    e.target.dataset.done = '1';
+    createSubcategory(e.target.closest('tr'), e.target);
+  }
+});
 itemsEl.addEventListener('click', async e => {
   if (e.target.matches('[data-change-product]')) { openProductDialog(e.target.closest('tr').dataset.id); return; }
   if (!e.target.matches('[data-delete]')) return;
@@ -12813,7 +12936,7 @@ const img = document.getElementById('photo');
 img.onerror = () => { document.getElementById('photo-error').textContent = 'Could not load the photo.'; };
 
 fetchJSON('/api/receipts/config')
-  .then(c => { categories = c.categories; })
+  .then(c => { categories = c.categories; subcategories = c.subcategories || []; })
   .catch(e => showNetworkError(`Could not load categories: ${e.message}`))
   .finally(load);
 </script>
