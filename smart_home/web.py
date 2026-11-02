@@ -16,6 +16,115 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
+# ── Breadcrumbs ──────────────────────────────────────────────────────────────
+# Every HTML page gets a breadcrumb bar injected right after <body>.  Each
+# entry maps a path to (label, parent path); the trail is built by walking
+# parents up to "/".  Dynamic pages (one receipt, one bill…) are resolved in
+# _crumb_for() below.
+_CRUMBS: dict[str, tuple[str, str | None]] = {
+    "/": ("Home", None),
+    "/trends": ("Trends", "/"),
+    "/devices": ("Devices", "/"),
+    "/zones": ("Zones", "/"),
+    "/map": ("Map", "/"),
+    "/map-settings": ("Settings", "/map"),
+    "/gas": ("Gas Prices", "/"),
+    "/presence": ("Presence", "/"),
+    "/chart/temperature": ("Temperature", "/"),
+    "/chart/typical-day": ("Typical Day", "/chart/temperature"),
+    "/chart/humidity": ("Humidity", "/"),
+    "/chart/energy": ("Energy Usage", "/"),
+    "/chart/differential": ("Differentials", "/"),
+    "/chart/sensors": ("Sensor Battery Life", "/"),
+    "/chart/bandwidth": ("Bandwidth", "/"),
+    "/chart/signal": ("Signal Strength", "/"),
+    "/chart/db-sizes": ("Database Growth", "/"),
+    "/events": ("Temperature Events", "/"),
+    "/process-stats": ("Process Stats", "/"),
+    "/camera": ("Cameras", "/"),
+    "/camera/zones": ("Motion Zones", "/camera"),
+    "/garage": ("Garage Door", "/"),
+    "/gpu": ("GPU Temperatures", "/"),
+    "/rssi": ("Bluetooth Signal", "/"),
+    "/water-chemistry": ("Water Chemistry", "/"),
+    "/email-archive": ("Email Archive", "/"),
+    "/cost-of-living": ("Cost of Living", "/"),
+    "/receipts": ("Receipts", "/cost-of-living"),
+    "/receipts/items": ("Products", "/receipts"),
+    "/receipts/new": ("Add Receipt", "/receipts"),
+    "/utilities": ("Utilities", "/cost-of-living"),
+}
+
+
+def _crumb_for(path: str) -> tuple[str, str | None] | None:
+    """(label, parent) for a path, including dynamic detail pages."""
+    if path in _CRUMBS:
+        return _CRUMBS[path]
+    import re as _re
+    from urllib.parse import unquote
+    if m := _re.fullmatch(r"/receipts/(\d+)", path):
+        return (f"Receipt #{m.group(1)}", "/receipts")
+    if m := _re.fullmatch(r"/utilities/(\d+)", path):
+        return (f"Bill #{m.group(1)}", "/utilities")
+    if m := _re.fullmatch(r"/water-chemistry/(.+)", path):
+        name = unquote(m.group(1))
+        return ("Unzoned" if name == "__unzoned__" else name, "/water-chemistry")
+    if path.startswith("/email-archive/"):
+        return ("Message", "/email-archive")
+    return None
+
+
+def _breadcrumb_html(path: str) -> str:
+    import html as _html
+    path = path.rstrip("/") or "/"
+    trail: list[tuple[str, str]] = []
+    node: str | None = path
+    crumb = _crumb_for(path)
+    if crumb is None:
+        # Unknown page: still offer a way home.
+        trail = [("Home", "/")]
+        current = None
+    else:
+        current = crumb[0]
+        node = crumb[1]
+        while node is not None and len(trail) < 10:
+            c = _crumb_for(node)
+            if c is None:
+                break
+            trail.append((c[0], node))
+            node = c[1]
+        trail.reverse()
+    sep = '<span class="_bc-sep">&rsaquo;</span>'
+    parts = [f'<a href="{_html.escape(href)}">{_html.escape(label)}</a>' for label, href in trail]
+    if current is not None:
+        parts.append(f'<span class="_bc-cur">{_html.escape(current)}</span>')
+    return (
+        '<style>'
+        '._bc{display:flex;flex-wrap:wrap;align-items:center;gap:.15rem .45rem;'
+        'font-size:.85rem;font-weight:500;margin:0 0 1rem;padding:.45rem .8rem;'
+        'background:#fff;border:1px solid #d0dce8;border-radius:8px;color:#7a90a8}'
+        '._bc a{color:#2e7dd4;text-decoration:none}._bc a:hover{text-decoration:underline}'
+        '._bc-cur{color:#1a2a3a;font-weight:600}._bc-sep{color:#aabbc8}'
+        '</style>'
+        f'<nav class="_bc" aria-label="Breadcrumb">{sep.join(parts)}</nav>'
+    )
+
+
+@app.after_request
+def _inject_breadcrumbs(resp: Response) -> Response:
+    path = request.path
+    if (path == "/" or path.startswith("/api/") or resp.status_code != 200
+            or resp.mimetype != "text/html" or resp.direct_passthrough):
+        return resp
+    body = resp.get_data(as_text=True)
+    import re as _re
+    m = _re.search(r"<body[^>]*>", body)
+    if not m:
+        return resp
+    resp.set_data(body[:m.end()] + "\n  " + _breadcrumb_html(path) + body[m.end():])
+    return resp
+
+
 @app.get("/api/current")
 def current():
     """Latest reading for each sensor label, including water chemistry sensors."""
@@ -1369,7 +1478,6 @@ def presence_page():
 </head>
 <body>
   <h1>Presence</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div id="content"><p class="empty">Loading&hellip;</p></div>
 
 <script>
@@ -1589,7 +1697,6 @@ def trends_page():
 </head>
 <body>
   <h1>Temperature Trends</h1>
-  <div class="nav"><a href="/">&larr; Back to dashboard</a></div>
   <div class="toolbar">
     <button class="toggle-btn" id="maBtn" onclick="toggleMA()">5-day moving average</button>
   </div>
@@ -1863,7 +1970,6 @@ _CHART_PAGE = """\
 </head>
 <body>
   <h1>CHART_TITLE</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="range-btns">
     <button onclick="setRange(0.125)">3h</button>
     <button onclick="setRange(1)" class="active">24h</button>
@@ -1983,7 +2089,6 @@ _DIFF_PAGE = """\
 </head>
 <body>
   <h1>Differentials</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="res-row">
     <label for="res">Resolution</label>
     <select id="res" onchange="resolution=this.value; loadChart()">
@@ -2412,7 +2517,7 @@ _TEMP_PAGE = """\
 </head>
 <body>
   <h1>Temperature</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a> &nbsp;|&nbsp; <a href="/chart/typical-day">Typical Day &rarr;</a></div>
+  <div class="nav"><a href="/chart/typical-day">Typical Day &rarr;</a></div>
   <div class="res-row">
     <label for="res">Resolution</label>
     <select id="res" onchange="resolution=this.value; loadChart()">
@@ -3126,7 +3231,6 @@ _TYPICAL_DAY_PAGE = """\
 </head>
 <body>
   <h1>Typical Temperature Day</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a> &nbsp;|&nbsp; <a href="/chart/temperature">&larr; Temperature</a></div>
   <div class="res-row">
     <label for="res">Resolution</label>
     <select id="res" onchange="resolution=this.value; loadChart()">
@@ -3466,7 +3570,6 @@ _BANDWIDTH_PAGE = """\
 </head>
 <body>
   <h1>Bandwidth</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="res-row">
     <label for="res">Resolution</label>
     <select id="res" onchange="resolution=this.value; loadChart()">
@@ -3819,7 +3922,6 @@ _ENERGY_PAGE = """\
 </head>
 <body>
   <h1>Energy Usage</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="res-row">
     <label for="res">Resolution</label>
     <select id="res" onchange="resolution=this.value; loadChart()">
@@ -4359,7 +4461,6 @@ _SENSORS_PAGE = """\
 </head>
 <body>
   <h1>Sensor Battery Life</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="res-row">
     <label for="res">Resolution</label>
     <select id="res" onchange="resolution=this.value; loadChart()">
@@ -4666,7 +4767,6 @@ _SIGNAL_PAGE = """\
 </head>
 <body>
   <h1>Signal Strength</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="res-row">
     <label for="res">Resolution</label>
     <select id="res" onchange="resolution=this.value; loadChart()">
@@ -5010,7 +5110,7 @@ def events_page():
   </style>
 </head>
 <body>
-  <h1>Temperature Events <a href="/" class="back">&larr; Dashboard</a></h1>
+  <h1>Temperature Events</h1>
   <table>
     <thead><tr><th>Time</th><th>Event</th><th>Temperature</th><th>Details</th></tr></thead>
     <tbody id="tbody"><tr><td colspan="4" class="empty">Loading&hellip;</td></tr></tbody>
@@ -5705,7 +5805,7 @@ def devices_page():
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>Device Settings &nbsp;<a href="/" class="back">&larr; Dashboard</a></h1>
+  <h1>Device Settings</h1>
   <div id="sections"></div>
 <script>
 async function fetchJSON(url) {
@@ -6111,7 +6211,6 @@ _PROCESS_STATS_PAGE = """\
 </head>
 <body>
   <h1>Process Stats</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="btn-group">
     <div class="btn-group-label">Most Recent</div>
     <div class="range-btns">
@@ -6302,7 +6401,6 @@ _DB_SIZE_PAGE = """\
 </head>
 <body>
   <h1>Database Growth</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="btn-group">
     <div class="btn-group-label">Time Range</div>
     <div class="range-btns">
@@ -6695,7 +6793,6 @@ _CAMERA_VIEW_PAGE = """\
   </div>
   <h1>Cameras</h1>
   <div class="nav">
-    <a href="/">&larr; Dashboard</a>
     <a href="/camera/zones" id="zones-link" style="display:none">Edit Zones &rarr;</a>
   </div>
   <div class="cam-tabs" id="cam-tabs"></div>
@@ -6998,7 +7095,6 @@ _CAMERA_PAGE = """\
 </head>
 <body>
   <h1>Camera Motion Zones</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="cam-tabs" id="cam-tabs"></div>
   <div id="no-cameras" style="display:none;color:#7a90a8;font-size:.9rem;">
     No cameras configured. Run <code>smart-home configure-camera</code> on the server.
@@ -7494,7 +7590,6 @@ _GARAGE_PAGE = """\
 </head>
 <body>
   <h1>Garage Door</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div id="no-garages" style="display:none">
     No garage doors configured. Run <code>smart-home configure-garage</code> on the server.
   </div>
@@ -8778,7 +8873,7 @@ _ZONES_PAGE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>Zones <a class="back" href="/">&larr; Home</a></h1>
+  <h1>Zones</h1>
   <div class="card">
     <div class="card-header">All Zones</div>
     <div id="zone-list"></div>
@@ -9046,7 +9141,7 @@ _WATER_CHEM_PAGE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>Water Chemistry <a class="back" href="/">&larr; Home</a></h1>
+  <h1>Water Chemistry</h1>
 
   <div class="section" style="margin-bottom:.75rem">Devices</div>
   <div id="devices-wrap"><span class="no-data">Loading&hellip;</span></div>
@@ -9309,7 +9404,7 @@ _RUNNING_WATER_ZONE_PAGE_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>__ZONE_TITLE__ <a class="back" href="/water-chemistry">&larr; Water Chemistry</a> <span id="status-badge"></span></h1>
+  <h1>__ZONE_TITLE__ <span id="status-badge"></span></h1>
   <p class="zone-type-label">Running Water</p>
   <div class="card">
     <div class="card-header">
@@ -9460,7 +9555,7 @@ _WATER_CHEM_ZONE_PAGE_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="error-bar"></div>
-  <h1>__ZONE_TITLE__ <a class="back" href="/water-chemistry">&larr; Water Chemistry</a> <span id="status-badge"></span></h1>
+  <h1>__ZONE_TITLE__ <span id="status-badge"></span></h1>
 
   <div class="res-row">
     <label for="res">Resolution</label>
@@ -9936,7 +10031,6 @@ _RSSI_PAGE = """<!DOCTYPE html>
 </head>
 <body>
   <h1>Bluetooth Signal</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div id="error-bar"></div>
   <div class="card">
     <div class="select-row">
@@ -10159,7 +10253,7 @@ _MAP_PAGE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="_net_err"></div>
-  <h1>Map &nbsp;<a href="/" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">&larr; Dashboard</a>&nbsp;<a href="/map-settings" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Settings &#9881;</a></h1>
+  <h1>Map &nbsp;<a href="/map-settings" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Settings &#9881;</a></h1>
 
   <div id="map-placeholder">Loading map…</div>
   <div id="map"></div>
@@ -10553,7 +10647,7 @@ _MAP_SETTINGS_PAGE = """<!DOCTYPE html>
 </head>
 <body>
   <div id="_net_err"></div>
-  <h1>Map Settings &nbsp;<a href="/map" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">&larr; Back to Map</a></h1>
+  <h1>Map Settings</h1>
 
   <div class="card">
     <div class="section-title">Google Maps API Key</div>
@@ -11242,7 +11336,7 @@ _GAS_PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
   <div id="_net_err"></div>
-  <h1>Gas Prices &nbsp;<a href="/">&larr; Dashboard</a>&nbsp;<a href="/map" style="color:#7a90a8">Map</a>&nbsp;<a href="#" style="color:#7a90a8" onclick="toggleKeyCard(); return false">Server Key &#9881;</a></h1>
+  <h1>Gas Prices &nbsp;<a href="/map" style="color:#7a90a8">Map</a>&nbsp;<a href="#" style="color:#7a90a8" onclick="toggleKeyCard(); return false">Server Key &#9881;</a></h1>
 
   <div class="card" id="key-card" style="display:none">
     <div class="section-title">Places API Server Key</div>
@@ -12326,7 +12420,7 @@ _RECEIPTS_PAGE = """\\
 </head>
 <body>
   <h1>Receipts</h1>
-  <div class="nav"><a href="/cost-of-living">&larr; Cost of Living</a><a href="/receipts/items">Products &rarr;</a><a href="/receipts/new">+ Add receipt by hand</a></div>
+  <div class="nav"><a href="/receipts/items">Products &rarr;</a><a href="/receipts/new">+ Add receipt by hand</a></div>
   <div class="periods" id="periods">
     <button data-months="1" class="active">This month</button>
     <button data-months="3">3 months</button>
@@ -12505,7 +12599,7 @@ _RECEIPT_DETAIL_PAGE = """\\
 </head>
 <body>
   <h1 id="title">Receipt</h1>
-  <div class="nav"><a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Products</a></div>
+  <div class="nav"><a href="/receipts/items">Products</a></div>
   <div id="banners"></div>
   <div class="layout">
     <div>
@@ -12978,7 +13072,7 @@ _RECEIPT_NEW_PAGE = """\
 </head>
 <body>
   <h1>Add Receipt by Hand</h1>
-  <div class="nav"><a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Products</a></div>
+  <div class="nav"><a href="/receipts/items">Products</a></div>
   <p class="muted" style="margin-bottom:1rem">For a purchase that didn&rsquo;t come with a receipt. Pick the store, then add
   items you&rsquo;ve bought there before. Prices start at what you paid last time.</p>
   <div class="layout">
@@ -13479,7 +13573,6 @@ _RECEIPT_ITEMS_PAGE = """\
 </head>
 <body>
   <h1>Products</h1>
-  <div class="nav"><a href="/cost-of-living">&larr; Cost of Living</a><a href="/receipts">&larr; Receipts</a></div>
   <p class="intro">Pictures come from the Products tab in the app. Every line on a receipt points to a product. Lines printed differently, even at different stores,
   can point to the same product: use <b>Change product</b> on a receipt to pick which one. A new receipt line is matched
   to the product its printed text or item number was linked to before, else to a product with the same name, else a
@@ -13755,7 +13848,6 @@ _UTILITIES_PAGE = """\\
 </head>
 <body>
   <h1>Utilities</h1>
-  <div class="nav"><a href="/cost-of-living">&larr; Cost of Living</a></div>
   <div class="periods" id="periods">
     <button data-months="1">This month</button>
     <button data-months="3">3 months</button>
@@ -14026,7 +14118,6 @@ _UTILITY_BILL_PAGE = """\\
 </head>
 <body>
   <h1 id="title">Utility bill</h1>
-  <div class="nav"><a href="/utilities">&larr; Utilities</a></div>
   <div id="banners"></div>
   <div class="layout">
     <div>
@@ -14574,7 +14665,7 @@ _GPU_PAGE = """\\
 </head>
 <body>
   <h1>GPU temperatures</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a><a href="/receipts">Receipts</a></div>
+  <div class="nav"><a href="/receipts">Receipts</a></div>
   <div class="card">
     <h2>Test scan</h2>
     <div class="actions">
@@ -14763,7 +14854,6 @@ _COST_OF_LIVING_PAGE = """\\
 </head>
 <body>
   <h1>Cost of Living</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="periods" id="periods">
     <button data-months="1">This month</button>
     <button data-months="3">3 months</button>
@@ -14993,7 +15083,6 @@ _EMAIL_ARCHIVE_PAGE = """\\
 </head>
 <body>
   <h1>Email Archive</h1>
-  <div class="nav"><a href="/">&larr; Dashboard</a></div>
   <div class="card">
     <h2>Archive</h2>
     <div id="status" class="muted">Loading&hellip;</div>
@@ -15145,7 +15234,6 @@ _EMAIL_MESSAGE_PAGE = """\\
 </head>
 <body>
   <h1 id="title">Email</h1>
-  <div class="nav"><a href="/email-archive">&larr; Email Archive</a></div>
   <div id="banners"></div>
   <div class="card">
     <table class="headers"><tbody id="headers"><tr><td colspan="2" class="muted">Loading&hellip;</td></tr></tbody></table>
