@@ -125,7 +125,7 @@ _PROMPT = f"""This is a photo of a store or restaurant receipt, or of a utility 
   - items: empty. subtotal, tax and items_sold: null. Skip the store-receipt rules below.
 
 - merchant: the store or restaurant name as a person would say it (e.g. "Costco", not "COSTCO WHOLESALE #1234").
-- purchase_date: the transaction date as YYYY-MM-DD, or null if it isn't printed.
+- purchase_date: the transaction date as YYYY-MM-DD, or null if it isn't printed. US receipts print dates month first: "11/03/26" is 2026-11-03 (November 3), not March 11.
 - items_sold: the "# ITEMS SOLD" count printed on the receipt (Walmart and Sam's Club print one near the top or bottom), or null if there isn't one. When it is printed, return exactly that many purchased item lines (savings and coupon lines don't count), one for each line, even when part of a line is faded or torn.
 - items: one entry per purchased line, top to bottom.
   - raw_text: the item's name exactly as printed, abbreviations and all (e.g. "GV 2% MLK GAL"). Leave out the price and item number. Keep markers such as "INST SV" (e.g. "INST SV LA CROIX VPF").
@@ -414,6 +414,24 @@ def _read(conn: sqlite3.Connection, rid: int, image: bytes) -> dict:
 _SAVINGS_RE = re.compile(r"\b(INST(ANT)?\s*SV|INSTANT SAVINGS|SAVINGS|COUPON|CPN|DISCOUNT|DISC)\b", re.I)
 
 
+def _fix_swapped_date(date: str, uploaded: str) -> str:
+    """The model sometimes reads a US date (11/03/26) day-first, giving March 11
+    instead of November 3. A receipt is photographed soon after the purchase,
+    so when the date as read is weeks away from the upload but the
+    month/day-swapped date falls in the two weeks before it, use the swapped one."""
+    try:
+        d = datetime.date.fromisoformat(date)
+        up = datetime.date.fromisoformat(uploaded)
+        swapped = d.replace(month=d.day, day=d.month)
+    except ValueError:
+        return date
+
+    def recent(x: datetime.date) -> bool:
+        return datetime.timedelta(days=-1) <= up - x <= datetime.timedelta(days=14)
+
+    return swapped.isoformat() if recent(swapped) and not recent(d) else date
+
+
 def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
     if not data.get("is_receipt"):
         raise ReceiptError(data.get("notes") or "This doesn't look like a receipt")
@@ -422,6 +440,13 @@ def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
         datetime.date.fromisoformat(date or "")
     except ValueError:
         date = None
+    if date:
+        uploaded = conn.execute("SELECT uploaded_at FROM receipts WHERE id=?", (rid,)).fetchone()
+        fixed = _fix_swapped_date(date, (uploaded[0] or "")[:10] if uploaded else "")
+        if fixed != date:
+            data["notes"] = " ".join(filter(None, [
+                data.get("notes"), f"Date read as {date}; month and day swapped to {fixed}."]))
+            date = fixed
     bill = data.get("document_type") == "utility_bill"
     rows = []
     for i, it in enumerate(data.get("items") or []):
