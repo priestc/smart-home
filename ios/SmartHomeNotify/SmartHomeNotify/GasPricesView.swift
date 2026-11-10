@@ -117,6 +117,18 @@ private let dayParser: DateFormatter = {
 
 private func parseDay(_ s: String) -> Date { dayParser.date(from: s) ?? .distantPast }
 
+private let isoParser: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f
+}()
+
+/// API timestamps are ISO 8601 with offset; show them in the phone's local time.
+private func fmtTimestamp(_ s: String) -> String {
+    guard let d = isoParser.date(from: s) else { return s }
+    return d.formatted(date: .abbreviated, time: .shortened)
+}
+
 private func fmtPrice(_ p: Double) -> String { String(format: "$%.2f", p) }
 
 /// Green (cheapest) → red (most expensive).
@@ -261,7 +273,7 @@ final class GasPricesStore: ObservableObject {
         if isFetching { return "Fetching prices…" }
         if config.area == nil { return "Draw your gas area on the map to start tracking prices." }
         var text = "No prices fetched yet."
-        if let s = config.last_success { text = "Last fetched \(s.ts) · \(s.n_stations ?? 0) stations" }
+        if let s = config.last_success { text = "Last fetched \(fmtTimestamp(s.ts)) ·\(s.n_stations ?? 0) stations" }
         if let b = config.budget {
             text += String(format: "\n%d / %d API requests this month (est. $%.2f, cap $%.0f)",
                            b.month_used, b.month_cap, b.est_cost_usd, b.cost_cap_usd)

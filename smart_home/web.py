@@ -1,11 +1,73 @@
 from __future__ import annotations
 import datetime
+import functools
+import re
 import sqlite3
 from flask import Flask, jsonify, redirect, request, Response
+from flask.json.provider import DefaultJSONProvider
 from flask_compress import Compress
 from smart_home.db import open_db, match_product, prune_products
 
+
+# ── Timezone-aware timestamps ────────────────────────────────────────────────
+# The DB stores timestamps as naive server-local strings ("2026-11-10 06:55:00").
+# Browsers parse those as *their* local time, so a client in another timezone
+# sees everything shifted (e.g. every sensor looks hours stale / offline).
+# Every JSON response therefore rewrites naive timestamp strings to ISO 8601
+# with the server's UTC offset for that instant (DST-aware), e.g.
+# "2026-11-10T06:55:00-07:00". Date-only strings ("2026-11-10") are untouched.
+
+_NAIVE_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?")
+
+
+@functools.lru_cache(maxsize=65536)
+def _local_ts_to_aware(s: str) -> str:
+    """'YYYY-MM-DD HH:MM[:SS[.ffffff]]' in server-local time → ISO 8601 with offset."""
+    try:
+        dt = datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return s
+    # astimezone() on a naive datetime treats it as system local time,
+    # picking the correct offset (MST vs MDT) for that particular instant.
+    return dt.astimezone().isoformat(timespec="milliseconds" if dt.microsecond else "seconds")
+
+
+def _tz_tag(obj):
+    if isinstance(obj, str):
+        return _local_ts_to_aware(obj) if _NAIVE_TS_RE.fullmatch(obj) else obj
+    if isinstance(obj, dict):
+        return {k: _tz_tag(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_tz_tag(v) for v in obj]
+    return obj
+
+
+class _TzJSONProvider(DefaultJSONProvider):
+    def dumps(self, obj, **kwargs):
+        return super().dumps(_tz_tag(obj), **kwargs)
+
+
+def _arg_ts(name: str) -> str | None:
+    """Read a timestamp query param and return it as a naive server-local
+    'YYYY-MM-DD HH:MM:SS' string for comparing against DB values. Accepts
+    timezone-aware ISO 8601 (what the dashboard sends, e.g. toISOString())
+    as well as legacy naive server-local values."""
+    raw = (request.args.get(name) or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(raw)
+    except ValueError:
+        return raw.replace("T", " ")
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 app = Flask(__name__)
+app.json = _TzJSONProvider(app)
 Compress(app)
 _db_path: str = ""
 
@@ -340,7 +402,7 @@ def ble_relay():
                     "AND (details=? OR details LIKE ?) ORDER BY ts DESC LIMIT 1",
                     (_evt_label, f"{_evt_label} — %"),
                 ).fetchone()
-                _now_ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                _now_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 if _pool_reading_stored:
                     # Successful read — fire online if we were offline.
@@ -351,7 +413,7 @@ def ble_relay():
                         ).fetchone()
                         if _off_row:
                             _off_dt = datetime.datetime.strptime(_off_row[0], "%Y-%m-%d %H:%M:%S")
-                            _secs = int((datetime.datetime.utcnow() - _off_dt).total_seconds())
+                            _secs = int((datetime.datetime.now() - _off_dt).total_seconds())
                             _hrs, _rem = divmod(_secs, 3600)
                             _m = _rem // 60
                             _dur = f"{_hrs}h {_m}m" if _hrs else f"{_m}m"
@@ -693,8 +755,8 @@ def bandwidth_devices():
 @app.get("/api/bandwidth/history")
 def bandwidth_history():
     """Bandwidth history. Query params: start, end, limit, bucket_minutes, mac."""
-    start  = (request.args.get("start") or "").replace("T", " ") or None
-    end    = (request.args.get("end")   or "").replace("T", " ") or None
+    start  = _arg_ts("start")
+    end    = _arg_ts("end")
     mac    = request.args.get("mac")
     limit_raw = request.args.get("limit")
     try:
@@ -930,8 +992,8 @@ def history():
       bucket_minutes - group readings into N-minute buckets (optional)
     """
     label = request.args.get("label")
-    start = (request.args.get("start") or "").replace("T", " ") or None
-    end   = (request.args.get("end")   or "").replace("T", " ") or None
+    start = _arg_ts("start")
+    end   = _arg_ts("end")
     limit_raw = request.args.get("limit")
     try:
         limit = int(limit_raw) if limit_raw is not None else None
@@ -1179,8 +1241,8 @@ def plug_history():
       bucket_minutes - group readings into N-minute buckets (optional)
     """
     label = request.args.get("label")
-    start = (request.args.get("start") or "").replace("T", " ") or None
-    end   = (request.args.get("end")   or "").replace("T", " ") or None
+    start = _arg_ts("start")
+    end   = _arg_ts("end")
     limit_raw = request.args.get("limit")
     try:
         limit = int(limit_raw) if limit_raw is not None else None
@@ -1293,8 +1355,8 @@ def plug_daily():
     Query params: start, end (ISO date), label.
     """
     label = request.args.get("label")
-    start = (request.args.get("start") or "").replace("T", " ") or None
-    end   = (request.args.get("end")   or "").replace("T", " ") or None
+    start = _arg_ts("start")
+    end   = _arg_ts("end")
 
     where, params = ["today_kwh IS NOT NULL", "label IS NOT NULL"], []
     if label:
@@ -1328,8 +1390,8 @@ def plug_cumulative_on():
     thresholds = _sp.load_thresholds()
 
     label = request.args.get("label")
-    start = (request.args.get("start") or "").replace("T", " ") or None
-    end   = (request.args.get("end")   or "").replace("T", " ") or None
+    start = _arg_ts("start")
+    end   = _arg_ts("end")
 
     where, params = ["label IS NOT NULL"], []
     if label:
@@ -1375,8 +1437,8 @@ def plug_on_off_stats():
     thresholds = _sp.load_thresholds()
 
     label = request.args.get("label")
-    start = (request.args.get("start") or "").replace("T", " ") or None
-    end   = (request.args.get("end")   or "").replace("T", " ") or None
+    start = _arg_ts("start")
+    end   = _arg_ts("end")
     month = request.args.get("month", type=int)
 
     where, params = ["label IS NOT NULL", "(watts_calc IS NOT NULL OR watts IS NOT NULL)"], []
@@ -2010,8 +2072,8 @@ const colorMap = {};
 function labelColor(lbl) { return colorMap[lbl] ?? COLORS[0]; }
 let rangeDays = 1;
 function localISO(d) {
-  const p = n => String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  // Absolute instant (UTC, "Z"); the server converts it to its own local time.
+  return d.toISOString();
 }
 async function loadColors() {
   const data = await fetchJSON("/api/current");
@@ -2326,8 +2388,8 @@ function buildSensorDatasets(data, events, isMonth) {
   return datasets;
 }
 function localISO(d) {
-  const p = n => String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  // Absolute instant (UTC, "Z"); the server converts it to its own local time.
+  return d.toISOString();
 }
 async function loadColors() {
   const data = await fetchJSON("/api/current");
@@ -2919,8 +2981,8 @@ function buildSensorDatasets(data, events, isMonth) {
 }
 
 function localISO(d) {
-  const p = n => String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  // Absolute instant (UTC, "Z"); the server converts it to its own local time.
+  return d.toISOString();
 }
 async function loadColors() {
   const data = await fetchJSON("/api/current");
@@ -3673,8 +3735,8 @@ function getBucket() {
   return (BUCKETS[mode] || BUCKETS.month)[resolution];
 }
 function localISO(d) {
-  const p = n => String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  // Absolute instant (UTC, "Z"); the server converts it to its own local time.
+  return d.toISOString();
 }
 function fmtKbps(v) {
   return v >= 1024 ? (v/1024).toFixed(2)+' MB/s' : v.toFixed(1)+' KB/s';
@@ -4029,8 +4091,8 @@ function getBucket() {
   return BUCKETS[mode][resolution];
 }
 function localISO(d) {
-  const p = n => String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  // Absolute instant (UTC, "Z"); the server converts it to its own local time.
+  return d.toISOString();
 }
 function hexToRgb(hex) { return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]; }
 function applyBtnColor(btn, color, active) {
@@ -4653,8 +4715,8 @@ const batteryChart = new Chart(document.getElementById("chart-battery"), {
 
 
 function localISO(d) {
-  const p = n => String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  // Absolute instant (UTC, "Z"); the server converts it to its own local time.
+  return d.toISOString();
 }
 
 async function loadSensors() {
@@ -4953,8 +5015,8 @@ const chart = new Chart(document.getElementById("chart"), {
   }
 });
 function localISO(d) {
-  const p = n => String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  // Absolute instant (UTC, "Z"); the server converts it to its own local time.
+  return d.toISOString();
 }
 async function loadSensors() {
   const data = await fetchJSON("/api/current");
@@ -5049,8 +5111,8 @@ def chart_signal():
 def events_api():
     """Recent temperature parity events."""
     limit = min(int(request.args.get("limit", 50)), 200)
-    start = request.args.get("start", "").replace("T", " ") or None
-    end   = request.args.get("end",   "").replace("T", " ") or None
+    start = _arg_ts("start")
+    end   = _arg_ts("end")
     event_type = request.args.get("event_type", "").strip() or None
     with _conn() as conn:
         query = "SELECT id, ts, event_type, value, details FROM temperature_events"
@@ -6152,8 +6214,8 @@ load();
 @app.get("/api/process-stats")
 def api_process_stats():
     days = float(request.args.get("days", 1))
-    start = request.args.get("start")
-    end = request.args.get("end")
+    start = _arg_ts("start")
+    end = _arg_ts("end")
     with _conn() as conn:
         if start and end:
             main_rows = conn.execute(
@@ -7860,8 +7922,8 @@ def api_pool_current():
 def api_pool_history():
     """Pool readings history. Query params: label, start, end, limit, bucket_minutes."""
     label = request.args.get("label")
-    start = (request.args.get("start") or "").replace("T", " ") or None
-    end   = (request.args.get("end")   or "").replace("T", " ") or None
+    start = _arg_ts("start")
+    end   = _arg_ts("end")
     try:
         limit = min(int(request.args.get("limit", 2000)), 100000)
     except ValueError:
@@ -8320,7 +8382,7 @@ def api_pool_relay_reading():
 def api_wc_zones_get():
     """List all water chemistry zones."""
     with _conn() as conn:
-        rows = conn.execute("SELECT id, name, mode, zone_type, created_at FROM wc_zones ORDER BY id ASC").fetchall()
+        rows = conn.execute("SELECT id, name, mode, zone_type, datetime(created_at, 'localtime') AS created_at FROM wc_zones ORDER BY id ASC").fetchall()
     return jsonify([dict(r) for r in rows])
 
 
@@ -8339,7 +8401,7 @@ def api_wc_zones_create():
         with _conn() as conn:
             conn.execute("INSERT INTO wc_zones (name, zone_type) VALUES (?, ?)", (name, zone_type))
             conn.commit()
-            row = conn.execute("SELECT id, name, mode, zone_type, created_at FROM wc_zones WHERE name=?", (name,)).fetchone()
+            row = conn.execute("SELECT id, name, mode, zone_type, datetime(created_at, 'localtime') AS created_at FROM wc_zones WHERE name=?", (name,)).fetchone()
         return jsonify(dict(row)), 201
     except Exception as e:
         if "UNIQUE" in str(e):
@@ -8377,7 +8439,7 @@ def api_wc_zones_update(zone_id):
             if new_name and new_name != old_name:
                 conn.execute("UPDATE pool_readings SET zone=? WHERE zone=?", (new_name, old_name))
             conn.commit()
-        row = conn.execute("SELECT id, name, mode, zone_type, created_at FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
+        row = conn.execute("SELECT id, name, mode, zone_type, datetime(created_at, 'localtime') AS created_at FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
     return jsonify(dict(row))
 
 
@@ -8671,8 +8733,8 @@ def api_wc_history():
     zone='__unzoned__' filters to rows where zone IS NULL."""
     zone_filter = request.args.get("zone")
     label = request.args.get("label")
-    start = (request.args.get("start") or "").replace("T", " ") or None
-    end   = (request.args.get("end")   or "").replace("T", " ") or None
+    start = _arg_ts("start")
+    end   = _arg_ts("end")
     try:
         bucket = max(1, int(request.args.get("bucket_minutes", 1)))
     except ValueError:
@@ -9659,8 +9721,8 @@ async function fetchJSON(url) {
   return r.json();
 }
 function localISO(d) {
-  const p = n => String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  // Absolute instant (UTC, "Z"); the server converts it to its own local time.
+  return d.toISOString();
 }
 
 function setRange(days) {

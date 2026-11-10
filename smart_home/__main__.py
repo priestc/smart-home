@@ -2012,7 +2012,7 @@ def monitor(duration, verbose, db, no_db):
                     (pool_lbl, f"{pool_lbl} — %"),
                 ).fetchone()
                 if last_evt is None or last_evt[0] == "sensor_online":
-                    ts_now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    ts_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     conn.execute(
                         "INSERT OR IGNORE INTO temperature_events (ts, event_type, value, details) VALUES (?,?,?,?)",
                         (ts_now, "sensor_offline", None, pool_lbl),

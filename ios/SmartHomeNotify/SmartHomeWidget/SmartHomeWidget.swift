@@ -15,7 +15,15 @@ struct SensorReading: Codable, Identifiable {
 // Matches the OFFLINE_MS threshold used by the web dashboard (smart_home/web.py).
 private let offlineThreshold: TimeInterval = 10 * 60
 
-private let sensorTimestampFormatter: DateFormatter = {
+// The API sends ISO 8601 with the server's UTC offset ("2026-11-10T06:55:00-07:00").
+private let sensorTimestampFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+    return formatter
+}()
+
+// Older servers sent naive local time ("2026-11-10 06:55:00").
+private let legacySensorTimestampFormatter: DateFormatter = {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
@@ -23,8 +31,12 @@ private let sensorTimestampFormatter: DateFormatter = {
     return formatter
 }()
 
+private func parseSensorTimestamp(_ ts: String) -> Date? {
+    sensorTimestampFormatter.date(from: ts) ?? legacySensorTimestampFormatter.date(from: ts)
+}
+
 private func isOnline(_ sensor: SensorReading) -> Bool {
-    guard let ts = sensor.ts, let date = sensorTimestampFormatter.date(from: ts) else {
+    guard let ts = sensor.ts, let date = parseSensorTimestamp(ts) else {
         return false
     }
     return Date().timeIntervalSince(date) < offlineThreshold
