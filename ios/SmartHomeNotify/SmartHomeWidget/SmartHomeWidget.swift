@@ -75,31 +75,50 @@ struct SmartHomeProvider: TimelineProvider {
     }
 
     private func fetchEntry(completion: @escaping (SmartHomeEntry) -> Void) {
+        Task { completion(await fetchEntry()) }
+    }
+
+    /// Tries the local URL first, then Tailscale, so the widget works both at home and away.
+    /// The local attempt uses a short timeout: away from home it usually just hangs.
+    private func fetchEntry() async -> SmartHomeEntry {
         let defaults = UserDefaults(suiteName: appGroup)
         let localURL     = defaults?.string(forKey: "localURL")     ?? ""
         let tailscaleURL = defaults?.string(forKey: "tailscaleURL") ?? ""
 
-        let raw = localURL.isEmpty ? tailscaleURL : localURL
-        let urlString = normalizeURL(raw) + "/api/current"
-        guard !raw.isEmpty, let url = URL(string: urlString) else {
-            completion(SmartHomeEntry(date: Date(), sensors: [], error: "No server URL configured.\nOpen Smart Home and enter your server address.", debugURL: "local='\(localURL)' tail='\(tailscaleURL)'"))
-            return
+        let candidates: [(base: String, timeout: TimeInterval)] =
+            [(localURL, 5), (tailscaleURL, 10)].compactMap { raw, timeout in
+                normalizeURL(raw).map { ($0, timeout) }
+            }
+        guard !candidates.isEmpty else {
+            return SmartHomeEntry(date: Date(), sensors: [], error: "No server URL configured.\nOpen Smart Home and enter your server address.", debugURL: "local='\(localURL)' tail='\(tailscaleURL)'")
         }
 
-        let req = URLRequest(url: url, timeoutInterval: 10)
-        URLSession.shared.dataTask(with: req) { data, response, error in
-            if let data, let sensors = try? JSONDecoder().decode([SensorReading].self, from: data) {
-                completion(SmartHomeEntry(date: Date(), sensors: sensors.filter(isOnline), error: nil, debugURL: nil))
-            } else {
-                let httpStatus = (response as? HTTPURLResponse).map { "HTTP \($0.statusCode)" } ?? "no response"
-                let errMsg = error?.localizedDescription ?? "decode failed"
-                completion(SmartHomeEntry(date: Date(), sensors: [], error: "Could not reach server", debugURL: "URL: \(urlString)\n\(httpStatus)\n\(errMsg)"))
+        var failures: [String] = []
+        for (base, timeout) in candidates {
+            let urlString = base + "/api/current"
+            guard let url = URL(string: urlString) else {
+                failures.append("\(urlString): invalid URL")
+                continue
             }
-        }.resume()
+            do {
+                let (data, response) = try await URLSession.shared.data(for: URLRequest(url: url, timeoutInterval: timeout))
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                guard status == 200 else {
+                    failures.append("\(urlString): HTTP \(status)")
+                    continue
+                }
+                let sensors = try JSONDecoder().decode([SensorReading].self, from: data)
+                return SmartHomeEntry(date: Date(), sensors: sensors.filter(isOnline), error: nil, debugURL: nil)
+            } catch {
+                failures.append("\(urlString): \(error.localizedDescription)")
+            }
+        }
+        return SmartHomeEntry(date: Date(), sensors: [], error: "Could not reach server", debugURL: failures.joined(separator: "\n"))
     }
 
-    private func normalizeURL(_ raw: String) -> String {
+    private func normalizeURL(_ raw: String) -> String? {
         var s = raw.trimmingCharacters(in: .whitespaces)
+        guard !s.isEmpty else { return nil }
         if !s.hasPrefix("http") { s = "http://" + s }
         if s.hasSuffix("/") { s = String(s.dropLast()) }
         return s
