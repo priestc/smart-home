@@ -35,10 +35,14 @@ private struct ProductListResponse: Codable { let products: [ProductSummary] }
 private struct PhotoUploadResponse: Codable { let id: Int }
 private struct PhotoErrorResponse: Codable { let error: String }
 
-/// A photo still being sent from this device.
+/// A photo still being sent from this device. It's also saved on the phone
+/// (see UnsentPhotos) until the server has it, so it can be retried after a restart.
 struct PendingPhotoUpload: Identifiable {
-    let id = UUID()
+    let id: UUID
     let thumbnail: UIImage
+    let jpeg: Data
+    var progress = UploadProgress()
+    /// Set when sending failed; the row then offers Retry.
     var error: String?
 }
 
@@ -51,7 +55,19 @@ final class ProductPhotosStore: ObservableObject {
     @Published var loadError: String?
     /// The server URL that last answered; images are loaded from it.
     @Published var reachableBase: String?
+    /// Set when a photo couldn't be saved on the phone (it then can't be retried after a restart).
+    @Published var saveError: String?
     private var pollTask: Task<Void, Never>?
+    private let unsent = UnsentPhotos(folder: "product-photos")
+
+    init() {
+        pending = unsent.load().reversed().map { saved in
+            PendingPhotoUpload(id: saved.id,
+                               thumbnail: UIImage(data: saved.jpeg)?.resizedForUpload(maxDimension: 200) ?? UIImage(),
+                               jpeg: saved.jpeg,
+                               error: "Not sent yet. Tap Retry to send it.")
+        }
+    }
 
     enum PhotosError: LocalizedError {
         case noServer, unreachable, badImage, server(String)
@@ -65,17 +81,9 @@ final class ProductPhotosStore: ObservableObject {
         }
     }
 
-    private func normalizeURL(_ raw: String) -> String? {
-        var s = raw.trimmingCharacters(in: .whitespaces)
-        guard !s.isEmpty else { return nil }
-        if !s.hasPrefix("http") { s = "http://" + s }
-        if s.hasSuffix("/") { s = String(s.dropLast()) }
-        return s
-    }
-
     private var candidates: [String] {
         [photosAppGroupDefaults.string(forKey: "localURL") ?? "",
-         photosAppGroupDefaults.string(forKey: "tailscaleURL") ?? ""].compactMap(normalizeURL)
+         photosAppGroupDefaults.string(forKey: "tailscaleURL") ?? ""].compactMap(PhotoUploader.normalizeURL)
     }
 
     var webURL: URL? {
@@ -141,28 +149,55 @@ final class ProductPhotosStore: ObservableObject {
     }
 
     func upload(_ image: UIImage) async {
-        let item = PendingPhotoUpload(thumbnail: image.photoResized(maxDimension: 200))
+        guard let jpeg = image.resizedForUpload(maxDimension: 2400).jpegData(compressionQuality: 0.8) else {
+            loadError = PhotosError.badImage.localizedDescription
+            return
+        }
+        let item = PendingPhotoUpload(id: UUID(), thumbnail: image.resizedForUpload(maxDimension: 200), jpeg: jpeg)
         pending.insert(item, at: 0)
-        func fail(_ msg: String) {
-            if let i = pending.firstIndex(where: { $0.id == item.id }) { pending[i].error = msg }
-        }
-        guard let jpeg = image.photoResized(maxDimension: 2400).jpegData(compressionQuality: 0.8) else {
-            fail(PhotosError.badImage.localizedDescription)
-            return
-        }
         do {
-            let data = try await request(path: "/api/product-photos", method: "POST", body: jpeg,
-                                         contentType: "image/jpeg", timeout: 60)
-            _ = try JSONDecoder().decode(PhotoUploadResponse.self, from: data)
+            try unsent.save(item.id, jpeg)
+            saveError = nil
         } catch {
-            fail("Upload failed: \(error.localizedDescription)")
-            return
+            saveError = "Couldn't save a copy of the photo on the phone, so if it fails to send it can only be retried until the app closes: \(error.localizedDescription)"
         }
-        pending.removeAll { $0.id == item.id }
-        await refresh()
+        await send(item.id)
     }
 
-    func dismissPending(_ id: UUID) { pending.removeAll { $0.id == id } }
+    func retryPending(_ id: UUID) async {
+        guard pending.first(where: { $0.id == id })?.error != nil else { return }
+        await send(id)
+    }
+
+    /// Throws away a photo that was never sent.
+    func discardPending(_ id: UUID) {
+        unsent.remove(id)
+        pending.removeAll { $0.id == id }
+    }
+
+    private func send(_ id: UUID) async {
+        guard let i = pending.firstIndex(where: { $0.id == id }) else { return }
+        let jpeg = pending[i].jpeg
+        pending[i].error = nil
+        pending[i].progress = UploadProgress()
+        do {
+            let base = try await PhotoUploader.firstReachable(candidates)
+            reachableBase = base
+            _ = try await PhotoUploader.send(jpeg, to: base, path: "/api/product-photos") { [weak self] p in
+                guard let self, let j = self.pending.firstIndex(where: { $0.id == id }),
+                      self.pending[j].error == nil else { return }
+                self.pending[j].progress = p
+            }
+        } catch {
+            if let j = pending.firstIndex(where: { $0.id == id }) {
+                pending[j].error = "Upload failed: \(error.localizedDescription)"
+            }
+            return
+        }
+        unsent.remove(id)
+        pending.removeAll { $0.id == id }
+        await refresh()
+    }
 
     func products() async throws -> [ProductSummary] {
         try JSONDecoder().decode(ProductListResponse.self, from: try await request(path: "/api/products")).products
@@ -189,20 +224,6 @@ final class ProductPhotosStore: ObservableObject {
     }
 }
 
-private extension UIImage {
-    func photoResized(maxDimension: CGFloat) -> UIImage {
-        let longest = max(size.width, size.height)
-        guard longest > maxDimension else { return self }
-        let scale = maxDimension / longest
-        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        return UIGraphicsImageRenderer(size: newSize, format: format).image { _ in
-            draw(in: CGRect(origin: .zero, size: newSize))
-        }
-    }
-}
-
 // MARK: - Tab root
 
 struct ProductPhotosView: View {
@@ -218,7 +239,7 @@ struct ProductPhotosView: View {
     var body: some View {
         NavigationStack {
             List {
-                if let err = errorMessage ?? store.loadError {
+                if let err = errorMessage ?? store.saveError ?? store.loadError {
                     Section { Text(err).font(.footnote).foregroundColor(.red) }
                 }
 
@@ -245,7 +266,9 @@ struct ProductPhotosView: View {
                 if !store.pending.isEmpty {
                     Section("Sending") {
                         ForEach(store.pending) { p in
-                            PendingRow(upload: p) { store.dismissPending(p.id) }
+                            PendingRow(upload: p,
+                                       onRetry: { Task { await store.retryPending(p.id) } },
+                                       onDiscard: { store.discardPending(p.id) })
                         }
                     }
                 }
@@ -323,26 +346,40 @@ struct ProductPhotosView: View {
 
 private struct PendingRow: View {
     let upload: PendingPhotoUpload
-    let onDismiss: () -> Void
+    let onRetry: () -> Void
+    let onDiscard: () -> Void
+    @State private var confirmDiscard = false
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .top, spacing: 12) {
             Image(uiImage: upload.thumbnail)
                 .resizable().scaledToFill()
                 .frame(width: 52, height: 52)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
-            if let err = upload.error {
-                VStack(alignment: .leading, spacing: 2) {
-                    Label("Failed", systemImage: "exclamationmark.triangle.fill").foregroundColor(.red)
+            VStack(alignment: .leading, spacing: 4) {
+                if let err = upload.error {
+                    Label("Not sent", systemImage: "exclamationmark.triangle.fill").foregroundColor(.red)
                     Text(err).font(.caption).foregroundColor(.red)
+                    HStack {
+                        Button(action: onRetry) {
+                            Label("Retry", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Discard", role: .destructive) { confirmDiscard = true }
+                            .buttonStyle(.bordered)
+                    }
+                    .font(.caption)
+                    .padding(.top, 2)
+                } else {
+                    Text("Uploading…")
+                    UploadProgressBar(progress: upload.progress)
                 }
-                Spacer()
-                Button("Dismiss", action: onDismiss).font(.caption)
-            } else {
-                Text("Uploading…")
-                Spacer()
-                ProgressView()
             }
+            Spacer(minLength: 0)
+        }
+        .confirmationDialog("Discard this product photo? It was never sent to the server.",
+                            isPresented: $confirmDiscard, titleVisibility: .visible) {
+            Button("Discard Photo", role: .destructive, action: onDiscard)
         }
     }
 }

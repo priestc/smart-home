@@ -21,15 +21,24 @@ private struct ReceiptStatus: Codable {
 private struct ReceiptUploadResponse: Codable { let id: Int }
 private struct ReceiptsErrorResponse: Codable { let error: String }
 
-/// One photo sent from this device during this session.
+/// One photo sent from this device. Photos the server hasn't got yet are also
+/// saved on the phone (see UnsentPhotos), so they come back after a restart.
 struct ReceiptUpload: Identifiable {
-    let id = UUID()
+    let id: UUID
     let thumbnail: UIImage
+    let jpeg: Data
     var receiptId: Int?
-    var state: State = .uploading
+    var state: State = .uploading(UploadProgress())
 
     enum State {
-        case uploading, reading, read(String), failed(String)
+        /// Sending the photo.
+        case uploading(UploadProgress)
+        /// The server never got it; it can be retried.
+        case notSent(String)
+        /// The server has it and is reading the items.
+        case reading
+        case read(String)
+        case failed(String)
     }
 }
 
@@ -40,6 +49,19 @@ final class ReceiptsStore: ObservableObject {
     @Published var uploads: [ReceiptUpload] = []
     /// The server URL that last answered, so "Open in Browser" goes to one that works.
     @Published var reachableBase: String?
+    /// Set when a photo couldn't be saved on the phone (it then can't be retried after a restart).
+    @Published var saveError: String?
+
+    private let unsent = UnsentPhotos(folder: "receipts")
+
+    init() {
+        uploads = unsent.load().reversed().map { saved in
+            ReceiptUpload(id: saved.id,
+                          thumbnail: UIImage(data: saved.jpeg)?.resizedForUpload(maxDimension: 200) ?? UIImage(),
+                          jpeg: saved.jpeg,
+                          state: .notSent("Not sent yet. Tap Retry to send it."))
+        }
+    }
 
     enum ReceiptsError: LocalizedError {
         case noServer, unreachable, badImage, server(String)
@@ -53,17 +75,9 @@ final class ReceiptsStore: ObservableObject {
         }
     }
 
-    private func normalizeURL(_ raw: String) -> String? {
-        var s = raw.trimmingCharacters(in: .whitespaces)
-        guard !s.isEmpty else { return nil }
-        if !s.hasPrefix("http") { s = "http://" + s }
-        if s.hasSuffix("/") { s = String(s.dropLast()) }
-        return s
-    }
-
     private var candidates: [String] {
         [receiptsAppGroupDefaults.string(forKey: "localURL") ?? "",
-         receiptsAppGroupDefaults.string(forKey: "tailscaleURL") ?? ""].compactMap(normalizeURL)
+         receiptsAppGroupDefaults.string(forKey: "tailscaleURL") ?? ""].compactMap(PhotoUploader.normalizeURL)
     }
 
     var webURL: URL? {
@@ -72,19 +86,13 @@ final class ReceiptsStore: ObservableObject {
 
     /// Tries each configured server URL in order (local first, then Tailscale) until one responds.
     /// A reachable server that returns an error status is reported as-is rather than retried.
-    private func request(path: String, method: String = "GET", body: Data? = nil,
-                         contentType: String? = nil, timeout: TimeInterval = 8) async throws -> Data {
+    private func request(path: String, timeout: TimeInterval = 8) async throws -> Data {
         guard !candidates.isEmpty else { throw ReceiptsError.noServer }
 
         var lastError: Error = ReceiptsError.unreachable
         for base in candidates {
             guard let url = URL(string: base + path) else { continue }
-            var req = URLRequest(url: url, timeoutInterval: timeout)
-            req.httpMethod = method
-            if let body {
-                req.setValue(contentType, forHTTPHeaderField: "Content-Type")
-                req.httpBody = body
-            }
+            let req = URLRequest(url: url, timeoutInterval: timeout)
             let data: Data, response: URLResponse
             do {
                 (data, response) = try await URLSession.shared.data(for: req)
@@ -110,23 +118,62 @@ final class ReceiptsStore: ObservableObject {
     }
 
     func upload(_ image: UIImage) async {
-        let upload = ReceiptUpload(thumbnail: image.resizedForUpload(maxDimension: 200))
-        uploads.insert(upload, at: 0)
+        let thumb = image.resizedForUpload(maxDimension: 200)
         guard let jpeg = image.resizedForUpload(maxDimension: 2400).jpegData(compressionQuality: 0.8) else {
-            setState(upload.id, .failed(ReceiptsError.badImage.localizedDescription))
+            uploads.insert(ReceiptUpload(id: UUID(), thumbnail: thumb, jpeg: Data(),
+                                         state: .failed(ReceiptsError.badImage.localizedDescription)), at: 0)
             return
         }
-        let rid: Int
+        let item = ReceiptUpload(id: UUID(), thumbnail: thumb, jpeg: jpeg)
+        uploads.insert(item, at: 0)
         do {
-            let data = try await request(path: "/api/receipts", method: "POST", body: jpeg,
-                                         contentType: "image/jpeg", timeout: 60)
-            rid = try JSONDecoder().decode(ReceiptUploadResponse.self, from: data).id
+            try unsent.save(item.id, jpeg)
+            saveError = nil
         } catch {
-            setState(upload.id, .failed("Upload failed: \(error.localizedDescription)"))
+            saveError = "Couldn't save a copy of the photo on the phone, so if it fails to send it can only be retried until the app closes: \(error.localizedDescription)"
+        }
+        await send(item.id)
+    }
+
+    func retry(_ uploadId: UUID) async {
+        guard let u = uploads.first(where: { $0.id == uploadId }), case .notSent = u.state else { return }
+        await send(uploadId)
+    }
+
+    /// Throws away a photo that was never sent.
+    func discard(_ uploadId: UUID) {
+        unsent.remove(uploadId)
+        uploads.removeAll { $0.id == uploadId }
+    }
+
+    private func send(_ uploadId: UUID) async {
+        guard let jpeg = uploads.first(where: { $0.id == uploadId })?.jpeg else { return }
+        setState(uploadId, .uploading(UploadProgress()))
+        let data: Data
+        do {
+            let base = try await PhotoUploader.firstReachable(candidates)
+            reachableBase = base
+            data = try await PhotoUploader.send(jpeg, to: base, path: "/api/receipts") { [weak self] p in
+                self?.showProgress(uploadId, p)
+            }
+        } catch {
+            setState(uploadId, .notSent("Upload failed: \(error.localizedDescription)"))
             return
         }
-        setState(upload.id, .reading, receiptId: rid)
-        await waitUntilRead(upload.id, rid)
+        // The server has it now, so there's nothing left to retry.
+        unsent.remove(uploadId)
+        guard let rid = try? JSONDecoder().decode(ReceiptUploadResponse.self, from: data).id else {
+            setState(uploadId, .failed("Uploaded, but the server's reply didn't include a receipt id. Check the web app."))
+            return
+        }
+        setState(uploadId, .reading, receiptId: rid)
+        await waitUntilRead(uploadId, rid)
+    }
+
+    private func showProgress(_ uploadId: UUID, _ p: UploadProgress) {
+        guard let i = uploads.firstIndex(where: { $0.id == uploadId }),
+              case .uploading = uploads[i].state else { return }
+        uploads[i].state = .uploading(p)
     }
 
     /// Polls the receipt until the server has finished reading it (usually 20–40 s).
@@ -161,20 +208,6 @@ final class ReceiptsStore: ObservableObject {
     }
 }
 
-private extension UIImage {
-    func resizedForUpload(maxDimension: CGFloat) -> UIImage {
-        let longest = max(size.width, size.height)
-        guard longest > maxDimension else { return self }
-        let scale = maxDimension / longest
-        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        return UIGraphicsImageRenderer(size: newSize, format: format).image { _ in
-            draw(in: CGRect(origin: .zero, size: newSize))
-        }
-    }
-}
-
 // MARK: - Tab root
 
 struct ReceiptsView: View {
@@ -189,7 +222,7 @@ struct ReceiptsView: View {
     var body: some View {
         NavigationStack {
             List {
-                if let err = errorMessage {
+                if let err = errorMessage ?? store.saveError {
                     Section { Text(err).font(.footnote).foregroundColor(.red) }
                 }
 
@@ -215,7 +248,11 @@ struct ReceiptsView: View {
 
                 if !store.uploads.isEmpty {
                     Section("Sent") {
-                        ForEach(store.uploads) { UploadRow(upload: $0) }
+                        ForEach(store.uploads) { u in
+                            UploadRow(upload: u,
+                                      onRetry: { Task { await store.retry(u.id) } },
+                                      onDiscard: { store.discard(u.id) })
+                        }
                     }
                 }
 
@@ -260,17 +297,34 @@ struct ReceiptsView: View {
 
 private struct UploadRow: View {
     let upload: ReceiptUpload
+    let onRetry: () -> Void
+    let onDiscard: () -> Void
+    @State private var confirmDiscard = false
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .top, spacing: 12) {
             Image(uiImage: upload.thumbnail)
                 .resizable().scaledToFill()
                 .frame(width: 44, height: 44)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 switch upload.state {
-                case .uploading:
+                case .uploading(let progress):
                     Text("Uploading…")
+                    UploadProgressBar(progress: progress)
+                case .notSent(let msg):
+                    Label("Not sent", systemImage: "exclamationmark.triangle.fill").foregroundColor(.red)
+                    Text(msg).font(.caption).foregroundColor(.red)
+                    HStack {
+                        Button(action: onRetry) {
+                            Label("Retry", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Discard", role: .destructive) { confirmDiscard = true }
+                            .buttonStyle(.bordered)
+                    }
+                    .font(.caption)
+                    .padding(.top, 2)
                 case .reading:
                     Text("Reading receipt…")
                     Text("Usually takes 20–40 seconds").font(.caption).foregroundColor(.secondary)
@@ -282,11 +336,12 @@ private struct UploadRow: View {
                     Text(msg).font(.caption).foregroundColor(.red)
                 }
             }
-            Spacer()
-            switch upload.state {
-            case .uploading, .reading: ProgressView()
-            default: EmptyView()
-            }
+            Spacer(minLength: 0)
+            if case .reading = upload.state { ProgressView() }
+        }
+        .confirmationDialog("Discard this receipt photo? It was never sent to the server.",
+                            isPresented: $confirmDiscard, titleVisibility: .visible) {
+            Button("Discard Photo", role: .destructive, action: onDiscard)
         }
     }
 }
