@@ -171,12 +171,27 @@ def process(db_path: str, photo_id: int) -> None:
             pid = data.get("product_id")
             if pid not in {c["id"] for c in cands}:
                 pid = None
-            conn.execute(
-                "UPDATE product_photos SET status=?, product_id=?, match_source=?, model_product_id=?, "
-                "model_seen=?, model_notes=?, processed_at=? WHERE id=?",
-                ("matched" if pid else "unmatched", pid, "model" if pid else None, pid,
-                 data.get("seen"), data.get("notes"), _now(), photo_id),
-            )
+            claimed = 0
+            if pid:
+                # Only claim the product if it still has no picture: another photo
+                # matched at the same time may have taken it while the model ran.
+                # Never cover an existing picture.
+                claimed = conn.execute(
+                    "UPDATE product_photos SET status='matched', product_id=?, match_source='model', "
+                    "model_product_id=?, model_seen=?, model_notes=?, processed_at=? "
+                    "WHERE id=? AND NOT EXISTS (SELECT 1 FROM product_photos o WHERE o.product_id=? AND o.id != ?)",
+                    (pid, pid, data.get("seen"), data.get("notes"), _now(), photo_id, pid, photo_id),
+                ).rowcount
+            if not claimed:
+                notes = data.get("notes")
+                if pid:
+                    taken = "That product got a picture from another photo while this one was being matched"
+                    notes = f"{taken}. {notes}" if notes else taken
+                conn.execute(
+                    "UPDATE product_photos SET status='unmatched', product_id=NULL, match_source=NULL, "
+                    "model_product_id=?, model_seen=?, model_notes=?, processed_at=? WHERE id=?",
+                    (pid, data.get("seen"), notes, _now(), photo_id),
+                )
         except Exception as e:
             msg = str(e) if isinstance(e, PhotoError) else f"{type(e).__name__}: {e}"
             conn.execute("UPDATE product_photos SET status='error', error=?, processed_at=? WHERE id=?",

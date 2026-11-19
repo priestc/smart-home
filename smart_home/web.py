@@ -113,6 +113,7 @@ _CRUMBS: dict[str, tuple[str, str | None]] = {
     "/cost-of-living": ("Cost of Living", "/"),
     "/receipts": ("Receipts", "/cost-of-living"),
     "/receipts/items": ("Products", "/receipts"),
+    "/receipts/photos": ("Product Photos", "/receipts/items"),
     "/receipts/new": ("Add Receipt", "/receipts"),
     "/utilities": ("Utilities", "/cost-of-living"),
 }
@@ -12315,11 +12316,17 @@ def api_receipt_item_set_product(item_id):
             moved = conn.execute("UPDATE receipt_items SET product_id=?, description=? WHERE id=?",
                                  (pid, name, item_id)).rowcount
         old = item['product_id']
-        # A product merged away entirely takes its pictures along
+        # A product merged away entirely takes its picture along, unless the product
+        # it merged into already has one: then its photos are left without a product
+        # (to reassign on the Product Photos page) rather than covering that picture.
         if old is not None and old != pid and not conn.execute(
                 "SELECT 1 FROM receipt_items WHERE product_id=? UNION SELECT 1 FROM product_keys WHERE product_id=?",
                 (old, old)).fetchone():
-            conn.execute("UPDATE product_photos SET product_id=? WHERE product_id=?", (pid, old))
+            if not conn.execute("SELECT 1 FROM product_photos WHERE product_id=?", (pid,)).fetchone():
+                conn.execute("UPDATE product_photos SET product_id=? WHERE id = "
+                             "(SELECT MAX(id) FROM product_photos WHERE product_id=?)", (pid, old))
+            conn.execute("UPDATE product_photos SET product_id=NULL, match_source=NULL, status='unmatched' "
+                         "WHERE product_id=?", (old,))
         prune_products(conn)
     return jsonify({'ok': True, 'product_id': pid, 'moved': moved})
 
@@ -13459,7 +13466,9 @@ def api_receipt_known_items():
 
 _PHOTO_COLS = ("ph.id, ph.uploaded_at, ph.status, ph.error, ph.processed_at, ph.product_id, ph.match_source, "
                "ph.model_product_id, ph.model_seen, ph.model_notes, p.name AS product_name, "
-               "mp.name AS model_product_name")
+               "mp.name AS model_product_name, "
+               # The photo its product shows (its newest); another id means this one is hidden
+               "(SELECT MAX(ph2.id) FROM product_photos ph2 WHERE ph2.product_id = ph.product_id) AS product_photo_id")
 _PHOTO_FROM = ("FROM product_photos ph LEFT JOIN products p ON p.id = ph.product_id "
                "LEFT JOIN products mp ON mp.id = ph.model_product_id")
 
@@ -13532,21 +13541,50 @@ def api_product_photo_image(photo_id):
 @app.post("/api/product-photos/<int:photo_id>/product")
 def api_product_photo_set_product(photo_id):
     """Correct which product a photo shows. Body: {product_id}, or
-    {product_id: null} to take it off its product."""
+    {product_id: null} to take it off its product.
+
+    A picture is never covered: if the product already has another photo the
+    answer is 409, unless {swap: true}, which moves that photo to this one's
+    old product (or leaves it without a product if this one had none)."""
     data = request.get_json(silent=True) or {}
     if 'product_id' not in data:
         return jsonify({'error': 'product_id is required (null to clear)'}), 400
     pid = data['product_id']
     if pid is not None and not isinstance(pid, int):
         return jsonify({'error': 'product_id must be a number or null'}), 400
+    swap = data.get('swap') is True
     with _conn() as conn:
-        row = conn.execute("SELECT status FROM product_photos WHERE id=?", (photo_id,)).fetchone()
+        row = conn.execute("SELECT product_id FROM product_photos WHERE id=?", (photo_id,)).fetchone()
         if row is None:
             return jsonify({'error': 'Photo not found'}), 404
-        if pid is not None and conn.execute("SELECT 1 FROM products WHERE id=?", (pid,)).fetchone() is None:
-            return jsonify({'error': 'Product not found'}), 404
+        old = row['product_id']
+        others: list[int] = []
+        if pid is not None:
+            prod = conn.execute("SELECT name FROM products WHERE id=?", (pid,)).fetchone()
+            if prod is None:
+                return jsonify({'error': 'Product not found'}), 404
+            others = [r[0] for r in conn.execute(
+                "SELECT id FROM product_photos WHERE product_id=? AND id != ? ORDER BY id DESC", (pid, photo_id))]
+            if others and not swap:
+                return jsonify({
+                    'error': f'{prod["name"]} already has a picture (photo #{others[0]}). '
+                             'Swap the two pictures, or move that one to another product first.',
+                    'conflict_photo_ids': others,
+                }), 409
         conn.execute("UPDATE product_photos SET product_id=?, match_source=?, status=?, error=NULL WHERE id=?",
                      (pid, 'manual' if pid else None, 'matched' if pid else 'unmatched', photo_id))
+        if others:
+            # The swap: the product's newest other photo goes to this photo's old
+            # product, if that product now has no picture; any others are unassigned.
+            dest = old if old is not None and old != pid and not conn.execute(
+                "SELECT 1 FROM product_photos WHERE product_id=?", (old,)).fetchone() else None
+            if dest is not None:
+                conn.execute("UPDATE product_photos SET product_id=?, match_source='manual', status='matched', "
+                             "error=NULL WHERE id=?", (dest, others[0]))
+                others = others[1:]
+            if others:
+                conn.execute(f"UPDATE product_photos SET product_id=NULL, match_source=NULL, status='unmatched' "
+                             f"WHERE id IN ({','.join('?' * len(others))})", others)
         prune_products(conn)
         out = conn.execute(f"SELECT {_PHOTO_COLS} {_PHOTO_FROM} WHERE ph.id=?", (photo_id,)).fetchone()
     return jsonify(_photo_json(out))
@@ -13651,6 +13689,7 @@ _RECEIPT_ITEMS_PAGE = """\
   <div class="toolbar">
     <input type="search" id="filter" placeholder="Filter by name, printed text or store">
     <span class="count" id="count"></span>
+    <a href="/receipts/photos" style="font-size:.85rem;color:#2e7dd4;text-decoration:none">Manage product photos &rarr;</a>
   </div>
   <div class="wrap">
     <table>
@@ -13714,7 +13753,7 @@ function render() {
   tbody.innerHTML = shown.map(it => {
     const idx = items.indexOf(it);
     return `<tr data-idx="${idx}">
-      <td>${it.photo_id ? `<a href="/api/product-photos/${it.photo_id}/image" target="_blank"><img class="thumb" loading="lazy" src="/api/product-photos/${it.photo_id}/image" alt=""></a>` : '<div class="no-thumb" title="No picture yet. Take one in the Products tab of the app."></div>'}</td>
+      <td>${it.photo_id ? `<a href="/receipts/photos#photo-${it.photo_id}" title="Reassign this picture"><img class="thumb" loading="lazy" src="/api/product-photos/${it.photo_id}/image" alt=""></a>` : '<div class="no-thumb" title="No picture yet. Take one in the Products tab of the app, or assign one on the Product Photos page."></div>'}</td>
       <td><div class="name-cell">
         <input type="text" data-f="name" value="${esc(it.name || '')}">
       </div></td>
@@ -14406,6 +14445,303 @@ fetchJSON('/api/receipts/config')
 @app.get("/receipts/items")
 def receipt_items_page():
     return Response(_RECEIPT_ITEMS_PAGE, mimetype="text/html")
+
+
+_PRODUCT_PHOTOS_PAGE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Product Photos &mdash; Smart Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; letter-spacing: -.02em; }
+    .intro { font-size: .9rem; color: #4a6080; margin-bottom: 1rem; max-width: 52rem; }
+    .toolbar { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+    .toolbar input[type=search] { padding: .45rem .7rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .9rem; min-width: 14rem; }
+    .tabs { display: flex; gap: .3rem; flex-wrap: wrap; }
+    .tabs button { background: #fff; border: 1px solid #d0dce8; border-radius: 999px; padding: .35rem .8rem; font-size: .82rem; cursor: pointer; color: #4a6080; }
+    .tabs button.on { background: #2e7dd4; border-color: #2e7dd4; color: #fff; }
+    .count { font-size: .85rem; color: #7a90a8; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem; }
+    .card { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); overflow: hidden; display: flex; flex-direction: column; scroll-margin-top: 1rem; }
+    .card.target { outline: 3px solid #2e7dd4; }
+    .card img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; display: block; background: #f0f4f8; }
+    .body { padding: .75rem .85rem .85rem; display: flex; flex-direction: column; gap: .35rem; flex: 1; }
+    .title { font-weight: 600; font-size: .98rem; }
+    .title.none { color: #7a90a8; font-weight: 500; font-style: italic; }
+    .muted { color: #7a90a8; font-size: .8rem; }
+    .state { font-size: .8rem; }
+    .state.ok { color: #2db37a; } .state.warn { color: #c46a00; } .state.err { color: #b00; }
+    .warn-box { background: #fff4e5; border: 1px solid #f3c98b; color: #8a4b00; border-radius: 6px; padding: .4rem .55rem; font-size: .8rem; }
+    .assign { display: flex; gap: .4rem; margin-top: .3rem; }
+    .assign select { flex: 1; min-width: 0; padding: .4rem .4rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .85rem; background: #fff; }
+    button.primary { background: #2e7dd4; color: #fff; border: none; border-radius: 6px; padding: .4rem .8rem; cursor: pointer; font-size: .82rem; white-space: nowrap; }
+    button.primary:disabled { background: #aabbc8; cursor: default; }
+    .actions { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: auto; padding-top: .35rem; }
+    .actions button { background: #fff; border: 1px solid #d0dce8; color: #2e4a6a; border-radius: 6px; padding: .3rem .6rem; cursor: pointer; font-size: .78rem; }
+    .actions button.danger { color: #b00; border-color: #e8b4b4; }
+    .actions button.danger.armed { background: #b00; color: #fff; border-color: #b00; }
+    .actions button:disabled { opacity: .5; cursor: default; }
+    .msg { font-size: .8rem; }
+    .msg.err { color: #b00; } .msg.ok { color: #2db37a; }
+    .msg button { margin-top: .35rem; }
+    .empty { padding: 2rem; text-align: center; color: #7a90a8; background: #fff; border-radius: 12px; grid-column: 1 / -1; }
+    .empty.err { color: #b00; }
+  </style>
+</head>
+<body>
+  <h1>Product Photos</h1>
+  <p class="intro">Every photo taken in the Products tab of the app. A product shows one picture, and a picture is
+  never replaced: moving a photo onto a product that already has one asks you to swap them instead.
+  Photos without a product are kept here until you assign them.</p>
+  <div class="toolbar">
+    <div class="tabs" id="tabs">
+      <button data-tab="all" class="on">All</button>
+      <button data-tab="none">Need a product</button>
+      <button data-tab="hidden">Hidden</button>
+    </div>
+    <input type="search" id="filter" placeholder="Filter by product or what the model saw">
+    <span class="count" id="count"></span>
+  </div>
+  <div class="grid" id="grid"><div class="empty">Loading&hellip;</div></div>
+<script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '⚠ ' + msg;
+}
+function clearNetworkError() {
+  const el = document.getElementById('_net_err');
+  if (el) el.remove();
+}
+// Resolves to {ok, status, data}; throws only when the server can't be reached
+async function call(url, opts) {
+  const r = await fetch(url, opts);
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* non-JSON body; status reported below */ }
+  return {ok: r.ok, status: r.status, data,
+          error: (data && data.error) || (r.ok ? null : `HTTP ${r.status} ${r.statusText}`)};
+}
+async function fetchJSON(url) {
+  const res = await call(url);
+  if (!res.ok) throw new Error(res.error);
+  return res.data;
+}
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+let photos = [], products = [], tab = 'all', pollTimer = null, scrolled = false;
+const productById = id => products.find(p => p.id === id);
+const isHidden = ph => ph.product_id != null && ph.product_photo_id !== ph.id;
+const needsProduct = ph => ph.product_id == null && ph.status !== 'processing';
+
+async function load() {
+  try {
+    const [ph, pr] = await Promise.all([fetchJSON('/api/product-photos?limit=1000'), fetchJSON('/api/products')]);
+    photos = ph.photos;
+    products = pr.products.slice().sort((a, b) => a.name.localeCompare(b.name, undefined, {sensitivity: 'base'}));
+    clearNetworkError();
+    render();
+  } catch (e) {
+    showNetworkError('Could not load photos: ' + e.message);
+    if (!photos.length) document.getElementById('grid').innerHTML =
+      `<div class="empty err">Could not load photos: ${esc(e.message)}</div>`;
+  }
+  // While the model is matching a photo, check back every few seconds
+  clearTimeout(pollTimer);
+  if (photos.some(p => p.status === 'processing')) pollTimer = setTimeout(load, 3000);
+}
+
+function productOptions(ph) {
+  const free = [], taken = [];
+  for (const p of products) {
+    const sel = p.id === ph.product_id ? ' selected' : '';
+    if (p.photo_id == null || p.photo_id === ph.id) free.push(`<option value="${p.id}"${sel}>${esc(p.name)}</option>`);
+    else taken.push(`<option value="${p.id}"${sel}>${esc(p.name)} (has a picture)</option>`);
+  }
+  return `<option value="">Choose a product…</option>`
+    + (free.length ? `<optgroup label="No picture yet">${free.join('')}</optgroup>` : '')
+    + (taken.length ? `<optgroup label="Already have a picture">${taken.join('')}</optgroup>` : '');
+}
+
+function stateLine(ph) {
+  switch (ph.status) {
+    case 'processing': return '<div class="state warn">Matching… usually 20–40 seconds</div>';
+    case 'matched': return `<div class="state ok">${ph.match_source === 'manual' ? 'Picked by hand' : 'Matched by the model'}</div>`;
+    case 'unmatched': return '<div class="state warn">No product</div>';
+    default: return `<div class="state err">Failed: ${esc(ph.error || 'matching failed')}</div>`;
+  }
+}
+
+function card(ph) {
+  const prod = ph.product_id != null ? productById(ph.product_id) : null;
+  const name = ph.product_name || (ph.product_id != null ? `Product #${ph.product_id}` : null);
+  const modelPick = ph.model_product_id != null && ph.model_product_id !== ph.product_id
+    ? `<div class="muted">Model picked: ${esc(ph.model_product_name || '#' + ph.model_product_id)}</div>` : '';
+  const hidden = isHidden(ph)
+    ? `<div class="warn-box">Hidden: ${esc(name)} shows <a href="#photo-${ph.product_photo_id}">photo #${ph.product_photo_id}</a> instead. Move this one to the right product.</div>` : '';
+  const busy = ph.status === 'processing';
+  return `<div class="card" id="photo-${ph.id}" data-id="${ph.id}">
+    <a href="/api/product-photos/${ph.id}/image" target="_blank"><img loading="lazy" src="/api/product-photos/${ph.id}/image" alt=""></a>
+    <div class="body">
+      <div class="title${name ? '' : ' none'}">${esc(name || 'No product')}</div>
+      ${stateLine(ph)}
+      ${hidden}
+      ${ph.model_seen ? `<div class="muted">Model saw: ${esc(ph.model_seen)}</div>` : ''}
+      ${modelPick}
+      ${ph.model_notes ? `<div class="muted">${esc(ph.model_notes)}</div>` : ''}
+      <div class="muted">Photo #${ph.id} · ${esc(ph.uploaded_at)}</div>
+      <div class="assign">
+        <select data-product ${busy ? 'disabled' : ''}>${productOptions(ph)}</select>
+        <button class="primary" data-act="move" disabled>Move</button>
+      </div>
+      <div class="msg" data-msg></div>
+      <div class="actions">
+        ${ph.product_id != null ? '<button data-act="clear">Take off product</button>' : ''}
+        <button data-act="retry" ${busy ? 'disabled' : ''}>Match again</button>
+        <button data-act="delete" class="danger">Delete</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function render() {
+  const q = document.getElementById('filter').value.trim().toLowerCase();
+  const inTab = ph => tab === 'all' || (tab === 'none' ? needsProduct(ph) : isHidden(ph));
+  const shown = photos.filter(ph => inTab(ph) && (!q || [ph.product_name, ph.model_seen, ph.model_product_name, String(ph.id)]
+    .some(v => v && v.toLowerCase().includes(q))));
+  const nNone = photos.filter(needsProduct).length, nHidden = photos.filter(isHidden).length;
+  document.querySelector('[data-tab=none]').textContent = `Need a product (${nNone})`;
+  document.querySelector('[data-tab=hidden]').textContent = `Hidden (${nHidden})`;
+  document.getElementById('count').textContent = `${shown.length} of ${photos.length} photos`;
+  const grid = document.getElementById('grid');
+  grid.innerHTML = shown.length ? shown.map(card).join('')
+    : `<div class="empty">${photos.length ? 'No photos here.' : 'No photos yet. Take one in the Products tab of the app.'}</div>`;
+  highlightTarget();
+}
+
+function highlightTarget() {
+  document.querySelectorAll('.card.target').forEach(c => c.classList.remove('target'));
+  const el = location.hash && document.getElementById(location.hash.slice(1));
+  if (!el) return;
+  el.classList.add('target');
+  if (!scrolled) { el.scrollIntoView({block: 'center'}); scrolled = true; }
+}
+window.addEventListener('hashchange', () => { scrolled = false; highlightTarget(); });
+
+function setMsg(cardEl, html, cls) {
+  const m = cardEl.querySelector('[data-msg]');
+  m.className = 'msg ' + (cls || '');
+  m.innerHTML = html;
+}
+
+async function assign(cardEl, productId, swap) {
+  const id = +cardEl.dataset.id;
+  cardEl.querySelectorAll('button, select').forEach(b => b.disabled = true);
+  setMsg(cardEl, 'Saving…');
+  let res;
+  try {
+    res = await call(`/api/product-photos/${id}/product`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(swap ? {product_id: productId, swap: true} : {product_id: productId}),
+    });
+  } catch (e) {
+    cardEl.querySelectorAll('button, select').forEach(b => b.disabled = false);
+    setMsg(cardEl, 'Could not reach the server: ' + esc(e.message), 'err');
+    return;
+  }
+  if (res.status === 409) {
+    cardEl.querySelectorAll('button, select').forEach(b => b.disabled = false);
+    const ph = photos.find(p => p.id === id);
+    const where = ph && ph.product_id != null && ph.product_id !== productId
+      ? `the other picture moves to ${esc(ph.product_name)}` : 'the other picture is left without a product';
+    setMsg(cardEl, `${esc(res.error)}<br><button class="primary" data-act="swap" data-pid="${productId}">Swap pictures</button>
+      <span class="muted">(${where})</span>`, 'err');
+    return;
+  }
+  if (!res.ok) {
+    cardEl.querySelectorAll('button, select').forEach(b => b.disabled = false);
+    setMsg(cardEl, 'Could not save: ' + esc(res.error), 'err');
+    return;
+  }
+  await load();
+}
+
+document.getElementById('grid').addEventListener('change', e => {
+  if (!e.target.matches('[data-product]')) return;
+  const cardEl = e.target.closest('.card');
+  const ph = photos.find(p => p.id === +cardEl.dataset.id);
+  const v = e.target.value === '' ? null : +e.target.value;
+  cardEl.querySelector('[data-act=move]').disabled = v == null || v === ph.product_id;
+  setMsg(cardEl, '');
+});
+
+document.getElementById('grid').addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const cardEl = btn.closest('.card');
+  const id = +cardEl.dataset.id;
+  const act = btn.dataset.act;
+  if (act === 'move') {
+    await assign(cardEl, +cardEl.querySelector('[data-product]').value, false);
+  } else if (act === 'swap') {
+    await assign(cardEl, +btn.dataset.pid, true);
+  } else if (act === 'clear') {
+    await assign(cardEl, null, false);
+  } else if (act === 'retry') {
+    btn.disabled = true;
+    setMsg(cardEl, 'Asking the model again…');
+    try {
+      const res = await call(`/api/product-photos/${id}/retry`, {method: 'POST'});
+      if (!res.ok) { btn.disabled = false; setMsg(cardEl, 'Could not retry: ' + esc(res.error), 'err'); return; }
+    } catch (err) {
+      btn.disabled = false; setMsg(cardEl, 'Could not reach the server: ' + esc(err.message), 'err'); return;
+    }
+    await load();
+  } else if (act === 'delete') {
+    // Two clicks to delete, so a stray click can't lose a photo
+    if (!btn.classList.contains('armed')) {
+      btn.classList.add('armed');
+      btn.textContent = 'Click again to delete';
+      setTimeout(() => { btn.classList.remove('armed'); btn.textContent = 'Delete'; }, 4000);
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const res = await call(`/api/product-photos/${id}`, {method: 'DELETE'});
+      if (!res.ok) { btn.disabled = false; setMsg(cardEl, 'Could not delete: ' + esc(res.error), 'err'); return; }
+    } catch (err) {
+      btn.disabled = false; setMsg(cardEl, 'Could not reach the server: ' + esc(err.message), 'err'); return;
+    }
+    await load();
+  }
+});
+
+document.getElementById('tabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-tab]');
+  if (!b) return;
+  tab = b.dataset.tab;
+  document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('on', x === b));
+  render();
+});
+document.getElementById('filter').addEventListener('input', render);
+load();
+</script>
+</body>
+</html>"""
+
+
+@app.get("/receipts/photos")
+def product_photos_page():
+    return Response(_PRODUCT_PHOTOS_PAGE, mimetype="text/html")
 
 
 def _months_start(months: int) -> str:
