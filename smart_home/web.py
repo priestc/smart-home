@@ -12657,6 +12657,9 @@ _RECEIPT_DETAIL_PAGE = """\\
     .product-opt.new { color: #2e7dd4; font-weight: 600; }
     .product-opt[data-pid] { display: flex; gap: .7rem; align-items: center; }
     .product-opt .thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; flex: none; background: #f0f4f8; }
+    .thumb-cell { width: 52px; }
+    .thumb-cell .thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; display: block; background: #f0f4f8; }
+    .thumb-cell .no-thumb { width: 44px; height: 44px; border-radius: 6px; border: 1px dashed #d0dce8; }
   </style>
 </head>
 <body>
@@ -12684,9 +12687,9 @@ _RECEIPT_DETAIL_PAGE = """\\
       <div class="card" id="items-card">
         <h2>Items</h2>
         <table>
-          <thead><tr><th title="The product this line describes. Editing the name renames the product on every receipt.">Product</th><th title="Amount bought on this line. Leave empty to use the product&rsquo;s default from the Products page.">Quantity</th><th class="num">Price</th><th>Category</th><th></th><th></th></tr></thead>
+          <thead><tr><th></th><th title="The product this line describes. Editing the name renames the product on every receipt.">Product</th><th title="Amount bought on this line. Leave empty to use the product&rsquo;s default from the Products page.">Quantity</th><th class="num">Price</th><th>Category</th><th></th><th></th></tr></thead>
           <tbody id="items"></tbody>
-          <tfoot><tr><td>Items total</td><td></td><td class="num" id="items-sum"></td><td colspan="3"></td></tr></tfoot>
+          <tfoot><tr><td></td><td>Items total</td><td></td><td class="num" id="items-sum"></td><td colspan="3"></td></tr></tfoot>
         </table>
         <div class="actions" style="margin-top:.9rem">
           <button class="btn secondary" id="add-item">+ Add item</button>
@@ -12769,13 +12772,18 @@ function render() {
   document.getElementById('notes').textContent = !r.notes ? '' : r.manual ? r.notes : 'Note from the reader: ' + r.notes;
 
   document.getElementById('items').innerHTML = r.items.map(it => itemRow(it)).join('') ||
-    '<tr><td colspan="6" class="muted">No items.</td></tr>';
+    '<tr><td colspan="7" class="muted">No items.</td></tr>';
 }
 
 function itemRow(it) {
   const printed = [it.raw_text, it.item_code].filter(Boolean).join(' \\u00b7 ');
   const opts = categories.map(c => `<option${c === it.category ? ' selected' : ''}>${esc(c)}</option>`).join('');
+  // Picture of the product this line is matched to (its most recent photo)
+  const thumb = it.photo_id
+    ? `<a href="/api/product-photos/${it.photo_id}/image" target="_blank"><img class="thumb" loading="lazy" src="/api/product-photos/${it.photo_id}/image" alt=""></a>`
+    : `<div class="no-thumb" title="${it.product_id != null ? 'No picture of this product yet. Take one in the Products tab of the app.' : 'Not matched to a product yet'}"></div>`;
   return `<tr data-id="${it.id ?? ''}">
+    <td class="thumb-cell">${thumb}</td>
     <td><input type="text" data-f="description" value="${esc(it.description)}"
           title="${it.product_lines > 1 ? `Renames this product on all ${it.product_lines} lines that point to it` : 'Product name'}">
         ${printed && printed !== it.description ? `<div class="printed">${esc(printed)}</div>` : ''}
