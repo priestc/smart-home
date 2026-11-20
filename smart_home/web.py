@@ -5389,10 +5389,6 @@ def index():
     .gas-card { text-decoration: none; color: inherit; display: block; }
     .gas-card .gas-price { font-size: 2.4rem; font-weight: 700; margin: .2rem 0 .1rem; line-height: 1; font-variant-numeric: tabular-nums; }
     .gas-card .gas-cmp { font-size: .9rem; font-weight: 600; }
-    .gpu-card .gpu-temps { display: flex; gap: 1.1rem; margin: .3rem 0 .2rem; }
-    .gpu-card .gpu-t { font-size: 1.6rem; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
-    .gpu-card .gpu-tl { font-size: .7rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-top: .2rem; }
-    .gpu-card .gpu-stats { font-size: .85rem; color: #1a2535; font-weight: 500; }
     .disk-card { min-width: 280px; }
     .disk-card .disk { margin-top: .6rem; }
     .disk-card .disk-head { display: flex; justify-content: space-between; gap: 1rem; font-size: .85rem; font-weight: 600; }
@@ -5446,7 +5442,6 @@ def index():
     <div id="sun-widget"></div>
     <div class="garage-cards" id="garage-cards" style="margin-bottom:0"></div>
     <div id="gas-widget"></div>
-    <div id="gpu-widget" style="display:flex;gap:1rem;flex-wrap:wrap"></div>
     <div id="disk-widget"></div>
   </div>
   <div class="pool-cards"    id="pool-cards"    style="display:none"></div>
@@ -5730,50 +5725,6 @@ async function loadGas() {
     <div class="gas-cmp" style="color:${color}">${arrow} $${Math.abs(data.diff).toFixed(2)} vs 30-day avg $${data.avg_30d.toFixed(2)}${days}</div>
     <div class="ts">Cheapest $${data.current_min.toFixed(2)} &middot; ${esc(data.cheapest_name)}</div>${warn}</a>`;
 }
-async function loadGpu() {
-  const el = document.getElementById('gpu-widget');
-  let r, data;
-  try {
-    r = await fetch('/api/gpu');
-    data = await r.json();
-  } catch (e) {
-    showError('GPU temperature');
-    return;
-  }
-  if (!r.ok) {
-    el.innerHTML = `<div class="card gpu-card"><div class="label">GPU</div>
-      <div class="ts" style="font-size:.85rem;color:#c0392b">${data.error || 'HTTP ' + r.status}</div></div>`;
-    return;
-  }
-  // Red within 10°C of the critical limit, orange within 25°C
-  const tempColor = t => {
-    const crit = t.crit_c ?? 100;
-    return t.c >= crit - 10 ? '#c0392b' : t.c >= crit - 25 ? '#e07820' : '#2a9d6e';
-  };
-  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  el.innerHTML = data.gpus.map(g => {
-    const label = `<div class="label" title="${esc(g.card)}">${esc(g.name)}</div>`;
-    const ts = `<div class="ts">${new Date().toLocaleTimeString()}</div>`;
-    if (g.suspended) {
-      return `<div class="card gpu-card offline">${label}
-        <div class="gpu-t" style="color:#aabbc8;margin:.3rem 0 .2rem">Idle</div>
-        <div class="gpu-stats" style="color:#aabbc8">Powered down</div>${ts}</div>`;
-    }
-    // Greyed out while idle (0% load); otherwise colored by distance to the critical limit
-    const idle = g.busy_pct === 0;
-    const temps = g.temps.filter(t => t.c != null).map(t => `<div title="Critical at ${t.crit_c ?? '?'}&deg;C">
-        <div class="gpu-t" style="color:${idle ? '#aabbc8' : tempColor(t)}">${Math.round(t.c)}&deg;</div>
-        <div class="gpu-tl">${esc(t.label)}</div></div>`).join('');
-    const stats = [
-      g.busy_pct != null ? (idle ? 'Idle' : `${g.busy_pct}% load`) : null,
-      g.power_w != null ? `${Math.round(g.power_w)}${g.power_cap_w ? '/' + Math.round(g.power_cap_w) : ''} W` : null,
-      g.fan_rpm != null ? `Fan ${g.fan_rpm} rpm` : null,
-    ].filter(Boolean).join(' &middot; ');
-    return `<div class="card gpu-card${idle ? ' offline' : ''}">${label}
-      <div class="gpu-temps">${temps}</div>
-      <div class="gpu-stats"${idle ? ' style="color:#aabbc8"' : ''}>${stats}</div>${ts}</div>`;
-  }).join('');
-}
 async function loadDisks() {
   const el = document.getElementById('disk-widget');
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -5817,8 +5768,6 @@ loadPool();
 loadSunTimes();
 loadGas();
 setInterval(loadGas, 15 * 60 * 1000);
-loadGpu();
-setInterval(loadGpu, 10000);
 setInterval(loadCurrent, 30000);
 setInterval(loadEvents, 60000);
 setInterval(loadGarage, 15000);
@@ -11301,7 +11250,10 @@ _LOCAL_DRIVES = [("tank2 SSD", "/"), ("tank2 RAID", "/mnt/md0")]
 # Drives on other machines, read over SSH as (label, ssh destination, df target).
 # /System/Volumes/Data's Available is the free space of the whole APFS container, so
 # used = total - free covers the system volume, snapshots and the rest.
-_REMOTE_DRIVES = [("Mac mini", "chrispriest@macmini.lan", "/System/Volumes/Data")]
+_REMOTE_DRIVES = [
+    ("Mac mini", "chrispriest@macmini.lan", "/System/Volumes/Data"),
+    ("Framework laptop", "chris@framework-laptop.lan", "/"),
+]
 _REMOTE_DISK_CACHE_S = 60
 _remote_disk_cache: dict[str, tuple[float, dict]] = {}
 
@@ -11334,7 +11286,11 @@ def api_disks():
     import os
     import shutil
 
-    drives = [_remote_disk(label, dest, path) for label, dest, path in _REMOTE_DRIVES]
+    from concurrent.futures import ThreadPoolExecutor
+
+    # In parallel, so one sleeping machine's SSH timeout doesn't also delay the others
+    with ThreadPoolExecutor(max_workers=len(_REMOTE_DRIVES)) as pool:
+        drives = list(pool.map(lambda d: _remote_disk(*d), _REMOTE_DRIVES))
     for label, mount in _LOCAL_DRIVES:
         # An unmounted array leaves an empty directory on the root drive, which would
         # otherwise silently report the root drive's numbers.
