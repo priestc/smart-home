@@ -11298,26 +11298,27 @@ def api_gpu():
 
 # Drives on this server shown in the dashboard Storage widget, as (label, mount point).
 _LOCAL_DRIVES = [("tank2 SSD", "/"), ("tank2 RAID", "/mnt/md0")]
-# Drives on other machines, read over SSH as (label, ssh destination). The Mac's
-# authorized_keys entry for tank2 forces `df -k /System/Volumes/Data`, so the key can
-# run nothing else. That volume's Available is the free space of the whole APFS
-# container, so used = total - free covers the system volume, snapshots and the rest.
-_REMOTE_DRIVES = [("Mac mini", "chrispriest@chriss-Mac-mini.local")]
+# Drives on other machines, read over SSH as (label, ssh destination, df target).
+# /System/Volumes/Data's Available is the free space of the whole APFS container, so
+# used = total - free covers the system volume, snapshots and the rest.
+_REMOTE_DRIVES = [("Mac mini", "chrispriest@macmini.lan", "/System/Volumes/Data")]
 _REMOTE_DISK_CACHE_S = 60
 _remote_disk_cache: dict[str, tuple[float, dict]] = {}
 
 
-def _remote_disk(label: str, dest: str) -> dict:
+def _remote_disk(label: str, dest: str, path: str) -> dict:
     import subprocess
     import time
     cached = _remote_disk_cache.get(dest)
     if cached and time.monotonic() - cached[0] < _REMOTE_DISK_CACHE_S:
         return cached[1]
     try:
-        p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", dest],
+        p = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", dest, "df", "-k", path],
                            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
         if p.returncode != 0:
             raise RuntimeError(p.stderr.strip().splitlines()[-1] if p.stderr.strip() else f"ssh exited {p.returncode}")
+        if not p.stdout.strip():
+            raise RuntimeError("df printed nothing")
         fields = p.stdout.strip().splitlines()[-1].split()
         total, free = int(fields[1]) * 1024, int(fields[3]) * 1024
         result = {"label": label, "mount": dest, "total": total, "used": total - free, "free": free}
@@ -11333,7 +11334,7 @@ def api_disks():
     import os
     import shutil
 
-    drives = [_remote_disk(label, dest) for label, dest in _REMOTE_DRIVES]
+    drives = [_remote_disk(label, dest, path) for label, dest, path in _REMOTE_DRIVES]
     for label, mount in _LOCAL_DRIVES:
         # An unmounted array leaves an empty directory on the root drive, which would
         # otherwise silently report the root drive's numbers.
