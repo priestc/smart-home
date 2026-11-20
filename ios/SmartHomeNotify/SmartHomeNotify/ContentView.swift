@@ -43,19 +43,28 @@ struct SettingsView: View {
     @State private var presenceStatus: String? = nil
     @State private var isRegisteringPresence = false
 
+    private enum Field { case localURL, tailscaleURL, presenceName }
+    @FocusState private var focusedField: Field?
+
     var body: some View {
         NavigationView {
             Form {
-                Section(header: Text("Server"), footer: Text("Local is used when on home WiFi. Tailscale is used when away. Registration is attempted on both.")) {
-                    TextField("192.168.1.231:5000", text: $localURL)
+                Section(header: Text("Server"), footer: Text("Use smart-home.lan — it works at home and over Tailscale. The second address is an optional fallback; registration is attempted on both.")) {
+                    TextField("smart-home.lan", text: $localURL)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .listRowSeparator(.visible)
-                    TextField("100.x.x.x:5000  (Tailscale IP)", text: $tailscaleURL)
+                        .focused($focusedField, equals: .localURL)
+                        .submitLabel(.next)
+                        .onSubmit { focusedField = .tailscaleURL }
+                    TextField("Fallback (optional), e.g. 192.168.1.190:5000", text: $tailscaleURL)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .focused($focusedField, equals: .tailscaleURL)
+                        .submitLabel(.done)
+                        .onSubmit { focusedField = nil }
                 }
 
                 Section {
@@ -87,6 +96,9 @@ struct SettingsView: View {
                     TextField("Device name", text: $presenceName)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .focused($focusedField, equals: .presenceName)
+                        .submitLabel(.done)
+                        .onSubmit { focusedField = nil }
                     Button(action: registerPresenceDevice) {
                         if isRegisteringPresence {
                             HStack {
@@ -114,8 +126,16 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Smart Home")
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { focusedField = nil }
+                }
+            }
         }
+        .onDisappear { focusedField = nil }
         .onAppear {
             if presenceName.isEmpty || presenceName == "iPhone" || presenceName == "iPad" {
                 presenceName = resolveDeviceName()
@@ -156,6 +176,7 @@ struct SettingsView: View {
     }
 
     private func registerForPush() {
+        focusedField = nil
         guard let token = UserDefaults.standard.string(forKey: "apnsDeviceToken"), !token.isEmpty else {
             pushStatus = "No device token yet — make sure notifications are allowed in Settings."
             return
@@ -259,6 +280,7 @@ struct SettingsView: View {
     }
 
     private func registerPresenceDevice() {
+        focusedField = nil
         guard let urlStr = normalizeURL(localURL),
               let url = URL(string: "\(urlStr)/api/register-presence-device") else {
             presenceStatus = "Enter a local server URL first."
