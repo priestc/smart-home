@@ -3,6 +3,7 @@ import datetime
 import functools
 import re
 import sqlite3
+import threading
 from flask import Flask, jsonify, redirect, request, Response
 from flask.json.provider import DefaultJSONProvider
 from flask_compress import Compress
@@ -5728,6 +5729,10 @@ async function loadGas() {
 async function loadDisks() {
   const el = document.getElementById('disk-widget');
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const fmtAge = t => {
+    const m = Math.round((Date.now() / 1000 - t) / 60);
+    return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} hr ago` : `${Math.round(m / 1440)} days ago`;
+  };
   const fmtBytes = b => b >= 1e12 ? (b / 1e12).toFixed(b >= 1e13 ? 1 : 2) + ' TB' : Math.round(b / 1e9) + ' GB';
   let r, data;
   try {
@@ -5753,7 +5758,7 @@ async function loadDisks() {
     return `<div class="disk" title="${esc(d.mount)}">
       <div class="disk-head"><span>${esc(d.label)}</span><span class="disk-pct" style="color:${color}">${Math.round(pct)}%</span></div>
       <div class="disk-bar"><div class="disk-fill" style="width:${pct.toFixed(1)}%;background:${color}"></div></div>
-      <div class="disk-sub">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</div></div>`;
+      <div class="disk-sub">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}${d.stale ? ` &middot; <span title="${esc(d.stale_reason)}">as of ${fmtAge(d.as_of)}</span>` : ''}</div></div>`;
   }).join('');
   el.innerHTML = `<div class="card disk-card"><div class="label">Storage</div>${rows}</div>`;
 }
@@ -11256,6 +11261,33 @@ _REMOTE_DRIVES = [
 ]
 _REMOTE_DISK_CACHE_S = 60
 _remote_disk_cache: dict[str, tuple[float, dict]] = {}
+# Last successful reading per remote machine, kept on disk so a laptop that's asleep or
+# away still shows its most recent numbers (with their age) across server restarts.
+_REMOTE_DISK_LAST_GOOD = "~/.local/share/smart-home/remote_disks.json"
+_remote_disk_lock = threading.Lock()
+
+
+def _load_remote_last_good() -> dict:
+    import json
+    import os
+    try:
+        with open(os.path.expanduser(_REMOTE_DISK_LAST_GOOD)) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def _save_remote_last_good(dest: str, reading: dict) -> None:
+    import json
+    import os
+    path = os.path.expanduser(_REMOTE_DISK_LAST_GOOD)
+    with _remote_disk_lock:
+        data = _load_remote_last_good()
+        data[dest] = reading
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w") as f:
+            json.dump(data, f)
+        os.replace(path + ".tmp", path)
 
 
 def _remote_disk(label: str, dest: str, path: str) -> dict:
@@ -11273,9 +11305,16 @@ def _remote_disk(label: str, dest: str, path: str) -> dict:
             raise RuntimeError("df printed nothing")
         fields = p.stdout.strip().splitlines()[-1].split()
         total, free = int(fields[1]) * 1024, int(fields[3]) * 1024
-        result = {"label": label, "mount": dest, "total": total, "used": total - free, "free": free}
+        result = {"label": label, "mount": dest, "total": total, "used": total - free, "free": free,
+                  "as_of": time.time()}
+        _save_remote_last_good(dest, result)
     except (subprocess.TimeoutExpired, RuntimeError, IndexError, ValueError) as e:
-        result = {"label": label, "mount": dest, "error": f"Can't read over SSH: {e}"}
+        last = _load_remote_last_good().get(dest)
+        if last:
+            # Unreachable (asleep, off the network): show the last reading, marked stale
+            result = {**last, "label": label, "stale": True, "stale_reason": str(e)}
+        else:
+            result = {"label": label, "mount": dest, "error": f"Can't read over SSH: {e}"}
     _remote_disk_cache[dest] = (time.monotonic(), result)
     return result
 
