@@ -87,6 +87,70 @@ Products:
 """
 
 
+_NUM = r"(\d+(?:\.\d+)?|\.\d+)"
+# Spelled-out units to the abbreviations parse_size looks for
+_UNIT_WORDS = [
+    (r"FL\.?\s*OZ\.?|FLUID\s+OUNCES?", "FLOZ"), (r"OUNCES?|OZS?\.?", "OZ"), (r"POUNDS?|LBS?\.?", "LB"),
+    (r"KILOGRAMS?|KGS?", "KG"), (r"GRAMS?|GR?", "G"), (r"MILLILITERS?|MILLILITRES?|ML", "ML"),
+    (r"LITERS?|LITRES?|LTR?", "L"), (r"GALLONS?|GAL", "GAL"), (r"QUARTS?|QTS?", "QT"), (r"PINTS?|PTS?", "PT"),
+]
+# In order of preference: a US size as printed beats a converted metric one
+_TO_OZ = {"GAL": 128, "QT": 32, "PT": 16, "KG": 1000 / 28.349523125, "G": 1 / 28.349523125,
+          "L": 1000 / 29.5735295625, "ML": 1 / 29.5735295625}
+
+
+def parse_size(text: str | None) -> tuple[float, str] | None:
+    """Net weight or volume from a size as printed, e.g. "NET WT 32 OZ (2 LB) 908g"
+    gives (32, "oz"). The model reads the label well but often gets the number
+    or the conversion wrong, so this does it instead. An ounce figure as
+    printed is preferred; "1 LB 6.3 OZ" is 22.3 oz; a size printed only in
+    pounds stays in lb; grams, kilograms, liters etc. are converted to oz."""
+    import re
+    if not text:
+        return None
+    t = re.sub(r"(?<=\d),(?=\d{3})", "", text.upper())
+    # Fractions: "1 1/2 LB" is 1.5, "1/2 GAL" is 0.5
+    t = re.sub(r"(?:(\d+)\s+)?(\d+)\s*/\s*(\d+)",
+               lambda m: f"{int(m.group(1) or 0) + int(m.group(2)) / int(m.group(3)):g}"
+               if int(m.group(3)) else m.group(0), t)
+    # Numbers stuck to a unit ("908G") and words become "908 G". One pass, so
+    # an abbreviation already written isn't matched again ("KG" as "K G").
+    alts = "|".join(f"(?P<u{i}>{pat})" for i, (pat, _) in enumerate(_UNIT_WORDS))
+    t = re.sub(rf"(?<=[\d\s(])(?:{alts})(?![A-Z])",
+               lambda m: " " + _UNIT_WORDS[int(m.lastgroup[1:])][1] + " ", t)
+    found = {}
+    def first(unit: str):
+        m = re.search(rf"{_NUM}\s*{unit}\b", t)
+        return float(m.group(1)) if m else None
+    compound = re.search(rf"{_NUM}\s*LB\s*{_NUM}\s*OZ\b", t)
+    if compound:
+        lb_oz = float(compound.group(1)) * 16 + float(compound.group(2))
+        t = t[:compound.start()] + " " + t[compound.end():]   # its "6.3 OZ" isn't the net weight
+    oz = first("OZ")
+    if oz:
+        return oz, "oz"
+    if compound:
+        return round(lb_oz, 2), "oz"
+    lb = first("LB")
+    if lb:
+        return lb, "lb"
+    floz = first("FLOZ")
+    if floz:
+        return floz, "oz"
+    for unit, factor in _TO_OZ.items():
+        v = first(unit)
+        if v:
+            return round(v * factor, 1), "oz"
+    return None
+
+
+def parse_count(text: str | None) -> int | None:
+    """A count printed in the size, e.g. "130 CT" or "24 COUNT"."""
+    import re
+    m = re.search(r"(\d+)\s*-?\s*(?:CT|COUNT|PK|PACK)\b", (text or "").upper())
+    return int(m.group(1)) if m else None
+
+
 class PhotoError(Exception):
     pass
 
@@ -228,6 +292,12 @@ def process(db_path: str, photo_id: int, match: bool = True) -> None:
             cands = candidates(conn, rid) if match and rid is not None else []
             data = _ask(image, cands)
             info = {k: data.get(k) for k in INFO_FIELDS}
+            # Work the net weight out from the size as printed rather than trust the model's arithmetic
+            size = parse_size(info.get("size_text"))
+            if size:
+                info["quantity"], info["unit"] = size
+            if info.get("count") is None:
+                info["count"] = parse_count(info.get("size_text"))
             conn.execute(
                 "UPDATE product_photos SET info_json=?, info_status='done', info_error=NULL, model_seen=?, "
                 "model_notes=?, processed_at=? WHERE id=?",
