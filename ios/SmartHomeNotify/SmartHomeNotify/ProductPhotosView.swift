@@ -12,7 +12,7 @@ private let photosAppGroupDefaults = UserDefaults(suiteName: "group.io.github.pr
 struct ProductPhoto: Codable, Identifiable {
     let id: Int
     let uploaded_at: String
-    let status: String          // processing, matched, unmatched, error
+    let status: String          // waiting (for its receipt), processing, matched, unmatched, error
     let error: String?
     let product_id: Int?
     let product_name: String?
@@ -137,12 +137,16 @@ final class ProductPhotosStore: ObservableObject {
         schedulePollIfNeeded()
     }
 
-    /// While the model is matching a photo (usually 20–40 s), check back every few seconds.
+    /// While the model is matching a photo (usually 20–40 s), check back every few seconds;
+    /// while one waits for its receipt to be scanned, less often.
     private func schedulePollIfNeeded() {
         pollTask?.cancel()
-        guard photos.contains(where: { $0.status == "processing" }) else { return }
+        let seconds: UInt64
+        if photos.contains(where: { $0.status == "processing" }) { seconds = 3 }
+        else if photos.contains(where: { $0.status == "waiting" }) { seconds = 15 }
+        else { return }
         pollTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
             guard !Task.isCancelled else { return }
             await self?.refresh()
         }
@@ -415,6 +419,9 @@ private struct PhotoRow: View {
                 case "processing":
                     Text("Matching…")
                     Text("Usually takes 20–40 seconds").font(.caption).foregroundColor(.secondary)
+                case "waiting":
+                    Label("Waiting for receipt", systemImage: "clock").foregroundColor(.orange)
+                    Text("Matched once the receipt it came with is scanned").font(.caption).foregroundColor(.secondary)
                 case "matched":
                     Text(photo.product_name ?? "Product #\(photo.product_id ?? 0)").font(.body)
                     Text(photo.match_source == "manual" ? "Picked by hand" : "Matched by the model")

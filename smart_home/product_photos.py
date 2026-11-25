@@ -1,10 +1,17 @@
 """Product pictures, photographed in the iOS app.
 
+Product photos are taken together with a receipt: the products from a
+shopping trip are photographed around the time its receipt is scanned. A
+photo is paired with a receipt scanned (uploaded) within RECEIPT_WINDOW
+before it; if there isn't one, or it's still being read, the photo waits
+(status 'waiting') and is paired with the next receipt that finishes
+scanning. Waiting photos are matched one at a time once it does.
+
 Each photo is sent to the local vision model (the same service delegator task
-that reads receipts) with the list of products that don't have a picture yet:
-their names, the text printed for them on receipts, and the stores they were
-bought at. The model picks the product the photo shows, or says none of them
-match. Either way the photo can be moved to another product by hand (the
+that reads receipts) with the products on its receipt that don't have a
+picture yet: their names, the text printed for them on receipts, and the
+stores they were bought at. The model picks the product the photo shows, or
+says none of them match. Either way the photo can be moved to another product by hand (the
 Products tab in the app), which is also how an unmatched photo gets a product.
 
 A product's picture is its most recent photo. Photos are saved next to the
@@ -48,8 +55,16 @@ class PhotoError(Exception):
     pass
 
 
+RECEIPT_WINDOW = datetime.timedelta(hours=1)
+
 _running: set[int] = set()
 _running_lock = threading.Lock()
+# Held while pairing photos with receipts, so a photo uploaded just as a
+# receipt finishes is never left waiting
+_pair_lock = threading.Lock()
+# Photos are matched one at a time: the GPU runs one model call at a time
+# anyway, and two photos can't both claim the same product
+_match_lock = threading.Lock()
 
 
 def image_dir(db_path: str) -> str:
@@ -88,8 +103,9 @@ def save_upload(db_path: str, image: bytes, media_type: str) -> int:
         conn.close()
 
 
-def candidates(conn: sqlite3.Connection) -> list[dict]:
-    """Products without a picture, minus savings/coupon lines (negative price)."""
+def candidates(conn: sqlite3.Connection, receipt_id: int | None = None) -> list[dict]:
+    """Products without a picture, minus savings/coupon lines (negative price).
+    With receipt_id, only the products on that receipt."""
     rows = conn.execute("""
         SELECT p.id, p.name,
                (SELECT GROUP_CONCAT(t, ' | ') FROM (SELECT DISTINCT i.raw_text AS t FROM receipt_items i
@@ -100,8 +116,9 @@ def candidates(conn: sqlite3.Connection) -> list[dict]:
                     ORDER BY i.id DESC LIMIT 1) AS last_price
         FROM products p
         WHERE p.id NOT IN (SELECT product_id FROM product_photos WHERE product_id IS NOT NULL)
+          AND (? IS NULL OR p.id IN (SELECT product_id FROM receipt_items WHERE receipt_id = ?))
         ORDER BY p.name COLLATE NOCASE
-    """).fetchall()
+    """, (receipt_id, receipt_id)).fetchall()
     return [{"id": r[0], "name": r[1], "printed": r[2], "stores": r[3]}
             for r in rows if r[4] is None or r[4] >= 0]
 
@@ -149,24 +166,24 @@ def _ask(image: bytes, cands: list[dict]) -> dict:
 
 
 def process(db_path: str, photo_id: int) -> None:
-    """Match one photo to a product and record the outcome on its row."""
-    with _running_lock:
-        if photo_id in _running:
-            raise PhotoError("This photo is already being matched")
-        _running.add(photo_id)
+    """Match one photo to a product and record the outcome on its row.
+    Callers queue it with _match_all_in_background, which marks it running."""
     conn = sqlite3.connect(db_path, timeout=30)
     try:
-        row = conn.execute("SELECT image_path FROM product_photos WHERE id=?", (photo_id,)).fetchone()
+        row = conn.execute("SELECT image_path, receipt_id FROM product_photos WHERE id=?", (photo_id,)).fetchone()
         if row is None:
             raise PhotoError(f"Photo {photo_id} not found")
+        rid = row[1]
         conn.execute("UPDATE product_photos SET status='processing', error=NULL WHERE id=?", (photo_id,))
         conn.commit()
         try:
             with open(row[0], "rb") as f:
                 image = f.read()
-            cands = candidates(conn)
+            if rid is None:
+                raise PhotoError("This photo hasn't been paired with a receipt yet")
+            cands = candidates(conn, rid)
             if not cands:
-                raise PhotoError("Every product already has a picture; pick the product by hand")
+                raise PhotoError(f"Every product on receipt {rid} already has a picture; pick the product by hand")
             data = _ask(image, cands)
             pid = data.get("product_id")
             if pid not in {c["id"] for c in cands}:
@@ -205,12 +222,81 @@ def process(db_path: str, photo_id: int) -> None:
             _running.discard(photo_id)
 
 
-def process_in_background(db_path: str, photo_id: int) -> None:
+def _match_all_in_background(db_path: str, photo_ids: list[int]) -> None:
     def _bg():
-        try:
-            process(db_path, photo_id)
-        except Exception as e:
-            # Also recorded on the photo's row and shown in the app
-            print(f"Product photo {photo_id} matching failed: {e}", flush=True)
+        for photo_id in photo_ids:
+            with _match_lock:
+                try:
+                    process(db_path, photo_id)
+                except Exception as e:
+                    # Also recorded on the photo's row and shown in the app
+                    print(f"Product photo {photo_id} matching failed: {e}", flush=True)
 
+    # Marked running now, so the photos don't look interrupted while queued
+    with _running_lock:
+        busy = _running.intersection(photo_ids)
+        if busy:
+            raise PhotoError(f"Photo {min(busy)} is already being matched")
+        _running.update(photo_ids)
     threading.Thread(target=_bg, daemon=True).start()
+
+
+def _queue(conn: sqlite3.Connection, photo_ids: list[int]) -> None:
+    """Mark photos as queued; process() re-adds them to _running itself."""
+    conn.executemany("UPDATE product_photos SET status='processing', error=NULL WHERE id=?",
+                     [(i,) for i in photo_ids])
+    conn.commit()
+
+
+def start(db_path: str, photo_id: int) -> None:
+    """Pair a new (or retried) photo with its receipt and match it, or leave it
+    waiting for the next receipt. A retried photo keeps the receipt it had."""
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        with _pair_lock:
+            row = conn.execute("SELECT uploaded_at, receipt_id FROM product_photos WHERE id=?",
+                               (photo_id,)).fetchone()
+            if row is None:
+                raise PhotoError(f"Photo {photo_id} not found")
+            uploaded, rid = row
+            if rid is None:
+                since = (datetime.datetime.strptime(uploaded, "%Y-%m-%d %H:%M:%S")
+                         - RECEIPT_WINDOW).strftime("%Y-%m-%d %H:%M:%S")
+                recent = conn.execute(
+                    "SELECT id, status FROM receipts WHERE kind='receipt' AND image_path != '' "
+                    "AND uploaded_at BETWEEN ? AND ? ORDER BY uploaded_at DESC LIMIT 1",
+                    (since, uploaded)).fetchone()
+                if recent is None or recent[1] != "done":
+                    # None yet, or still being read: on_receipt_scanned picks it up
+                    conn.execute("UPDATE product_photos SET status='waiting', error=NULL, product_id=NULL, "
+                                 "match_source=NULL WHERE id=?", (photo_id,))
+                    conn.commit()
+                    return
+                rid = recent[0]
+                conn.execute("UPDATE product_photos SET receipt_id=? WHERE id=?", (rid, photo_id))
+            _queue(conn, [photo_id])
+        _match_all_in_background(db_path, [photo_id])
+    finally:
+        conn.close()
+
+
+def on_receipt_scanned(db_path: str, receipt_id: int) -> None:
+    """A receipt finished scanning: pair every waiting photo with it and match
+    them. A re-read of an older receipt (uploaded over RECEIPT_WINDOW ago)
+    isn't the trip the waiting photos came from, so it leaves them waiting."""
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        with _pair_lock:
+            row = conn.execute("SELECT uploaded_at FROM receipts WHERE id=?", (receipt_id,)).fetchone()
+            if row is None or (datetime.datetime.now()
+                               - datetime.datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")) > RECEIPT_WINDOW:
+                return
+            ids = [r[0] for r in conn.execute(
+                "SELECT id FROM product_photos WHERE status='waiting' ORDER BY id") if not is_running(r[0])]
+            if not ids:
+                return
+            conn.executemany("UPDATE product_photos SET receipt_id=? WHERE id=?", [(receipt_id, i) for i in ids])
+            _queue(conn, ids)
+        _match_all_in_background(db_path, ids)
+    finally:
+        conn.close()

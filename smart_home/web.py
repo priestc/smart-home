@@ -13460,7 +13460,7 @@ def api_receipt_known_items():
     return jsonify({'items': [dict(r) for r in rows]})
 
 
-_PHOTO_COLS = ("ph.id, ph.uploaded_at, ph.status, ph.error, ph.processed_at, ph.product_id, ph.match_source, "
+_PHOTO_COLS = ("ph.id, ph.uploaded_at, ph.status, ph.receipt_id, ph.error, ph.processed_at, ph.product_id, ph.match_source, "
                "ph.model_product_id, ph.model_seen, ph.model_notes, p.name AS product_name, "
                "mp.name AS model_product_name, "
                # The photo its product shows (its newest); another id means this one is hidden
@@ -13482,7 +13482,8 @@ def _photo_json(row: sqlite3.Row) -> dict:
 @app.post("/api/product-photos")
 def api_product_photo_upload():
     """Body is the raw image bytes, with Content-Type set to the image type.
-    The photo is matched to a product without a picture in the background."""
+    The photo is matched in the background to a product on the receipt it
+    came with, or waits until that receipt is scanned."""
     from smart_home import product_photos as _photos
     image = request.get_data()
     if not image:
@@ -13492,9 +13493,9 @@ def api_product_photo_upload():
     media_type = (request.content_type or '').split(';')[0].strip().lower()
     try:
         photo_id = _photos.save_upload(_db_path, image, media_type)
+        _photos.start(_db_path, photo_id)
     except _photos.PhotoError as e:
         return jsonify({'error': str(e)}), 400
-    _photos.process_in_background(_db_path, photo_id)
     return jsonify({'ok': True, 'id': photo_id}), 202
 
 
@@ -13588,7 +13589,8 @@ def api_product_photo_set_product(photo_id):
 
 @app.post("/api/product-photos/<int:photo_id>/retry")
 def api_product_photo_retry(photo_id):
-    """Ask the model again (against the products still missing a picture)."""
+    """Ask the model again (against the products on its receipt still missing a
+    picture). A photo not yet paired with a receipt looks for one again."""
     from smart_home import product_photos as _photos
     with _conn() as conn:
         if conn.execute("SELECT 1 FROM product_photos WHERE id=?", (photo_id,)).fetchone() is None:
@@ -13598,7 +13600,10 @@ def api_product_photo_retry(photo_id):
         # Its current product would otherwise not be a candidate
         conn.execute("UPDATE product_photos SET product_id=NULL, match_source=NULL, status='processing' WHERE id=?",
                      (photo_id,))
-    _photos.process_in_background(_db_path, photo_id)
+    try:
+        _photos.start(_db_path, photo_id)
+    except _photos.PhotoError as e:
+        return jsonify({'error': str(e)}), 409
     return jsonify({'ok': True}), 202
 
 
@@ -14554,6 +14559,7 @@ async function load() {
   // While the model is matching a photo, check back every few seconds
   clearTimeout(pollTimer);
   if (photos.some(p => p.status === 'processing')) pollTimer = setTimeout(load, 3000);
+  else if (photos.some(p => p.status === 'waiting')) pollTimer = setTimeout(load, 15000);
 }
 
 function productOptions(ph) {
@@ -14571,6 +14577,7 @@ function productOptions(ph) {
 function stateLine(ph) {
   switch (ph.status) {
     case 'processing': return '<div class="state warn">Matching… usually 20–40 seconds</div>';
+    case 'waiting': return '<div class="state warn">Waiting for its receipt to be scanned</div>';
     case 'matched': return `<div class="state ok">${ph.match_source === 'manual' ? 'Picked by hand' : 'Matched by the model'}</div>`;
     case 'unmatched': return '<div class="state warn">No product</div>';
     default: return `<div class="state err">Failed: ${esc(ph.error || 'matching failed')}</div>`;
@@ -14591,6 +14598,7 @@ function card(ph) {
       <div class="title${name ? '' : ' none'}">${esc(name || 'No product')}</div>
       ${stateLine(ph)}
       ${hidden}
+      ${ph.receipt_id != null ? `<div class="muted">With <a href="/receipts/${ph.receipt_id}">receipt #${ph.receipt_id}</a></div>` : ''}
       ${ph.model_seen ? `<div class="muted">Model saw: ${esc(ph.model_seen)}</div>` : ''}
       ${modelPick}
       ${ph.model_notes ? `<div class="muted">${esc(ph.model_notes)}</div>` : ''}

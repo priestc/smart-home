@@ -537,6 +537,11 @@ def process(db_path: str, rid: int) -> None:
             with gpu_monitor.Recorder(db_path, rid):
                 data = _read(conn, rid, image)
             _store_result(conn, rid, data)
+            conn.commit()
+            if data.get("is_receipt") and data.get("document_type") != "utility_bill":
+                # Product photos taken with this shopping trip were waiting for it
+                from smart_home import product_photos
+                product_photos.on_receipt_scanned(db_path, rid)
         except Exception as e:
             msg = str(e) if isinstance(e, ReceiptError) else f"{type(e).__name__}: {e}"
             conn.execute("UPDATE receipts SET status='error', error=?, processed_at=? WHERE id=?", (msg, _now(), rid))

@@ -505,6 +505,13 @@ def open_db(path: str) -> sqlite3.Connection:
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS product_photos_product ON product_photos (product_id)")
+    # The receipt the photo came with: it's matched only against that
+    # receipt's products. status 'waiting' = no receipt scanned yet.
+    try:
+        conn.execute("ALTER TABLE product_photos ADD COLUMN receipt_id INTEGER REFERENCES receipts(id)")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     _migrate_known_items_to_products(conn)
     conn.commit()
     return conn
