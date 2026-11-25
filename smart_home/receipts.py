@@ -97,10 +97,11 @@ _SCHEMA = {
                     "description": {"type": "string"},
                     "quantity": {"type": ["number", "null"]},
                     "unit": {"type": ["string", "null"], "enum": UNITS + [None]},
+                    "unit_price": {"type": ["number", "null"]},
                     "total_price": {"type": ["number", "null"]},
                     "category": {"type": "string", "enum": CATEGORIES},
                 },
-                "required": ["raw_text", "item_code", "description", "quantity", "unit", "total_price", "category"],
+                "required": ["raw_text", "item_code", "description", "quantity", "unit", "unit_price", "total_price", "category"],
                 "additionalProperties": False,
             },
         },
@@ -130,7 +131,7 @@ _PROMPT = f"""This is a photo of a store or restaurant receipt, or of a utility 
 - items: one entry per purchased line, top to bottom.
   - raw_text: the item's name exactly as printed, abbreviations and all (e.g. "GV 2% MLK GAL"). Leave out the price and item number. Keep markers such as "INST SV" (e.g. "INST SV LA CROIX VPF").
   - item_code: the item number, UPC or SKU printed on that line, digits only, or null if there isn't one. Walmart prints a 12-digit number after each item name; Sam's Club prints it before. Copy every digit carefully, and only from that same line. Savings and coupon lines usually have no number of their own: use null.
-  - quantity and unit: only when the receipt prints an amount for that line, e.g. a weight "1.33 lb @ 5.12 /lb" gives quantity 1.33, unit "lb"; "2 @ 3.97" gives quantity 2, unit "ea". Weights are often on the line just below the item. Units are "ea", "oz" or "lb". Otherwise null for both.
+  - quantity, unit and unit_price: only when the receipt prints an amount for that line, e.g. a weight "1.33 lb @ 5.12 /lb" gives quantity 1.33, unit "lb", unit_price 5.12; "2 @ 3.97" gives quantity 2, unit "ea", unit_price 3.97. Units are "ea", "oz" or "lb". Otherwise null for all three. The "@" line is printed on its own row next to the item: on Sam's Club receipts it is the row just ABOVE the item (e.g. "1.43 @ 5.12" above "MED SALAD" means 1.43 lb at 5.12 per lb), on Walmart receipts usually just below. A Sam's Club "@" line with a decimal amount and no unit is a weight in lb. unit_price is never the line's total_price: the total is the amount printed at the right of the item's own row (1.43 @ 5.12 gives total_price 7.32).
   - description: Expand cryptic abbreviations into a readable description (e.g. "GV 2% MLK GAL" -> "Great Value 2% milk, 1 gal"). total_price is the line's final amount in dollars. A minus sign after the amount means it is negative: "2.00-" is -2.00. Discounts, coupons and instant savings are their own lines with a negative total_price, in the same category as the item they discount; describe them as e.g. "Instant savings: La Croix". On Sam's Club receipts "INST SV" means instant savings and is always negative, even if the minus sign is hard to see. Bottle deposits, bag fees and similar go in "Fees & Deposits". Do not include sales tax, subtotal, total, payment or change lines as items. Each price is on the same row as its item: if a line's price is faded or unreadable, use null for that line rather than taking a price from a neighbouring row.
 - category: choose the single best fit from: {", ".join(CATEGORIES)}. A restaurant meal or takeout is "Dining Out"; food bought at a store is "Groceries".
 - subtotal, tax, total: as printed, or null if missing. For restaurants, include any tip in total.
@@ -316,8 +317,29 @@ def _match(item: dict, catalog: list[dict]) -> dict | None:
     return scored[0][1]
 
 
+def _apply_unit_prices(data: dict) -> list[str]:
+    """Work out quantity x unit price ourselves: the model often gives the unit
+    price (5.12 in "1.43 @ 5.12") as the line total. A fractional "each" is a
+    weight (Sam's Club prints weights without a unit)."""
+    fixed = []
+    for it in data.get("items") or []:
+        qty, each = it.get("quantity"), it.get("unit_price")
+        if isinstance(qty, (int, float)) and qty != int(qty) and it.get("unit") in (None, "ea"):
+            it["unit"] = "lb"
+        if not (isinstance(qty, (int, float)) and isinstance(each, (int, float)) and qty > 0 and each > 0):
+            continue
+        want = round(qty * each, 2)
+        got = it.get("total_price")
+        # Leave savings lines (negative) alone; fix a missing or mismatched total
+        if got is None or (got > 0 and abs(got - want) >= 0.015):
+            it["total_price"] = want
+            fixed.append(f"{it.get('raw_text')} ({qty:g} @ {each:.2f} = {want:.2f})")
+    return [f"Line totals worked out from the quantity and unit price: {', '.join(fixed)}."] if fixed else []
+
+
 def _reconcile(data: dict, catalog: list[dict]) -> list[str]:
     """Fix lines against the catalog in place. Returns what was changed."""
+    changes = _apply_unit_prices(data)
     fixed_codes, filled_prices = [], []
     for it in data.get("items") or []:
         e = _match(it, catalog)
@@ -332,7 +354,6 @@ def _reconcile(data: dict, catalog: list[dict]) -> list[str]:
             each = it.get("unit") == "ea" and isinstance(qty, (int, float)) and qty > 0
             it["total_price"] = round(e["price"] * (qty if each else 1), 2)
             filled_prices.append(e["raw_text"])
-    changes = []
     if fixed_codes:
         changes.append(f"Matched {len(fixed_codes)} partly unreadable line(s) to items from earlier receipts: "
                        + ", ".join(fixed_codes) + ".")
