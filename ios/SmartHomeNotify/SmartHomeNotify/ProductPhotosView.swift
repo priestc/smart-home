@@ -311,7 +311,7 @@ struct ProductPhotosView: View {
                                             do { try await store.retry(photoId: photo.id) }
                                             catch { errorMessage = "Could not retry: \(error.localizedDescription)" }
                                         }
-                                    } label: { Label("Match Again", systemImage: "arrow.clockwise") }
+                                    } label: { Label("Read Again", systemImage: "arrow.clockwise") }
                                     .tint(.blue)
                                 }
                             }

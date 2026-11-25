@@ -1,6 +1,7 @@
 from __future__ import annotations
 import datetime
 import functools
+import json
 import re
 import sqlite3
 import threading
@@ -13472,7 +13473,8 @@ def api_receipt_known_items():
     return jsonify({'items': [dict(r) for r in rows]})
 
 
-_PHOTO_COLS = ("ph.id, ph.uploaded_at, ph.status, ph.receipt_id, ph.error, ph.processed_at, ph.product_id, ph.match_source, "
+_PHOTO_COLS = ("ph.id, ph.uploaded_at, ph.status, ph.receipt_id, ph.info_json, ph.info_status, ph.info_error, "
+               "ph.info_used_at, p.quantity AS product_quantity, p.unit AS product_unit, ph.error, ph.processed_at, ph.product_id, ph.match_source, "
                "ph.model_product_id, ph.model_seen, ph.model_notes, p.name AS product_name, "
                "mp.name AS model_product_name, "
                # The photo its product shows (its newest); another id means this one is hidden
@@ -13488,6 +13490,14 @@ def _photo_json(row: sqlite3.Row) -> dict:
     if r['status'] == 'processing' and not _photos.is_running(r['id']):
         r['status'] = 'error'
         r['error'] = 'Matching was interrupted; tap Retry'
+    if r['info_status'] == 'reading' and not _photos.is_running(r['id']):
+        r['info_status'] = 'error'
+        r['info_error'] = 'Reading was interrupted; read it again'
+    try:
+        r['info'] = json.loads(r.pop('info_json')) if r.get('info_json') else None
+    except ValueError as e:
+        r['info'] = None
+        r['info_status'], r['info_error'] = 'error', f'Stored reading is not valid JSON: {e}'
     return r
 
 
@@ -13615,22 +13625,93 @@ def api_product_photo_set_product(photo_id):
 
 @app.post("/api/product-photos/<int:photo_id>/retry")
 def api_product_photo_retry(photo_id):
-    """Ask the model again (against the products on its receipt still missing a
-    picture). A photo not yet paired with a receipt looks for one again."""
+    """Read the photo again. One without a product is also matched again
+    (against the products on its receipt still missing a picture); one not yet
+    paired with a receipt looks for one again. Its product is kept."""
     from smart_home import product_photos as _photos
     with _conn() as conn:
         if conn.execute("SELECT 1 FROM product_photos WHERE id=?", (photo_id,)).fetchone() is None:
             return jsonify({'error': 'Photo not found'}), 404
         if _photos.is_running(photo_id):
             return jsonify({'error': 'This photo is already being matched'}), 409
-        # Its current product would otherwise not be a candidate
-        conn.execute("UPDATE product_photos SET product_id=NULL, match_source=NULL, status='processing' WHERE id=?",
-                     (photo_id,))
     try:
         _photos.start(_db_path, photo_id)
     except _photos.PhotoError as e:
         return jsonify({'error': str(e)}), 409
     return jsonify({'ok': True}), 202
+
+
+@app.post("/api/product-photos/read-unread")
+def api_product_photos_read_unread():
+    """Read the package info of every photo that was never read."""
+    from smart_home import product_photos as _photos
+    try:
+        n = _photos.read_unread(_db_path)
+    except _photos.PhotoError as e:
+        return jsonify({'error': str(e)}), 409
+    return jsonify({'ok': True, 'queued': n}), 202
+
+
+def _save_photo_info(conn, photo_id: int, data: dict):
+    """Merge edited fields into a photo's info. Returns (info, error response)."""
+    from smart_home import product_photos as _photos
+    fields, err = _photos.clean_info(data)
+    if err:
+        return None, (jsonify({'error': err}), 400)
+    row = conn.execute("SELECT info_json FROM product_photos WHERE id=?", (photo_id,)).fetchone()
+    if row is None:
+        return None, (jsonify({'error': 'Photo not found'}), 404)
+    if _photos.is_running(photo_id):
+        return None, (jsonify({'error': 'This photo is being read; wait for it to finish'}), 409)
+    info = json.loads(row['info_json']) if row['info_json'] else {}
+    info.update(fields)
+    conn.execute("UPDATE product_photos SET info_json=?, info_status=COALESCE(info_status, 'done') WHERE id=?",
+                 (json.dumps(info), photo_id))
+    return info, None
+
+
+@app.patch("/api/product-photos/<int:photo_id>/info")
+def api_product_photo_info(photo_id):
+    """Correct what was read off the package (any of product_photos.INFO_FIELDS)."""
+    with _conn() as conn:
+        _, err = _save_photo_info(conn, photo_id, request.get_json(silent=True) or {})
+        if err:
+            return err
+        row = conn.execute(f"SELECT {_PHOTO_COLS} {_PHOTO_FROM} WHERE ph.id=?", (photo_id,)).fetchone()
+    return jsonify(_photo_json(row))
+
+
+@app.post("/api/product-photos/<int:photo_id>/use")
+def api_product_photo_use(photo_id):
+    """Save any edited info fields in the body, then copy the photo's name,
+    quantity and unit to its product. A field left empty doesn't change the product."""
+    with _conn() as conn:
+        info, err = _save_photo_info(conn, photo_id, request.get_json(silent=True) or {})
+        if err:
+            return err
+        pid = conn.execute("SELECT product_id FROM product_photos WHERE id=?", (photo_id,)).fetchone()[0]
+        if pid is None:
+            return jsonify({'error': 'This photo has no product yet; assign it to one first'}), 409
+        renamed, changed = 0, []
+        if info.get('name'):
+            renamed = _rename_product(conn, pid, info['name'])
+            changed.append('name')
+        if info.get('quantity') is not None:
+            qty, qerr = _quantity_fields({'quantity': info['quantity'], 'unit': info.get('unit')})
+            if qerr:
+                conn.rollback()
+                return jsonify({'error': qerr}), 400
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute("UPDATE products SET quantity=?, unit=?, updated_at=? WHERE id=?",
+                         (qty['quantity'], qty['unit'], now, pid))
+            changed.append('quantity')
+        if not changed:
+            conn.rollback()
+            return jsonify({'error': 'Nothing to copy: give it a name or a quantity'}), 400
+        conn.execute("UPDATE product_photos SET info_used_at=? WHERE id=?",
+                     (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), photo_id))
+        row = conn.execute(f"SELECT {_PHOTO_COLS} {_PHOTO_FROM} WHERE ph.id=?", (photo_id,)).fetchone()
+    return jsonify({'ok': True, 'renamed': renamed, 'changed': changed, 'photo': _photo_json(row)})
 
 
 @app.delete("/api/product-photos/<int:photo_id>")
@@ -14484,55 +14565,74 @@ _PRODUCT_PHOTOS_PAGE = r"""<!DOCTYPE html>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
     h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: .4rem; letter-spacing: -.02em; }
-    .intro { font-size: .9rem; color: #4a6080; margin-bottom: 1rem; max-width: 52rem; }
+    .intro { font-size: .9rem; color: #4a6080; margin-bottom: 1rem; max-width: 56rem; }
     .toolbar { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
     .toolbar input[type=search] { padding: .45rem .7rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .9rem; min-width: 14rem; }
     .tabs { display: flex; gap: .3rem; flex-wrap: wrap; }
     .tabs button { background: #fff; border: 1px solid #d0dce8; border-radius: 999px; padding: .35rem .8rem; font-size: .82rem; cursor: pointer; color: #4a6080; }
     .tabs button.on { background: #2e7dd4; border-color: #2e7dd4; color: #fff; }
     .count { font-size: .85rem; color: #7a90a8; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem; }
-    .card { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); overflow: hidden; display: flex; flex-direction: column; scroll-margin-top: 1rem; }
+    .list { display: flex; flex-direction: column; gap: 1rem; }
+    .card { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05);
+            display: grid; grid-template-columns: 220px minmax(0, 1.4fr) minmax(0, 1fr); scroll-margin-top: 1rem; overflow: hidden; }
     .card.target { outline: 3px solid #2e7dd4; }
-    .card img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; display: block; background: #f0f4f8; }
-    .body { padding: .75rem .85rem .85rem; display: flex; flex-direction: column; gap: .35rem; flex: 1; }
-    .title { font-weight: 600; font-size: .98rem; }
+    @media (max-width: 900px) { .card { grid-template-columns: 160px minmax(0, 1fr); } .live { grid-column: 1 / -1; border-left: none !important; border-top: 1px solid #e8eef4; } }
+    .pic { background: #f0f4f8; }
+    .pic img { width: 100%; height: 100%; min-height: 200px; object-fit: cover; display: block; }
+    .col { padding: .85rem 1rem; display: flex; flex-direction: column; gap: .45rem; min-width: 0; }
+    .live { border-left: 1px solid #e8eef4; background: #fafcfe; }
+    h2 { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; display: flex; justify-content: space-between; gap: .5rem; }
+    .form { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: .35rem .6rem; align-items: center; font-size: .85rem; }
+    .form label { color: #4a6080; font-size: .8rem; }
+    .form input, .form select, .assign select { padding: .35rem .45rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .85rem; font-family: inherit; background: #fff; min-width: 0; width: 100%; }
+    .form input.changed { border-color: #e07820; background: #fff8f0; }
+    .pair { display: flex; gap: .4rem; }
+    .pair input { flex: 1; } .pair select { width: 5rem; flex: none; }
+    .title { font-weight: 600; font-size: 1rem; }
     .title.none { color: #7a90a8; font-weight: 500; font-style: italic; }
+    .kv { font-size: .85rem; } .kv span { color: #7a90a8; }
+    .diff { font-size: .8rem; background: #fff8f0; border: 1px solid #f3c98b; border-radius: 6px; padding: .4rem .55rem; color: #8a4b00; }
+    .diff div + div { margin-top: .15rem; }
     .muted { color: #7a90a8; font-size: .8rem; }
     .state { font-size: .8rem; }
     .state.ok { color: #2db37a; } .state.warn { color: #c46a00; } .state.err { color: #b00; }
     .warn-box { background: #fff4e5; border: 1px solid #f3c98b; color: #8a4b00; border-radius: 6px; padding: .4rem .55rem; font-size: .8rem; }
-    .assign { display: flex; gap: .4rem; margin-top: .3rem; }
-    .assign select { flex: 1; min-width: 0; padding: .4rem .4rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .85rem; background: #fff; }
-    button.primary { background: #2e7dd4; color: #fff; border: none; border-radius: 6px; padding: .4rem .8rem; cursor: pointer; font-size: .82rem; white-space: nowrap; }
+    .assign { display: flex; gap: .4rem; }
+    .assign select { flex: 1; }
+    button { font-family: inherit; }
+    button.primary { background: #2e7dd4; color: #fff; border: none; border-radius: 6px; padding: .4rem .9rem; cursor: pointer; font-size: .85rem; white-space: nowrap; }
     button.primary:disabled { background: #aabbc8; cursor: default; }
-    .actions { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: auto; padding-top: .35rem; }
-    .actions button { background: #fff; border: 1px solid #d0dce8; color: #2e4a6a; border-radius: 6px; padding: .3rem .6rem; cursor: pointer; font-size: .78rem; }
-    .actions button.danger { color: #b00; border-color: #e8b4b4; }
-    .actions button.danger.armed { background: #b00; color: #fff; border-color: #b00; }
-    .actions button:disabled { opacity: .5; cursor: default; }
+    button.use { background: #1d7a50; }
+    .btns { display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; }
+    .btns button:not(.primary), .toolbar button { background: #fff; border: 1px solid #d0dce8; color: #2e4a6a; border-radius: 6px; padding: .35rem .65rem; cursor: pointer; font-size: .8rem; }
+    .btns button.danger { color: #b00; border-color: #e8b4b4; }
+    .btns button.danger.armed { background: #b00; color: #fff; border-color: #b00; }
+    .btns button:disabled { opacity: .5; cursor: default; }
     .msg { font-size: .8rem; }
     .msg.err { color: #b00; } .msg.ok { color: #2db37a; }
     .msg button { margin-top: .35rem; }
-    .empty { padding: 2rem; text-align: center; color: #7a90a8; background: #fff; border-radius: 12px; grid-column: 1 / -1; }
+    .empty { padding: 2rem; text-align: center; color: #7a90a8; background: #fff; border-radius: 12px; }
     .empty.err { color: #b00; }
   </style>
 </head>
 <body>
   <h1>Product Photos</h1>
-  <p class="intro">Every photo taken in the Products tab of the app. A product shows one picture, and a picture is
-  never replaced: moving a photo onto a product that already has one asks you to swap them instead.
-  Photos without a product are kept here until you assign them.</p>
+  <p class="intro">Each photo is read by the vision model: the product's name, size, price tag and barcode, as
+  printed on the package. Correct anything it got wrong, then <b>Use</b> copies the name, quantity and unit to the
+  product. A product shows one picture, and a picture is never replaced: moving a photo onto a product that
+  already has one asks you to swap them instead.</p>
   <div class="toolbar">
     <div class="tabs" id="tabs">
       <button data-tab="all" class="on">All</button>
+      <button data-tab="unused">Not used yet</button>
       <button data-tab="none">Need a product</button>
       <button data-tab="hidden">Hidden</button>
     </div>
-    <input type="search" id="filter" placeholder="Filter by product or what the model saw">
+    <input type="search" id="filter" placeholder="Filter by product or what was read">
+    <button id="read-unread" hidden></button>
     <span class="count" id="count"></span>
   </div>
-  <div class="grid" id="grid"><div class="empty">Loading&hellip;</div></div>
+  <div class="list" id="list"><div class="empty">Loading&hellip;</div></div>
 <script>
 function showNetworkError(msg) {
   let el = document.getElementById('_net_err');
@@ -14564,11 +14664,23 @@ async function fetchJSON(url) {
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+const sendJSON = (url, method, body) =>
+  call(url, {method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+
+const UNITS = ['ea', 'oz', 'lb'];
+const FIELDS = [
+  ['name', 'Name', 'text'], ['brand', 'Brand', 'text'], ['size_text', 'Size as printed', 'text'],
+  ['quantity', 'Quantity', 'qty'], ['price', 'Price tag', 'number'], ['price_text', 'Tag as printed', 'text'],
+  ['upc', 'UPC', 'text'], ['other_text', 'Other', 'text'],
+];
 
 let photos = [], products = [], tab = 'all', pollTimer = null, scrolled = false;
+// Cards with unsaved edits: polling leaves them alone
+const dirty = new Set();
 const productById = id => products.find(p => p.id === id);
 const isHidden = ph => ph.product_id != null && ph.product_photo_id !== ph.id;
-const needsProduct = ph => ph.product_id == null && ph.status !== 'processing';
+const needsProduct = ph => ph.product_id == null && !['processing', 'waiting'].includes(ph.status);
+const isUnused = ph => ph.info_status === 'done' && ph.product_id != null && !ph.info_used_at;
 
 async function load() {
   try {
@@ -14579,12 +14691,12 @@ async function load() {
     render();
   } catch (e) {
     showNetworkError('Could not load photos: ' + e.message);
-    if (!photos.length) document.getElementById('grid').innerHTML =
+    if (!photos.length) document.getElementById('list').innerHTML =
       `<div class="empty err">Could not load photos: ${esc(e.message)}</div>`;
   }
-  // While the model is matching a photo, check back every few seconds
+  // While the model is reading a photo, check back every few seconds
   clearTimeout(pollTimer);
-  if (photos.some(p => p.status === 'processing')) pollTimer = setTimeout(load, 3000);
+  if (photos.some(p => p.status === 'processing' || p.info_status === 'reading')) pollTimer = setTimeout(load, 3000);
   else if (photos.some(p => p.status === 'waiting')) pollTimer = setTimeout(load, 15000);
 }
 
@@ -14600,44 +14712,102 @@ function productOptions(ph) {
     + (taken.length ? `<optgroup label="Already have a picture">${taken.join('')}</optgroup>` : '');
 }
 
-function stateLine(ph) {
+function matchLine(ph) {
   switch (ph.status) {
-    case 'processing': return '<div class="state warn">Matching… usually 20–40 seconds</div>';
+    case 'processing': return '<div class="state warn">Matching to a product…</div>';
     case 'waiting': return '<div class="state warn">Waiting for its receipt to be scanned</div>';
     case 'matched': return `<div class="state ok">${{manual: 'Picked by hand', receipt: 'Taken for this item after scanning its receipt'}[ph.match_source] || 'Matched by the model'}</div>`;
     case 'unmatched': return '<div class="state warn">No product</div>';
-    default: return `<div class="state err">Failed: ${esc(ph.error || 'matching failed')}</div>`;
+    default: return `<div class="state err">Matching failed: ${esc(ph.error || 'unknown error')}</div>`;
   }
+}
+
+function readLine(ph) {
+  switch (ph.info_status) {
+    case 'reading': return '<span class="state warn">Reading… usually 20–40 s</span>';
+    case 'done': return ph.info_used_at ? `<span class="state ok">Used ${esc(ph.info_used_at)}</span>` : '<span class="state warn">Not used yet</span>';
+    case 'error': return '<span class="state err">Reading failed</span>';
+    default: return '<span class="muted">Not read yet</span>';
+  }
+}
+
+const fmtQty = (q, u) => q == null ? '—' : `${+q} ${u || ''}`.trim();
+
+function formRow(ph, [key, label, kind]) {
+  const v = ph.info ? ph.info[key] : null;
+  const dis = ph.info_status === 'reading' ? ' disabled' : '';
+  if (kind === 'qty') {
+    const unit = (ph.info && ph.info.unit) || 'oz';
+    return `<label>${label}</label><div class="pair">
+      <input type="number" step="any" min="0" data-f="quantity" value="${esc(v)}"${dis}>
+      <select data-f="unit"${dis}>${UNITS.map(u => `<option${u === unit ? ' selected' : ''}>${u}</option>`).join('')}</select></div>`;
+  }
+  return `<label>${label}</label><input type="${kind === 'number' ? 'number' : 'text'}"${kind === 'number' ? ' step="0.01" min="0"' : ''} data-f="${key}" value="${esc(v)}"${dis}>`;
+}
+
+// What Use would change on the product, from the form as it stands
+function diffHTML(ph, vals) {
+  const prod = ph.product_id != null ? productById(ph.product_id) : null;
+  if (!prod) return '';
+  const out = [];
+  if (vals.name && vals.name !== prod.name) out.push(`<div>Name: ${esc(prod.name)} → <b>${esc(vals.name)}</b></div>`);
+  if (vals.quantity != null && (+vals.quantity !== prod.quantity || vals.unit !== prod.unit))
+    out.push(`<div>Quantity: ${esc(fmtQty(prod.quantity, prod.unit))} → <b>${esc(fmtQty(vals.quantity, vals.unit))}</b></div>`);
+  return out.length ? `<div class="diff">Use will change:${out.join('')}</div>` : '<div class="muted">The product already matches this.</div>';
+}
+
+function formValues(cardEl) {
+  const vals = {};
+  cardEl.querySelectorAll('[data-f]').forEach(el => {
+    const v = el.value.trim();
+    vals[el.dataset.f] = ['quantity', 'price'].includes(el.dataset.f) ? (v === '' ? null : +v) : (v || null);
+  });
+  if (vals.quantity == null) vals.unit = null;
+  return vals;
 }
 
 function card(ph) {
   const prod = ph.product_id != null ? productById(ph.product_id) : null;
   const name = ph.product_name || (ph.product_id != null ? `Product #${ph.product_id}` : null);
-  const modelPick = ph.model_product_id != null && ph.model_product_id !== ph.product_id
-    ? `<div class="muted">Model picked: ${esc(ph.model_product_name || '#' + ph.model_product_id)}</div>` : '';
   const hidden = isHidden(ph)
     ? `<div class="warn-box">Hidden: ${esc(name)} shows <a href="#photo-${ph.product_photo_id}">photo #${ph.product_photo_id}</a> instead. Move this one to the right product.</div>` : '';
-  const busy = ph.status === 'processing';
+  const modelPick = ph.model_product_id != null && ph.model_product_id !== ph.product_id
+    ? `<div class="muted">Model picked: ${esc(ph.model_product_name || '#' + ph.model_product_id)}</div>` : '';
+  const reading = ph.info_status === 'reading';
+  const busy = reading || ph.status === 'processing';
   return `<div class="card" id="photo-${ph.id}" data-id="${ph.id}">
-    <a href="/api/product-photos/${ph.id}/image" target="_blank"><img loading="lazy" src="/api/product-photos/${ph.id}/image" alt=""></a>
-    <div class="body">
+    <a class="pic" href="/api/product-photos/${ph.id}/image" target="_blank"><img loading="lazy" src="/api/product-photos/${ph.id}/image" alt=""></a>
+    <div class="col">
+      <h2><span>Read from the photo</span>${readLine(ph)}</h2>
+      ${ph.info_status === 'error' ? `<div class="state err">${esc(ph.info_error || 'Reading failed')}</div>` : ''}
+      <div class="form">${FIELDS.map(f => formRow(ph, f)).join('')}</div>
+      ${ph.model_notes ? `<div class="muted">Model's note: ${esc(ph.model_notes)}</div>` : ''}
+      <div data-diff>${prod && ph.info ? diffHTML(ph, ph.info) : ''}</div>
+      <div class="msg" data-msg></div>
+      <div class="btns">
+        <button class="primary use" data-act="use" ${!prod || reading ? 'disabled' : ''} title="${prod ? 'Copy the name, quantity and unit to the product' : 'Assign the photo to a product first'}">Use</button>
+        <button data-act="save" ${reading ? 'disabled' : ''}>Save without using</button>
+        <button data-act="retry" ${busy ? 'disabled' : ''}>${ph.info_status ? 'Read again' : 'Read'}</button>
+      </div>
+    </div>
+    <div class="col live">
+      <h2><span>Product (live)</span></h2>
       <div class="title${name ? '' : ' none'}">${esc(name || 'No product')}</div>
-      ${stateLine(ph)}
+      ${prod ? `<div class="kv"><span>Quantity:</span> ${esc(fmtQty(prod.quantity, prod.unit))}</div>
+        ${prod.printed ? `<div class="kv"><span>On receipts:</span> ${esc(prod.printed)}</div>` : ''}
+        ${prod.last_price != null ? `<div class="kv"><span>Last paid:</span> $${prod.last_price.toFixed(2)}</div>` : ''}` : ''}
+      ${matchLine(ph)}
       ${hidden}
-      ${ph.receipt_id != null ? `<div class="muted">With <a href="/receipts/${ph.receipt_id}">receipt #${ph.receipt_id}</a></div>` : ''}
-      ${ph.model_seen ? `<div class="muted">Model saw: ${esc(ph.model_seen)}</div>` : ''}
       ${modelPick}
-      ${ph.model_notes ? `<div class="muted">${esc(ph.model_notes)}</div>` : ''}
-      <div class="muted">Photo #${ph.id} · ${esc(ph.uploaded_at)}</div>
+      ${ph.receipt_id != null ? `<div class="muted">With <a href="/receipts/${ph.receipt_id}">receipt #${ph.receipt_id}</a></div>` : ''}
       <div class="assign">
         <select data-product ${busy ? 'disabled' : ''}>${productOptions(ph)}</select>
         <button class="primary" data-act="move" disabled>Move</button>
       </div>
-      <div class="msg" data-msg></div>
-      <div class="actions">
+      <div class="btns" style="margin-top:auto">
         ${ph.product_id != null ? '<button data-act="clear">Take off product</button>' : ''}
-        <button data-act="retry" ${busy ? 'disabled' : ''}>Match again</button>
-        <button data-act="delete" class="danger">Delete</button>
+        <button data-act="delete" class="danger">Delete photo</button>
+        <span class="muted">Photo #${ph.id} · ${esc(ph.uploaded_at)}</span>
       </div>
     </div>
   </div>`;
@@ -14645,16 +14815,33 @@ function card(ph) {
 
 function render() {
   const q = document.getElementById('filter').value.trim().toLowerCase();
-  const inTab = ph => tab === 'all' || (tab === 'none' ? needsProduct(ph) : isHidden(ph));
-  const shown = photos.filter(ph => inTab(ph) && (!q || [ph.product_name, ph.model_seen, ph.model_product_name, String(ph.id)]
-    .some(v => v && v.toLowerCase().includes(q))));
-  const nNone = photos.filter(needsProduct).length, nHidden = photos.filter(isHidden).length;
-  document.querySelector('[data-tab=none]').textContent = `Need a product (${nNone})`;
-  document.querySelector('[data-tab=hidden]').textContent = `Hidden (${nHidden})`;
+  const inTab = ph => tab === 'all' || (tab === 'none' ? needsProduct(ph) : tab === 'unused' ? isUnused(ph) : isHidden(ph));
+  const text = ph => [ph.product_name, ph.model_product_name, String(ph.id), ...(ph.info ? Object.values(ph.info) : [])];
+  const shown = photos.filter(ph => inTab(ph) && (!q || text(ph).some(v => v != null && String(v).toLowerCase().includes(q))));
+  document.querySelector('[data-tab=unused]').textContent = `Not used yet (${photos.filter(isUnused).length})`;
+  document.querySelector('[data-tab=none]').textContent = `Need a product (${photos.filter(needsProduct).length})`;
+  document.querySelector('[data-tab=hidden]').textContent = `Hidden (${photos.filter(isHidden).length})`;
   document.getElementById('count').textContent = `${shown.length} of ${photos.length} photos`;
-  const grid = document.getElementById('grid');
-  grid.innerHTML = shown.length ? shown.map(card).join('')
-    : `<div class="empty">${photos.length ? 'No photos here.' : 'No photos yet. Take one in the Products tab of the app.'}</div>`;
+  const unread = photos.filter(p => p.info_status == null).length;
+  const rb = document.getElementById('read-unread');
+  rb.hidden = !unread;
+  rb.textContent = `Read ${unread} photo${unread === 1 ? '' : 's'} not read yet`;
+
+  const list = document.getElementById('list');
+  if (!shown.length) {
+    list.innerHTML = `<div class="empty">${photos.length ? 'No photos here.' : 'No photos yet. Take one in the app.'}</div>`;
+    return;
+  }
+  // Rebuild, but keep the cards being edited as they are
+  const keep = new Map([...list.querySelectorAll('.card')].filter(c => dirty.has(+c.dataset.id)).map(c => [+c.dataset.id, c]));
+  const frag = document.createDocumentFragment();
+  const tmp = document.createElement('div');
+  for (const ph of shown) {
+    if (keep.has(ph.id)) { frag.appendChild(keep.get(ph.id)); continue; }
+    tmp.innerHTML = card(ph);
+    frag.appendChild(tmp.firstElementChild);
+  }
+  list.replaceChildren(frag);
   highlightTarget();
 }
 
@@ -14672,24 +14859,22 @@ function setMsg(cardEl, html, cls) {
   m.className = 'msg ' + (cls || '');
   m.innerHTML = html;
 }
+function setBusy(cardEl, on) { cardEl.querySelectorAll('button, select, input').forEach(b => b.disabled = on); }
 
 async function assign(cardEl, productId, swap) {
   const id = +cardEl.dataset.id;
-  cardEl.querySelectorAll('button, select').forEach(b => b.disabled = true);
+  setBusy(cardEl, true);
   setMsg(cardEl, 'Saving…');
   let res;
   try {
-    res = await call(`/api/product-photos/${id}/product`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(swap ? {product_id: productId, swap: true} : {product_id: productId}),
-    });
+    res = await sendJSON(`/api/product-photos/${id}/product`, 'POST', swap ? {product_id: productId, swap: true} : {product_id: productId});
   } catch (e) {
-    cardEl.querySelectorAll('button, select').forEach(b => b.disabled = false);
+    setBusy(cardEl, false);
     setMsg(cardEl, 'Could not reach the server: ' + esc(e.message), 'err');
     return;
   }
   if (res.status === 409) {
-    cardEl.querySelectorAll('button, select').forEach(b => b.disabled = false);
+    setBusy(cardEl, false);
     const ph = photos.find(p => p.id === id);
     const where = ph && ph.product_id != null && ph.product_id !== productId
       ? `the other picture moves to ${esc(ph.product_name)}` : 'the other picture is left without a product';
@@ -14698,23 +14883,65 @@ async function assign(cardEl, productId, swap) {
     return;
   }
   if (!res.ok) {
-    cardEl.querySelectorAll('button, select').forEach(b => b.disabled = false);
+    setBusy(cardEl, false);
     setMsg(cardEl, 'Could not save: ' + esc(res.error), 'err');
     return;
   }
+  dirty.delete(id);
   await load();
 }
 
-document.getElementById('grid').addEventListener('change', e => {
-  if (!e.target.matches('[data-product]')) return;
+async function saveInfo(cardEl, use) {
+  const id = +cardEl.dataset.id;
+  const vals = formValues(cardEl);
+  setBusy(cardEl, true);
+  setMsg(cardEl, use ? 'Copying to the product…' : 'Saving…');
+  let res;
+  try {
+    res = use ? await sendJSON(`/api/product-photos/${id}/use`, 'POST', vals)
+              : await sendJSON(`/api/product-photos/${id}/info`, 'PATCH', vals);
+  } catch (e) {
+    setBusy(cardEl, false);
+    setMsg(cardEl, 'Could not reach the server: ' + esc(e.message), 'err');
+    return;
+  }
+  if (!res.ok) {
+    setBusy(cardEl, false);
+    setMsg(cardEl, (use ? 'Could not use it: ' : 'Could not save: ') + esc(res.error), 'err');
+    return;
+  }
+  dirty.delete(id);
+  await load();
+  const fresh = document.getElementById('photo-' + id);
+  if (fresh) setMsg(fresh, use ? 'Copied to the product.' + (res.data.renamed ? ` Renamed ${res.data.renamed} receipt line(s).` : '') : 'Saved.', 'ok');
+}
+
+const list = document.getElementById('list');
+list.addEventListener('input', e => {
   const cardEl = e.target.closest('.card');
+  if (!cardEl || !e.target.matches('[data-f]')) return;
   const ph = photos.find(p => p.id === +cardEl.dataset.id);
-  const v = e.target.value === '' ? null : +e.target.value;
-  cardEl.querySelector('[data-act=move]').disabled = v == null || v === ph.product_id;
-  setMsg(cardEl, '');
+  dirty.add(ph.id);
+  const orig = ph.info ? ph.info[e.target.dataset.f] : null;
+  e.target.classList.toggle('changed', String(orig ?? '') !== e.target.value.trim());
+  if (ph.product_id != null) cardEl.querySelector('[data-diff]').innerHTML = diffHTML(ph, formValues(cardEl));
+});
+list.addEventListener('change', e => {
+  const cardEl = e.target.closest('.card');
+  if (!cardEl) return;
+  const ph = photos.find(p => p.id === +cardEl.dataset.id);
+  if (e.target.matches('[data-f=unit]')) {
+    dirty.add(ph.id);
+    if (ph.product_id != null) cardEl.querySelector('[data-diff]').innerHTML = diffHTML(ph, formValues(cardEl));
+  }
+  if (e.target.matches('[data-product]')) {
+    const v = e.target.value === '' ? null : +e.target.value;
+    cardEl.querySelector('[data-act=move]').disabled = v == null || v === ph.product_id;
+    setMsg(cardEl, '');
+  }
 });
 
-document.getElementById('grid').addEventListener('click', async e => {
+list.addEventListener('click', async e => {
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
   const cardEl = btn.closest('.card');
@@ -14726,22 +14953,31 @@ document.getElementById('grid').addEventListener('click', async e => {
     await assign(cardEl, +btn.dataset.pid, true);
   } else if (act === 'clear') {
     await assign(cardEl, null, false);
+  } else if (act === 'use' || act === 'save') {
+    await saveInfo(cardEl, act === 'use');
   } else if (act === 'retry') {
+    if (dirty.has(id) && !btn.classList.contains('armed')) {
+      btn.classList.add('armed');
+      btn.textContent = 'Discard edits and read again?';
+      setTimeout(() => { btn.classList.remove('armed'); btn.textContent = 'Read again'; }, 4000);
+      return;
+    }
     btn.disabled = true;
-    setMsg(cardEl, 'Asking the model again…');
+    setMsg(cardEl, 'Asking the model to read it again…');
     try {
       const res = await call(`/api/product-photos/${id}/retry`, {method: 'POST'});
-      if (!res.ok) { btn.disabled = false; setMsg(cardEl, 'Could not retry: ' + esc(res.error), 'err'); return; }
+      if (!res.ok) { btn.disabled = false; setMsg(cardEl, 'Could not read it again: ' + esc(res.error), 'err'); return; }
     } catch (err) {
       btn.disabled = false; setMsg(cardEl, 'Could not reach the server: ' + esc(err.message), 'err'); return;
     }
+    dirty.delete(id);
     await load();
   } else if (act === 'delete') {
     // Two clicks to delete, so a stray click can't lose a photo
     if (!btn.classList.contains('armed')) {
       btn.classList.add('armed');
       btn.textContent = 'Click again to delete';
-      setTimeout(() => { btn.classList.remove('armed'); btn.textContent = 'Delete'; }, 4000);
+      setTimeout(() => { btn.classList.remove('armed'); btn.textContent = 'Delete photo'; }, 4000);
       return;
     }
     btn.disabled = true;
@@ -14751,8 +14987,22 @@ document.getElementById('grid').addEventListener('click', async e => {
     } catch (err) {
       btn.disabled = false; setMsg(cardEl, 'Could not reach the server: ' + esc(err.message), 'err'); return;
     }
+    dirty.delete(id);
     await load();
   }
+});
+
+document.getElementById('read-unread').addEventListener('click', async e => {
+  const btn = e.target;
+  btn.disabled = true;
+  try {
+    const res = await call('/api/product-photos/read-unread', {method: 'POST'});
+    if (!res.ok) showNetworkError('Could not start reading: ' + res.error);
+  } catch (err) {
+    showNetworkError('Could not reach the server: ' + err.message);
+  }
+  btn.disabled = false;
+  await load();
 });
 
 document.getElementById('tabs').addEventListener('click', e => {

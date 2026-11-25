@@ -7,12 +7,21 @@ before it; if there isn't one, or it's still being read, the photo waits
 (status 'waiting') and is paired with the next receipt that finishes
 scanning. Waiting photos are matched one at a time once it does.
 
-Each photo is sent to the local vision model (the same service delegator task
-that reads receipts) with the products on its receipt that don't have a
-picture yet: their names, the text printed for them on receipts, and the
-stores they were bought at. The model picks the product the photo shows, or
-says none of them match. Either way the photo can be moved to another product by hand (the
-Products tab in the app), which is also how an unmatched photo gets a product.
+Most photos are taken when the app asks for one of a receipt item right after
+the receipt is scanned; those are assigned to that product directly.
+
+Every photo is read by the local vision model (the same service delegator task
+that reads receipts), which "info-scrapes" the package: the product's name,
+brand, net weight or count, any price tag, the UPC. That reading is kept on
+the photo (info_json) as a draft that can be corrected on the Product Photos
+page and then copied to the product with "Use" (name, quantity and unit).
+
+A photo that doesn't have a product yet (taken from the Products tab) is also
+matched in the same model call: it's given the products on its receipt that
+don't have a picture yet (their names, the text printed for them on receipts,
+and the stores they were bought at), and picks the one the photo shows, or
+says none of them match. Either way the photo can be moved to another product
+by hand, which is also how an unmatched photo gets a product.
 
 A product's picture is its most recent photo. Photos are saved next to the
 database in product_photos/.
@@ -30,22 +39,39 @@ from smart_home import delegated, receipts
 
 AI_TASK = receipts.AI_TASK
 
-_SCHEMA_BASE = {
-    "type": "object",
-    "properties": {
-        "seen": {"type": "string"},
-        "product_id": {"type": ["integer", "null"]},
-        "notes": {"type": ["string", "null"]},
-    },
-    "required": ["seen", "product_id", "notes"],
-    "additionalProperties": False,
+# What's read off the package. These are also the fields of info_json, which
+# can be edited before "Use" copies name, quantity and unit to the product.
+INFO_FIELDS = ["name", "brand", "size_text", "quantity", "unit", "price", "price_text", "upc", "other_text"]
+
+_INFO_PROPERTIES = {
+    "name": {"type": "string", "maxLength": 120},
+    "brand": {"type": ["string", "null"], "maxLength": 60},
+    "size_text": {"type": ["string", "null"], "maxLength": 100},
+    "quantity": {"type": ["number", "null"]},
+    "unit": {"type": ["string", "null"], "enum": receipts.UNITS + [None]},
+    "price": {"type": ["number", "null"]},
+    "price_text": {"type": ["string", "null"], "maxLength": 100},
+    "upc": {"type": ["string", "null"], "maxLength": 20},
+    "other_text": {"type": ["string", "null"], "maxLength": 300},
+    "notes": {"type": ["string", "null"], "maxLength": 300},
 }
 
-_PROMPT = """This is a photo of a grocery or household product, taken at home. Below is a list of products bought on earlier store receipts that don't have a picture yet. Each has an id, a name, and the text the store printed for it on the receipt (often abbreviated, e.g. "GV 2% MLK GAL" is Great Value 2% milk, 1 gallon; "RB CL SUPR" is Red Baron Classic Supreme pizza).
+_PROMPT = f"""This is a photo of a grocery or household product, taken at home. Read what's printed on it (the package, and any price tag or sticker) for a household product list.
 
-- seen: what the photo shows, as printed on the package: brand, product, flavor or variety, and size (e.g. "Red Baron Classic Crust Supreme pizza, 22.3 oz").
-- product_id: the id of the product in the list that this is. Brand, variety and size should agree; a different flavor or variety of the same brand is a different product. Use null if none of them is clearly this product; a wrong match is worse than none.
-- notes: anything uncertain, e.g. two products that could both be it, otherwise null.
+- name: the product as a person would name it on a shopping list: brand, product, and flavor or variety, without the size (e.g. "Red Baron Classic Crust Supreme Pizza", "Great Value 2% Milk").
+- brand: the brand alone (e.g. "Red Baron"), or null if none is visible.
+- size_text: the net weight, volume or count exactly as printed (e.g. "NET WT 22.3 OZ (1 LB 6.3 OZ) 632g", "12 FL OZ", "24 CT"), or null if not visible.
+- quantity and unit: the amount in one package, from size_text. Units are {", ".join(receipts.UNITS)}: a weight in oz (use lb only if it's printed only in pounds; convert grams to oz), fluid ounces as oz, a count of pieces ("24 CT") as ea. Null for both if no size is visible.
+- price: the price on a shelf tag, sticker or printed price in the photo, in dollars; null if there is none. price_text: that tag as printed, including any unit price (e.g. "$3.98  24.9¢/oz"), or null.
+- upc: the barcode number, digits only, if its digits are readable; otherwise null.
+- other_text: other details worth keeping that are printed prominently, e.g. "Family Size", "Organic", "Gluten free", servings; or null.
+- notes: one short sentence on anything uncertain (e.g. the size was partly hidden), otherwise null.
+"""
+
+_MATCH_PROMPT = """
+Also say which of the products below this is. They were bought on the receipt this photo was taken with and don't have a picture yet. Each has an id, a name, and the text the store printed for it on the receipt (often abbreviated, e.g. "GV 2% MLK GAL" is Great Value 2% milk, 1 gallon; "RB CL SUPR" is Red Baron Classic Supreme pizza).
+
+- product_id: the id of the product in the list that this is. Brand, variety and size should agree; a different flavor or variety of the same brand is a different product. Use null if none of them is clearly this product; a wrong match is worse than none. Mention it in notes if two could both be it.
 
 Products:
 """
@@ -124,25 +150,30 @@ def candidates(conn: sqlite3.Connection, receipt_id: int | None = None) -> list[
 
 
 def _ask(image: bytes, cands: list[dict]) -> dict:
+    """Read the package; with cands, also pick which of them it is (product_id)."""
     import httpx
 
     image = receipts._shrink_for_model(image)
-    lines = "\n".join(
-        f'- id {c["id"]}: {c["name"]}'
-        + (f' (printed as {c["printed"]})' if c["printed"] else "")
-        + (f' [{c["stores"]}]' if c["stores"] else "")
-        for c in cands
-    )
-    schema = json.loads(json.dumps(_SCHEMA_BASE))
-    # Only an id from the list (or null) is a valid answer
-    schema["properties"]["product_id"]["enum"] = [c["id"] for c in cands] + [None]
+    props = dict(_INFO_PROPERTIES)
+    prompt = _PROMPT
+    if cands:
+        lines = "\n".join(
+            f'- id {c["id"]}: {c["name"]}'
+            + (f' (printed as {c["printed"]})' if c["printed"] else "")
+            + (f' [{c["stores"]}]' if c["stores"] else "")
+            for c in cands
+        )
+        prompt += _MATCH_PROMPT + lines
+        # Only an id from the list (or null) is a valid answer
+        props["product_id"] = {"type": ["integer", "null"], "enum": [c["id"] for c in cands] + [None]}
+    schema = {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
     try:
         resp = httpx.post(
             f"{delegated.SERVICE_DELEGATOR_URL}/api/ask",
             json={
                 "task": AI_TASK,
                 "project": "smart-home",
-                "prompt": _PROMPT + (lines or "(none)"),
+                "prompt": prompt,
                 "images": [base64.standard_b64encode(image).decode("ascii")],
                 "json_schema": schema,
             },
@@ -165,54 +196,40 @@ def _ask(image: bytes, cands: list[dict]) -> dict:
         raise PhotoError(f"Unparseable response from {body.get('model')}: {text[:200]}")
 
 
-def process(db_path: str, photo_id: int) -> None:
-    """Match one photo to a product and record the outcome on its row.
-    Callers queue it with _match_all_in_background, which marks it running."""
+def process(db_path: str, photo_id: int, match: bool = True) -> None:
+    """Read one photo's package info, and match it to a product on its receipt
+    if it has none (and `match`). Records the outcome on its row. Callers queue
+    it with _run_in_background, which marks it running."""
     conn = sqlite3.connect(db_path, timeout=30)
     try:
-        row = conn.execute("SELECT image_path, receipt_id FROM product_photos WHERE id=?", (photo_id,)).fetchone()
+        row = conn.execute("SELECT image_path, receipt_id, product_id FROM product_photos WHERE id=?",
+                           (photo_id,)).fetchone()
         if row is None:
             raise PhotoError(f"Photo {photo_id} not found")
-        rid = row[1]
-        conn.execute("UPDATE product_photos SET status='processing', error=NULL WHERE id=?", (photo_id,))
+        path, rid, current = row
+        match = match and current is None
+        conn.execute("UPDATE product_photos SET info_status='reading', info_error=NULL WHERE id=?", (photo_id,))
+        if match:
+            conn.execute("UPDATE product_photos SET status='processing', error=NULL WHERE id=?", (photo_id,))
         conn.commit()
         try:
-            with open(row[0], "rb") as f:
+            with open(path, "rb") as f:
                 image = f.read()
-            if rid is None:
-                raise PhotoError("This photo hasn't been paired with a receipt yet")
-            cands = candidates(conn, rid)
-            if not cands:
-                raise PhotoError(f"Every product on receipt {rid} already has a picture; pick the product by hand")
+            cands = candidates(conn, rid) if match and rid is not None else []
             data = _ask(image, cands)
-            pid = data.get("product_id")
-            if pid not in {c["id"] for c in cands}:
-                pid = None
-            claimed = 0
-            if pid:
-                # Only claim the product if it still has no picture: another photo
-                # matched at the same time may have taken it while the model ran.
-                # Never cover an existing picture.
-                claimed = conn.execute(
-                    "UPDATE product_photos SET status='matched', product_id=?, match_source='model', "
-                    "model_product_id=?, model_seen=?, model_notes=?, processed_at=? "
-                    "WHERE id=? AND NOT EXISTS (SELECT 1 FROM product_photos o WHERE o.product_id=? AND o.id != ?)",
-                    (pid, pid, data.get("seen"), data.get("notes"), _now(), photo_id, pid, photo_id),
-                ).rowcount
-            if not claimed:
-                notes = data.get("notes")
-                if pid:
-                    taken = "That product got a picture from another photo while this one was being matched"
-                    notes = f"{taken}. {notes}" if notes else taken
-                conn.execute(
-                    "UPDATE product_photos SET status='unmatched', product_id=NULL, match_source=NULL, "
-                    "model_product_id=?, model_seen=?, model_notes=?, processed_at=? WHERE id=?",
-                    (pid, data.get("seen"), notes, _now(), photo_id),
-                )
+            info = {k: data.get(k) for k in INFO_FIELDS}
+            conn.execute(
+                "UPDATE product_photos SET info_json=?, info_status='done', info_error=NULL, model_seen=?, "
+                "model_notes=?, processed_at=? WHERE id=?",
+                (json.dumps(info), info.get("name"), data.get("notes"), _now(), photo_id))
+            if match:
+                _record_match(conn, photo_id, rid, cands, data)
         except Exception as e:
             msg = str(e) if isinstance(e, PhotoError) else f"{type(e).__name__}: {e}"
-            conn.execute("UPDATE product_photos SET status='error', error=?, processed_at=? WHERE id=?",
+            conn.execute("UPDATE product_photos SET info_status='error', info_error=?, processed_at=? WHERE id=?",
                          (msg, _now(), photo_id))
+            if match:
+                conn.execute("UPDATE product_photos SET status='error', error=? WHERE id=?", (msg, photo_id))
             raise
         finally:
             conn.commit()
@@ -222,44 +239,80 @@ def process(db_path: str, photo_id: int) -> None:
             _running.discard(photo_id)
 
 
-def _match_all_in_background(db_path: str, photo_ids: list[int]) -> None:
+def _record_match(conn: sqlite3.Connection, photo_id: int, rid: int | None, cands: list[dict], data: dict) -> None:
+    pid = data.get("product_id")
+    if pid not in {c["id"] for c in cands}:
+        pid = None
+    claimed = 0
+    if pid:
+        # Only claim the product if it still has no picture: another photo
+        # may have taken it while the model ran. Never cover an existing picture.
+        claimed = conn.execute(
+            "UPDATE product_photos SET status='matched', product_id=?, match_source='model', model_product_id=? "
+            "WHERE id=? AND NOT EXISTS (SELECT 1 FROM product_photos o WHERE o.product_id=? AND o.id != ?)",
+            (pid, pid, photo_id, pid, photo_id),
+        ).rowcount
+    if claimed:
+        return
+    if pid:
+        why = "That product got a picture from another photo while this one was being read"
+    elif rid is None:
+        why = "Not paired with a receipt, so there was nothing to match it to"
+    elif not cands:
+        why = f"Every product on receipt {rid} already has a picture"
+    else:
+        why = None
+    notes = data.get("notes")
+    if why:
+        notes = f"{why}. {notes}" if notes else why + "."
+    conn.execute(
+        "UPDATE product_photos SET status='unmatched', product_id=NULL, match_source=NULL, "
+        "model_product_id=?, model_notes=? WHERE id=?", (pid, notes, photo_id))
+
+
+def _run_in_background(db_path: str, photo_ids: list[int], match: bool = True) -> None:
     def _bg():
         for photo_id in photo_ids:
             with _match_lock:
                 try:
-                    process(db_path, photo_id)
+                    process(db_path, photo_id, match)
                 except Exception as e:
                     # Also recorded on the photo's row and shown in the app
-                    print(f"Product photo {photo_id} matching failed: {e}", flush=True)
+                    print(f"Product photo {photo_id} reading failed: {e}", flush=True)
 
     # Marked running now, so the photos don't look interrupted while queued
     with _running_lock:
         busy = _running.intersection(photo_ids)
         if busy:
-            raise PhotoError(f"Photo {min(busy)} is already being matched")
+            raise PhotoError(f"Photo {min(busy)} is already being read")
         _running.update(photo_ids)
     threading.Thread(target=_bg, daemon=True).start()
 
 
-def _queue(conn: sqlite3.Connection, photo_ids: list[int]) -> None:
-    """Mark photos as queued; process() re-adds them to _running itself."""
-    conn.executemany("UPDATE product_photos SET status='processing', error=NULL WHERE id=?",
-                     [(i,) for i in photo_ids])
+def _queue(conn: sqlite3.Connection, photo_ids: list[int], match: bool = True) -> None:
+    """Mark photos as queued for reading (and matching, for those without a product)."""
+    for i in photo_ids:
+        conn.execute("UPDATE product_photos SET info_status='reading', info_error=NULL WHERE id=?", (i,))
+        if match:
+            conn.execute("UPDATE product_photos SET status='processing', error=NULL "
+                         "WHERE id=? AND product_id IS NULL", (i,))
     conn.commit()
 
 
-def start(db_path: str, photo_id: int) -> None:
-    """Pair a new (or retried) photo with its receipt and match it, or leave it
-    waiting for the next receipt. A retried photo keeps the receipt it had."""
+def start(db_path: str, photo_id: int, match: bool = True) -> None:
+    """Read a new (or re-read) photo. One without a product (and `match`) is
+    paired with its receipt and matched too, or left waiting for the next
+    receipt. A re-read photo keeps the receipt it had."""
     conn = sqlite3.connect(db_path, timeout=30)
     try:
         with _pair_lock:
-            row = conn.execute("SELECT uploaded_at, receipt_id FROM product_photos WHERE id=?",
+            row = conn.execute("SELECT uploaded_at, receipt_id, product_id FROM product_photos WHERE id=?",
                                (photo_id,)).fetchone()
             if row is None:
                 raise PhotoError(f"Photo {photo_id} not found")
-            uploaded, rid = row
-            if rid is None:
+            uploaded, rid, current = row
+            match = match and current is None
+            if match and rid is None:
                 since = (datetime.datetime.strptime(uploaded, "%Y-%m-%d %H:%M:%S")
                          - RECEIPT_WINDOW).strftime("%Y-%m-%d %H:%M:%S")
                 recent = conn.execute(
@@ -274,8 +327,8 @@ def start(db_path: str, photo_id: int) -> None:
                     return
                 rid = recent[0]
                 conn.execute("UPDATE product_photos SET receipt_id=? WHERE id=?", (rid, photo_id))
-            _queue(conn, [photo_id])
-        _match_all_in_background(db_path, [photo_id])
+            _queue(conn, [photo_id], match)
+        _run_in_background(db_path, [photo_id], match)
     finally:
         conn.close()
 
@@ -300,6 +353,52 @@ def assign_taken_for(db_path: str, photo_id: int, product_id: int, receipt_id: i
             conn.commit()
     finally:
         conn.close()
+    start(db_path, photo_id, match=False)
+
+
+def read_unread(db_path: str) -> int:
+    """Read the package info of every photo never read (e.g. from before photos
+    were read). Doesn't match them. Returns how many were queued."""
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        with _pair_lock:
+            ids = [r[0] for r in conn.execute(
+                "SELECT id FROM product_photos WHERE info_status IS NULL ORDER BY id") if not is_running(r[0])]
+            if not ids:
+                return 0
+            _queue(conn, ids, match=False)
+        _run_in_background(db_path, ids, match=False)
+        return len(ids)
+    finally:
+        conn.close()
+
+
+def clean_info(data: dict) -> tuple[dict, str | None]:
+    """Validate edited info fields (a subset of INFO_FIELDS). Returns (fields, error)."""
+    out = {}
+    for k, v in data.items():
+        if k not in INFO_FIELDS:
+            return {}, f"Unknown field {k!r}"
+        if k in ("quantity", "price"):
+            if v in (None, ""):
+                v = None
+            else:
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    return {}, f"{k} must be a number"
+                if v <= 0:
+                    return {}, f"{k} must be more than zero"
+        elif k == "unit":
+            v = v or None
+            if v is not None and v not in receipts.UNITS:
+                return {}, f'unit must be one of: {", ".join(receipts.UNITS)}'
+        else:
+            v = (str(v).strip() if v is not None else "") or None
+            if k == "upc" and v is not None and not v.isdigit():
+                return {}, "upc must be digits only"
+        out[k] = v
+    return out, None
 
 
 def on_receipt_scanned(db_path: str, receipt_id: int) -> None:
@@ -319,6 +418,6 @@ def on_receipt_scanned(db_path: str, receipt_id: int) -> None:
                 return
             conn.executemany("UPDATE product_photos SET receipt_id=? WHERE id=?", [(receipt_id, i) for i in ids])
             _queue(conn, ids)
-        _match_all_in_background(db_path, ids)
+        _run_in_background(db_path, ids)
     finally:
         conn.close()
