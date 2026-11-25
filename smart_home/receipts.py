@@ -92,9 +92,9 @@ _SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "raw_text": {"type": "string"},
+                    "raw_text": {"type": "string", "maxLength": 80},
                     "item_code": {"type": ["string", "null"]},
-                    "description": {"type": "string"},
+                    "description": {"type": "string", "maxLength": 120},
                     "quantity": {"type": ["number", "null"]},
                     "unit": {"type": ["string", "null"], "enum": UNITS + [None]},
                     "unit_price": {"type": ["number", "null"]},
@@ -109,7 +109,10 @@ _SCHEMA = {
         "subtotal": {"type": ["number", "null"]},
         "tax": {"type": ["number", "null"]},
         "total": {"type": ["number", "null"]},
-        "notes": {"type": ["string", "null"]},
+        # Length caps are enforced by Ollama's constrained decoding. Without them
+        # a confused model can repeat itself in notes until max_tokens (seen on
+        # second readings that can't explain a subtotal mismatch).
+        "notes": {"type": ["string", "null"], "maxLength": 300},
     },
     "required": ["is_receipt", "document_type", "utility", "usage", "usage_unit", "merchant", "purchase_date", "items", "items_sold", "subtotal", "tax", "total", "notes"],
     "additionalProperties": False,
@@ -136,7 +139,7 @@ _PROMPT = f"""This is a photo of a store or restaurant receipt, or of a utility 
 - category: choose the single best fit from: {", ".join(CATEGORIES)}. A restaurant meal or takeout is "Dining Out"; food bought at a store is "Groceries".
 - subtotal, tax, total: as printed, or null if missing. For restaurants, include any tip in total.
 - If the image is not a receipt or is unreadable, set is_receipt to false, leave items empty and explain why in notes.
-- notes: anything uncertain (e.g. a line you couldn't read), otherwise null."""
+- notes: one or two short sentences on anything uncertain (e.g. a line you couldn't read), otherwise null."""
 
 
 class ReceiptError(Exception):
