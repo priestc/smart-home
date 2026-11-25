@@ -388,7 +388,12 @@ def _read(conn: sqlite3.Connection, rid: int, image: bytes) -> dict:
     changes = _reconcile(data, catalog)
     problems = _problems(data)
     if problems:
-        second = _extract(image, _retry_hint(problems, catalog))
+        try:
+            second = _extract(image, _retry_hint(problems, catalog))
+        except ReceiptError as e:
+            # Keep the first reading rather than losing it; say why it wasn't improved
+            second = {}
+            changes.append(f"A second reading to fix these problems failed ({e}).")
         if second.get("is_receipt"):
             changes2 = _reconcile(second, catalog)
             problems2 = _problems(second)
