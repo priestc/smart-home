@@ -476,12 +476,15 @@ def open_db(path: str) -> sqlite3.Connection:
         conn.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
-    # How it's kept unopened: 'frozen', 'refrigerated' or 'shelf' (from a product photo)
-    try:
-        conn.execute("ALTER TABLE products ADD COLUMN storage TEXT")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    # storage: how it's kept unopened, 'frozen', 'refrigerated' or 'shelf'.
+    # count: pieces in one package (e.g. 130 pizza rolls), kept alongside the
+    # net weight in quantity/unit. Both come from a product photo.
+    for col in ("storage TEXT", "count INTEGER"):
+        try:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
     if conn.execute("SELECT COUNT(*) FROM subcategories").fetchone()[0] == 0:
         now = _now()
         conn.executemany("INSERT INTO subcategories (category, name, created_at) VALUES ('Groceries', ?, ?)",

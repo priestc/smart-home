@@ -12347,7 +12347,7 @@ def api_products():
     day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
     with _conn() as conn:
         rows = conn.execute(f"""
-            SELECT p.id, p.name, p.quantity, p.unit, p.storage, p.subcategory_id, COUNT(i.id) AS times_bought, MAX({day}) AS last_bought,
+            SELECT p.id, p.name, p.quantity, p.unit, p.count AS package_count, p.storage, p.subcategory_id, COUNT(i.id) AS times_bought, MAX({day}) AS last_bought,
                    (SELECT i4.category FROM receipt_items i4 WHERE i4.product_id = p.id
                     GROUP BY i4.category ORDER BY COUNT(*) DESC, MAX(i4.id) DESC LIMIT 1) AS category,
                    (SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = p.id) AS photo_id,
@@ -13684,7 +13684,8 @@ def api_product_photo_info(photo_id):
 @app.post("/api/product-photos/<int:photo_id>/use")
 def api_product_photo_use(photo_id):
     """Save any edited info fields in the body, then copy the photo's name,
-    quantity and unit, and storage (frozen/refrigerated/shelf) to its product.
+    quantity and unit (net weight), count (pieces per package) and storage
+    (frozen/refrigerated/shelf) to its product.
     A field left empty doesn't change the product."""
     with _conn() as conn:
         info, err = _save_photo_info(conn, photo_id, request.get_json(silent=True) or {})
@@ -13706,13 +13707,17 @@ def api_product_photo_use(photo_id):
             conn.execute("UPDATE products SET quantity=?, unit=?, updated_at=? WHERE id=?",
                          (qty['quantity'], qty['unit'], now, pid))
             changed.append('quantity')
+        if info.get('count') is not None:
+            conn.execute("UPDATE products SET count=?, updated_at=? WHERE id=?",
+                         (info['count'], datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), pid))
+            changed.append('count')
         if info.get('storage'):
             conn.execute("UPDATE products SET storage=?, updated_at=? WHERE id=?",
                          (info['storage'], datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), pid))
             changed.append('storage')
         if not changed:
             conn.rollback()
-            return jsonify({'error': 'Nothing to copy: give it a name or a quantity'}), 400
+            return jsonify({'error': 'Nothing to copy: give it a name, a net weight or a count'}), 400
         conn.execute("UPDATE product_photos SET info_used_at=? WHERE id=?",
                      (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), photo_id))
         row = conn.execute(f"SELECT {_PHOTO_COLS} {_PHOTO_FROM} WHERE ph.id=?", (photo_id,)).fetchone()
@@ -14624,7 +14629,7 @@ _PRODUCT_PHOTOS_PAGE = r"""<!DOCTYPE html>
   <h1>Product Photos</h1>
   <p class="intro">Each photo is read by the vision model: the product's name, size, price tag and barcode, as
   printed on the package, and whether it's kept frozen or refrigerated. Correct anything it got wrong, then
-  <b>Use</b> copies the name, quantity, unit and storage to the product. A product shows one picture, and a picture is never replaced: moving a photo onto a product that
+  <b>Use</b> copies the name, net weight, count and storage to the product. A product shows one picture, and a picture is never replaced: moving a photo onto a product that
   already has one asks you to swap them instead.</p>
   <div class="toolbar">
     <div class="tabs" id="tabs">
@@ -14676,7 +14681,7 @@ const UNITS = ['ea', 'oz', 'lb'];
 const STORAGE = {frozen: 'Frozen', refrigerated: 'Refrigerated', shelf: 'Shelf-stable'};
 const FIELDS = [
   ['name', 'Name', 'text'], ['brand', 'Brand', 'text'], ['size_text', 'Size as printed', 'text'],
-  ['quantity', 'Quantity', 'qty'], ['storage', 'Storage', 'storage'], ['storage_text', 'Storage as printed', 'text'],
+  ['quantity', 'Net weight', 'qty'], ['count', 'Count', 'count'], ['storage', 'Storage', 'storage'], ['storage_text', 'Storage as printed', 'text'],
   ['price', 'Price tag', 'number'], ['price_text', 'Tag as printed', 'text'],
   ['upc', 'UPC', 'text'], ['other_text', 'Other', 'text'],
 ];
@@ -14753,6 +14758,9 @@ function formRow(ph, [key, label, kind]) {
     return `<label>${label}</label><select data-f="storage"${dis}><option value="">Not known</option>${
       Object.entries(STORAGE).map(([k, t]) => `<option value="${k}"${k === v ? ' selected' : ''}>${t}</option>`).join('')}</select>`;
   }
+  if (kind === 'count') {
+    return `<label>${label}</label><input type="number" step="1" min="1" data-f="count" value="${esc(v)}" placeholder="pieces per package"${dis}>`;
+  }
   return `<label>${label}</label><input type="${kind === 'number' ? 'number' : 'text'}"${kind === 'number' ? ' step="0.01" min="0"' : ''} data-f="${key}" value="${esc(v)}"${dis}>`;
 }
 
@@ -14763,7 +14771,9 @@ function diffHTML(ph, vals) {
   const out = [];
   if (vals.name && vals.name !== prod.name) out.push(`<div>Name: ${esc(prod.name)} → <b>${esc(vals.name)}</b></div>`);
   if (vals.quantity != null && (+vals.quantity !== prod.quantity || vals.unit !== prod.unit))
-    out.push(`<div>Quantity: ${esc(fmtQty(prod.quantity, prod.unit))} → <b>${esc(fmtQty(vals.quantity, vals.unit))}</b></div>`);
+    out.push(`<div>Net weight: ${esc(fmtQty(prod.quantity, prod.unit))} → <b>${esc(fmtQty(vals.quantity, vals.unit))}</b></div>`);
+  if (vals.count != null && vals.count !== prod.package_count)
+    out.push(`<div>Count: ${esc(prod.package_count ?? '—')} → <b>${esc(vals.count)}</b></div>`);
   if (vals.storage && vals.storage !== prod.storage)
     out.push(`<div>Storage: ${esc(STORAGE[prod.storage] || '—')} → <b>${esc(STORAGE[vals.storage])}</b></div>`);
   return out.length ? `<div class="diff">Use will change:${out.join('')}</div>` : '<div class="muted">The product already matches this.</div>';
@@ -14773,7 +14783,7 @@ function formValues(cardEl) {
   const vals = {};
   cardEl.querySelectorAll('[data-f]').forEach(el => {
     const v = el.value.trim();
-    vals[el.dataset.f] = ['quantity', 'price'].includes(el.dataset.f) ? (v === '' ? null : +v) : (v || null);
+    vals[el.dataset.f] = ['quantity', 'price', 'count'].includes(el.dataset.f) ? (v === '' ? null : +v) : (v || null);
   });
   if (vals.quantity == null) vals.unit = null;
   return vals;
@@ -14806,7 +14816,8 @@ function card(ph) {
     <div class="col live">
       <h2><span>Product (live)</span></h2>
       <div class="title${name ? '' : ' none'}">${esc(name || 'No product')}</div>
-      ${prod ? `<div class="kv"><span>Quantity:</span> ${esc(fmtQty(prod.quantity, prod.unit))}</div>
+      ${prod ? `<div class="kv"><span>Net weight:</span> ${esc(fmtQty(prod.quantity, prod.unit))}</div>
+        <div class="kv"><span>Count:</span> ${esc(prod.package_count ?? '—')}</div>
         <div class="kv"><span>Storage:</span> ${esc(STORAGE[prod.storage] || '—')}</div>
         ${prod.printed ? `<div class="kv"><span>On receipts:</span> ${esc(prod.printed)}</div>` : ''}
         ${prod.last_price != null ? `<div class="kv"><span>Last paid:</span> $${prod.last_price.toFixed(2)}</div>` : ''}` : ''}

@@ -41,7 +41,7 @@ AI_TASK = receipts.AI_TASK
 
 # What's read off the package. These are also the fields of info_json, which
 # can be edited before "Use" copies name, quantity and unit to the product.
-INFO_FIELDS = ["name", "brand", "size_text", "quantity", "unit", "storage", "storage_text",
+INFO_FIELDS = ["name", "brand", "size_text", "quantity", "unit", "count", "storage", "storage_text",
                "price", "price_text", "upc", "other_text"]
 # How a product is kept before it's opened
 STORAGE = ["frozen", "refrigerated", "shelf"]
@@ -52,6 +52,7 @@ _INFO_PROPERTIES = {
     "size_text": {"type": ["string", "null"], "maxLength": 100},
     "quantity": {"type": ["number", "null"]},
     "unit": {"type": ["string", "null"], "enum": receipts.UNITS + [None]},
+    "count": {"type": ["integer", "null"]},
     "storage": {"type": ["string", "null"], "enum": STORAGE + [None]},
     "storage_text": {"type": ["string", "null"], "maxLength": 100},
     "price": {"type": ["number", "null"]},
@@ -65,8 +66,10 @@ _PROMPT = f"""This is a photo of a grocery or household product, taken at home. 
 
 - name: the product as a person would name it on a shopping list: brand, product, and flavor or variety, without the size (e.g. "Red Baron Classic Crust Supreme Pizza", "Great Value 2% Milk").
 - brand: the brand alone (e.g. "Red Baron"), or null if none is visible.
-- size_text: the net weight, volume or count exactly as printed (e.g. "NET WT 22.3 OZ (1 LB 6.3 OZ) 632g", "12 FL OZ", "24 CT"), or null if not visible.
-- quantity and unit: the amount in one package, from size_text. Units are {", ".join(receipts.UNITS)}: a weight in oz (use lb only if it's printed only in pounds; convert grams to oz), fluid ounces as oz, a count of pieces ("24 CT") as ea. Null for both if no size is visible.
+- size_text: every size printed, exactly as printed: net weight or volume and any count (e.g. "130 PIZZA ROLLS NET WT 4.06 LB (1.84kg)", "NET WT 22.3 OZ (632g)", "12 FL OZ"), or null if not visible.
+- A package often prints both a count and a net weight (e.g. "130 count" and "1.84 kg"): record both, the weight in quantity and unit and the count in count.
+- quantity and unit: the net weight or volume of one package. Units are {", ".join(receipts.UNITS)}: a weight in oz (use lb only if it's printed only in pounds; convert grams and kilograms to oz: 1 kg = 35.27 oz), fluid ounces as oz. Only if no weight or volume is printed, use the count with unit "ea". Null for both if no size is visible.
+- count: how many pieces or items are in the package, as printed (e.g. "130 CT", "24 rolls", "12 cans" gives 130, 24, 12), even when a net weight is printed too; null if no count is printed.
 - storage: how it's kept before it's opened. "frozen" if the package says "keep frozen" (or similar) or it's clearly a frozen food; "refrigerated" if it says "keep refrigerated", "perishable, keep cold" or similar, or it's clearly a fresh chilled food (milk, deli salad, raw meat); "shelf" if it's kept at room temperature (canned, boxed, dry goods), including ones that only say "refrigerate after opening". Null if you can't tell.
 - storage_text: any storage instruction exactly as printed (e.g. "KEEP FROZEN", "KEEP REFRIGERATED", "REFRIGERATE AFTER OPENING"), or null if none is visible.
 - price: the price on a shelf tag, sticker or printed price in the photo, in dollars; null if there is none. price_text: that tag as printed, including any unit price (e.g. "$3.98  24.9¢/oz"), or null.
@@ -386,7 +389,18 @@ def clean_info(data: dict) -> tuple[dict, str | None]:
     for k, v in data.items():
         if k not in INFO_FIELDS:
             return {}, f"Unknown field {k!r}"
-        if k in ("quantity", "price"):
+        if k == "count":
+            if v in (None, ""):
+                v = None
+            else:
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    return {}, "count must be a whole number"
+                if f != int(f) or f <= 0:
+                    return {}, "count must be a whole number more than zero"
+                v = int(f)
+        elif k in ("quantity", "price"):
             if v in (None, ""):
                 v = None
             else:
