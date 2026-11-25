@@ -163,21 +163,26 @@ enum PhotoUploader {
 struct UnsentPhotos {
     let folder: String   // "receipts" or "product-photos"
 
-    struct Saved { let id: UUID; let date: Date; let jpeg: Data }
+    /// `info` is what the photo was taken for (e.g. which receipt item), kept beside it.
+    struct Saved { let id: UUID; let date: Date; let jpeg: Data; let info: Data? }
 
     private var dir: URL {
         URL.applicationSupportDirectory.appending(path: "unsent-uploads/\(folder)", directoryHint: .isDirectory)
     }
 
     private func file(_ id: UUID) -> URL { dir.appending(path: id.uuidString + ".jpg") }
+    private func infoFile(_ id: UUID) -> URL { dir.appending(path: id.uuidString + ".json") }
 
-    func save(_ id: UUID, _ jpeg: Data) throws {
+    func save(_ id: UUID, _ jpeg: Data, info: Data? = nil) throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Written first, so a saved photo is never without what it was taken for
+        if let info { try info.write(to: infoFile(id), options: .atomic) }
         try jpeg.write(to: file(id), options: .atomic)
     }
 
     func remove(_ id: UUID) {
         try? FileManager.default.removeItem(at: file(id))
+        try? FileManager.default.removeItem(at: infoFile(id))
     }
 
     /// Oldest first.
@@ -191,7 +196,7 @@ struct UnsentPhotos {
                   let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent),
                   let data = try? Data(contentsOf: url) else { return nil }
             let date = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
-            return Saved(id: id, date: date, jpeg: data)
+            return Saved(id: id, date: date, jpeg: data, info: try? Data(contentsOf: infoFile(id)))
         }
         .sorted { $0.date < $1.date }
     }

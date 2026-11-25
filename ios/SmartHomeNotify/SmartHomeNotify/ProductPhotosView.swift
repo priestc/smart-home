@@ -16,7 +16,7 @@ struct ProductPhoto: Codable, Identifiable {
     let error: String?
     let product_id: Int?
     let product_name: String?
-    let match_source: String?   // model or manual
+    let match_source: String?   // model, manual, or receipt (taken when asked for after a receipt scan)
     let model_seen: String?
     let model_notes: String?
 }
@@ -35,12 +35,20 @@ private struct ProductListResponse: Codable { let products: [ProductSummary] }
 private struct PhotoUploadResponse: Codable { let id: Int }
 private struct PhotoErrorResponse: Codable { let error: String }
 
+/// The receipt item a photo was taken for, when the app asked for it after a scan.
+struct PhotoTakenFor: Codable {
+    let productId: Int
+    let receiptId: Int
+    let label: String       // as printed on the receipt
+}
+
 /// A photo still being sent from this device. It's also saved on the phone
 /// (see UnsentPhotos) until the server has it, so it can be retried after a restart.
 struct PendingPhotoUpload: Identifiable {
     let id: UUID
     let thumbnail: UIImage
     let jpeg: Data
+    var takenFor: PhotoTakenFor?
     var progress = UploadProgress()
     /// Set when sending failed; the row then offers Retry.
     var error: String?
@@ -65,6 +73,7 @@ final class ProductPhotosStore: ObservableObject {
             PendingPhotoUpload(id: saved.id,
                                thumbnail: UIImage(data: saved.jpeg)?.resizedForUpload(maxDimension: 200) ?? UIImage(),
                                jpeg: saved.jpeg,
+                               takenFor: saved.info.flatMap { try? JSONDecoder().decode(PhotoTakenFor.self, from: $0) },
                                error: "Not sent yet. Tap Retry to send it.")
         }
     }
@@ -152,15 +161,18 @@ final class ProductPhotosStore: ObservableObject {
         }
     }
 
-    func upload(_ image: UIImage) async {
+    /// `takenFor`: the receipt item the app asked for; the server then assigns the
+    /// photo to it directly instead of having the model match it.
+    func upload(_ image: UIImage, takenFor: PhotoTakenFor? = nil) async {
         guard let jpeg = image.resizedForUpload(maxDimension: 2400).jpegData(compressionQuality: 0.8) else {
             loadError = PhotosError.badImage.localizedDescription
             return
         }
-        let item = PendingPhotoUpload(id: UUID(), thumbnail: image.resizedForUpload(maxDimension: 200), jpeg: jpeg)
+        let item = PendingPhotoUpload(id: UUID(), thumbnail: image.resizedForUpload(maxDimension: 200), jpeg: jpeg,
+                                      takenFor: takenFor)
         pending.insert(item, at: 0)
         do {
-            try unsent.save(item.id, jpeg)
+            try unsent.save(item.id, jpeg, info: try takenFor.map { try JSONEncoder().encode($0) })
             saveError = nil
         } catch {
             saveError = "Couldn't save a copy of the photo on the phone, so if it fails to send it can only be retried until the app closes: \(error.localizedDescription)"
@@ -182,12 +194,14 @@ final class ProductPhotosStore: ObservableObject {
     private func send(_ id: UUID) async {
         guard let i = pending.firstIndex(where: { $0.id == id }) else { return }
         let jpeg = pending[i].jpeg
+        var path = "/api/product-photos"
+        if let t = pending[i].takenFor { path += "?product_id=\(t.productId)&receipt_id=\(t.receiptId)" }
         pending[i].error = nil
         pending[i].progress = UploadProgress()
         do {
             let base = try await PhotoUploader.firstReachable(candidates)
             reachableBase = base
-            _ = try await PhotoUploader.send(jpeg, to: base, path: "/api/product-photos") { [weak self] p in
+            _ = try await PhotoUploader.send(jpeg, to: base, path: path) { [weak self] p in
                 guard let self, let j = self.pending.firstIndex(where: { $0.id == id }),
                       self.pending[j].error == nil else { return }
                 self.pending[j].progress = p
@@ -231,7 +245,8 @@ final class ProductPhotosStore: ObservableObject {
 // MARK: - Tab root
 
 struct ProductPhotosView: View {
-    @StateObject private var store = ProductPhotosStore()
+    /// Shared with the Receipts tab, which uploads the item photos it asks for after a scan.
+    @EnvironmentObject private var store: ProductPhotosStore
     @State private var showCamera = false
     @State private var libraryItem: PhotosPickerItem?
     @State private var showLibrary = false
@@ -361,6 +376,9 @@ private struct PendingRow: View {
                 .frame(width: 52, height: 52)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 4) {
+                if let t = upload.takenFor {
+                    Text(t.label).font(.subheadline.weight(.semibold))
+                }
                 if let err = upload.error {
                     Label("Not sent", systemImage: "exclamationmark.triangle.fill").foregroundColor(.red)
                     Text(err).font(.caption).foregroundColor(.red)
@@ -424,7 +442,8 @@ private struct PhotoRow: View {
                     Text("Matched once the receipt it came with is scanned").font(.caption).foregroundColor(.secondary)
                 case "matched":
                     Text(photo.product_name ?? "Product #\(photo.product_id ?? 0)").font(.body)
-                    Text(photo.match_source == "manual" ? "Picked by hand" : "Matched by the model")
+                    Text(["manual": "Picked by hand", "receipt": "Taken for this receipt item"][photo.match_source ?? ""]
+                         ?? "Matched by the model")
                         .font(.caption).foregroundColor(.secondary)
                 case "unmatched":
                     Label("No match", systemImage: "questionmark.circle").foregroundColor(.orange)

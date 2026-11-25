@@ -12030,6 +12030,18 @@ def api_receipt_detail(rid):
             "FROM receipt_items i LEFT JOIN products p ON p.id = i.product_id "
             "WHERE i.receipt_id=? ORDER BY i.position", (rid,)
         ).fetchall()]
+        # Products on this receipt still without a picture, in receipt order: the
+        # app asks for a photo of each one (labelled as printed) right after a scan.
+        # Savings/coupon lines (not a positive price) aren't products to photograph.
+        needs, seen = [], set()
+        if r['status'] == 'done' and r['kind'] == 'receipt':
+            for i in r['items']:
+                if (i['product_id'] is not None and i['photo_id'] is None and i['product_id'] not in seen
+                        and (i['total_price'] or 0) > 0):
+                    seen.add(i['product_id'])
+                    needs.append({'product_id': i['product_id'], 'raw_text': i['raw_text'] or i['description'],
+                                  'description': i['description']})
+        r['needs_photos'] = needs
         return jsonify(r)
 
 
@@ -13491,9 +13503,23 @@ def api_product_photo_upload():
     if len(image) > 20 * 1024 * 1024:
         return jsonify({'error': 'Image is larger than 20 MB'}), 413
     media_type = (request.content_type or '').split(';')[0].strip().lower()
+    # ?product_id=&receipt_id= : the photo was taken when the app asked for that
+    # item after scanning its receipt, so it's that product; no model needed
+    try:
+        product_id = int(request.args['product_id']) if request.args.get('product_id') else None
+        receipt_id = int(request.args['receipt_id']) if request.args.get('receipt_id') else None
+    except ValueError:
+        return jsonify({'error': 'product_id and receipt_id must be numbers'}), 400
+    if product_id is not None:
+        with _conn() as conn:
+            if conn.execute("SELECT 1 FROM products WHERE id=?", (product_id,)).fetchone() is None:
+                return jsonify({'error': f'Product {product_id} not found'}), 404
     try:
         photo_id = _photos.save_upload(_db_path, image, media_type)
-        _photos.start(_db_path, photo_id)
+        if product_id is not None:
+            _photos.assign_taken_for(_db_path, photo_id, product_id, receipt_id)
+        else:
+            _photos.start(_db_path, photo_id)
     except _photos.PhotoError as e:
         return jsonify({'error': str(e)}), 400
     return jsonify({'ok': True, 'id': photo_id}), 202
@@ -14578,7 +14604,7 @@ function stateLine(ph) {
   switch (ph.status) {
     case 'processing': return '<div class="state warn">Matching… usually 20–40 seconds</div>';
     case 'waiting': return '<div class="state warn">Waiting for its receipt to be scanned</div>';
-    case 'matched': return `<div class="state ok">${ph.match_source === 'manual' ? 'Picked by hand' : 'Matched by the model'}</div>`;
+    case 'matched': return `<div class="state ok">${{manual: 'Picked by hand', receipt: 'Taken for this item after scanning its receipt'}[ph.match_source] || 'Matched by the model'}</div>`;
     case 'unmatched': return '<div class="state warn">No product</div>';
     default: return `<div class="state err">Failed: ${esc(ph.error || 'matching failed')}</div>`;
   }

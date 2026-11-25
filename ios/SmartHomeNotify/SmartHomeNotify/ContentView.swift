@@ -6,6 +6,9 @@ import Darwin
 private let appGroupDefaults = UserDefaults(suiteName: "group.io.github.priestc.SmartHomeNotify")!
 
 struct ContentView: View {
+    /// One uploader for product photos, used by both the Receipts and Products tabs
+    @StateObject private var productPhotos = ProductPhotosStore()
+
     var body: some View {
         TabView {
             GarageDoorsView()
@@ -29,6 +32,7 @@ struct ContentView: View {
                     Label("Settings", systemImage: "gear")
                 }
         }
+        .environmentObject(productPhotos)
     }
 }
 

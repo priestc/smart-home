@@ -280,6 +280,28 @@ def start(db_path: str, photo_id: int) -> None:
         conn.close()
 
 
+def assign_taken_for(db_path: str, photo_id: int, product_id: int, receipt_id: int | None) -> None:
+    """The app asked for a photo of this product after scanning its receipt, so
+    it's that product (match_source 'receipt'). A product that got a picture in
+    the meantime keeps it; this photo is then left without a product."""
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        with _pair_lock:
+            claimed = conn.execute(
+                "UPDATE product_photos SET status='matched', product_id=?, match_source='receipt', receipt_id=?, "
+                "processed_at=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM product_photos o WHERE o.product_id=?)",
+                (product_id, receipt_id, _now(), photo_id, product_id)).rowcount
+            if not claimed:
+                name = (conn.execute("SELECT name FROM products WHERE id=?", (product_id,)).fetchone() or ["?"])[0]
+                conn.execute(
+                    "UPDATE product_photos SET status='unmatched', receipt_id=?, model_notes=?, processed_at=? WHERE id=?",
+                    (receipt_id, f"Taken for {name}, which already has a picture. Pick it by hand to replace that one.",
+                     _now(), photo_id))
+            conn.commit()
+    finally:
+        conn.close()
+
+
 def on_receipt_scanned(db_path: str, receipt_id: int) -> None:
     """A receipt finished scanning: pair every waiting photo with it and match
     them. A re-read of an older receipt (uploaded over RECEIPT_WINDOW ago)
