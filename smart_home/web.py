@@ -12874,6 +12874,10 @@ async function loadAmazon() {
   if (d.errors.length) html += `<div class="err" style="margin-top:.4rem">Couldn\\u2019t read ${d.errors.length} (tried again at each check):</div><ul>`
     + d.errors.map(x => `<li><a href="/email-archive/${encodeURIComponent(x.message_id)}">${esc(x.received_at.slice(0, 10))}</a>: <span class="err">${esc(x.reason || '')}</span></li>`).join('') + '</ul>';
   if (d.scanning) html = 'Checking for new Amazon order emails\\u2026 ' + html;
+  if ((d.to_correct || []).length) html += `<div class="err" style="margin-top:.6rem">${d.to_correct.length} receipt${d.to_correct.length === 1 ? ' has' : 's have'} cancelled items Amazon\\u2019s email didn\\u2019t give prices for. `
+    + `Open each order on amazon.com with the Smart Home extension installed to correct it:</div><ul>`
+    + d.to_correct.map(x => `<li><a href="/receipts/${x.receipt_id}">${esc(x.purchase_date || '')} ${money(x.total)}</a>`
+      + x.orders.map(o => ` \\u00b7 <a href="https://www.amazon.com/your-orders/order-details?orderID=${encodeURIComponent(o)}" target="_blank">order ${esc(o)} on Amazon</a>`).join('') + '</li>').join('') + '</ul>';
   const ext = d.extension || [];
   if (ext.length) {
     const word = {filled: 'filled in', created: 'added', already: 'already had its items', error: 'couldn\\u2019t be read'};

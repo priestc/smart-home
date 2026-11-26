@@ -38,6 +38,10 @@ from smart_home import db, delegated, email_archive, gmail, receipts
 
 SENDER_LIKE = "%auto-confirm@amazon.com%"
 SUBJECT_LIKE = "Ordered%"
+# "Successful cancellation of 1 item from your Amazon.com order: #(...)",
+# "1 of 5 items could not be cancelled: Automotive" (see read_cancellation)
+CANCEL_SENDER_LIKE = "%order-update@amazon.com%"
+CANCEL_SUBJECT_LIKE = "%cancel%"
 # Orders before this aren't imported (receipt tracking began in 2025)
 START_DATE = "2025-01-01"
 MERCHANT = "Amazon"
@@ -304,6 +308,148 @@ def read_email(conn: sqlite3.Connection, db_path: str, message_id: str) -> None:
         raise
     finally:
         conn.commit()
+    # Reading it again brought back items cancelled since: take them off again
+    # (each cancellation records its own outcome)
+    oids = [oid for o in orders for oid in o["orders"]]
+    for (cid,) in conn.execute(
+            f"SELECT message_id FROM amazon_emails WHERE kind='cancellation' AND status IN ('imported', 'needs_attention') "
+            f"AND order_id IN ({','.join('?' * len(oids))}) ORDER BY received_at", oids).fetchall():
+        try:
+            read_cancellation(conn, db_path, cid)
+        except Exception:
+            pass  # recorded on the cancellation's row, shown on /receipts
+
+
+# ---- Cancellation emails ----------------------------------------------------------
+#
+# order-update@amazon.com says when items are cancelled, but not what they cost:
+#  - Older emails list the cancelled items' full names ("Canceled Items",
+#    then the order, "Placed on ...", each name and "Sold by ..."). Those
+#    lines are taken off the order's receipt, matched by name (the receipt
+#    has the name as the order email printed it, cut short), and the tax is
+#    reduced in proportion. A receipt left with nothing is deleted.
+#  - Newer ones only summarize them under "Cancelled" ("4 items: 2
+#    Computers, 1 Cables, and 1 other"). The amount can't be known, so the
+#    receipt is flagged (cancellation_pending in its raw_json) and listed on
+#    /receipts: opening the order's page with the Chrome extension replaces
+#    it with what was really charged.
+# A receipt filled in from the order page or the export already leaves
+# cancelled items out, so it's left alone.
+
+def parse_cancellation(msg) -> dict:
+    """{order_id, names: [...], summaries: [...]} for the cancelled items."""
+    lines = _html_lines(msg)
+    if not lines:
+        raise AmazonError("The email has no HTML part to read")
+    order_id, names, summaries = None, [], []
+    section = None  # 'items' after "Canceled Items", 'cancelled' after a "Cancelled" heading
+    for i, ln in enumerate(lines):
+        m = _ORDER_RE.search(ln)
+        if m and (ln.startswith("Order #") or "order" in ln.lower()):
+            order_id = order_id or m.group(1)
+            continue
+        if re.fullmatch(r"Cancel+ed Items", ln, re.I):
+            section = "items"
+        elif re.fullmatch(r"Cancel+ed", ln, re.I):
+            section = "cancelled"
+        elif section == "items":
+            if ln.startswith(("Placed on", "Sold by")) or not ln.strip():
+                continue
+            if ln.startswith(("Cancel Reason", "If you need", "We hope")):
+                section = None
+                continue
+            names.append(ln)
+        elif section == "cancelled" and _SUMMARY_RE.match(ln):
+            summaries.append(ln)
+    if not order_id:
+        raise AmazonError("No order number in the cancellation email")
+    if not names and not summaries:
+        raise AmazonError("Couldn't find which items were cancelled")
+    return {"order_id": order_id, "names": names, "summaries": summaries}
+
+
+def _same_item(printed: str, full: str) -> bool:
+    """Whether a receipt line (the name as the order email printed it, cut
+    short) is this full product name."""
+    def key(t: str) -> str:
+        # Letters and digits only: one email prints "Pool&Spa\u2122", another "Pool&SpaTM"
+        t = t.lower().replace("\u2122", "tm").replace("\u2120", "sm")
+        return re.sub(r"[^0-9a-z]", "", t)
+
+    a, b = key(printed), key(full)
+    return len(a) >= 10 and (b.startswith(a) or a.startswith(b))
+
+
+def read_cancellation(conn: sqlite3.Connection, db_path: str, message_id: str) -> None:
+    """Apply one cancellation email to its order's receipt and record the
+    outcome on its amazon_emails row. Raises on failure (also recorded)."""
+    em = conn.execute("SELECT * FROM amazon_emails WHERE message_id=?", (message_id,)).fetchone()
+    day = em["received_at"][:10]
+    status, reason = "imported", None
+    try:
+        found = email_archive.get_message(db_path, message_id)
+        if not found:
+            raise AmazonError("The email is no longer in the archive")
+        c = parse_cancellation(email_archive.parse(found[1]))
+        oid = c["order_id"]
+        conn.execute("UPDATE amazon_emails SET order_id=? WHERE message_id=?", (oid, message_id))
+        rid = raw = None
+        for r in conn.execute("SELECT id, raw_json FROM receipts WHERE source='amazon'"):
+            j = json.loads(r["raw_json"] or "{}")
+            if oid in (j.get("orders") or []):
+                rid, raw = r["id"], j
+                break
+        if rid is None:
+            status, reason = "skipped", f"No receipt for order {oid}"
+        elif raw.get("detailed"):
+            status, reason = "skipped", ("The receipt has the items from the order's page or export, "
+                                         "which already leave out cancelled items")
+        else:
+            rec = conn.execute("SELECT subtotal, tax, total, notes FROM receipts WHERE id=?", (rid,)).fetchone()
+            items = conn.execute("SELECT id, description, total_price FROM receipt_items WHERE receipt_id=? "
+                                 "ORDER BY position", (rid,)).fetchall()
+            removed, unmatched = [], []
+            for name in c["names"]:
+                hit = next((it for it in items if it["id"] not in {x["id"] for x in removed}
+                            and _same_item(it["description"], name)), None)
+                (removed.append(hit) if hit else unmatched.append(name))
+            if c["summaries"] or unmatched:
+                what = "; ".join(c["summaries"] + unmatched)
+                status = "needs_attention"
+                reason = (f"Amazon says items were cancelled ({what}) without saying what they cost. "
+                          "Open the order's page on amazon.com with the Smart Home extension to correct the total.")
+                if not raw.get("cancellation_pending"):
+                    raw["cancellation_pending"] = True
+                    conn.execute("UPDATE receipts SET raw_json=?, notes=COALESCE(notes, '') || ? WHERE id=?",
+                                 (json.dumps(raw), f" Cancellation email of {day}: {reason}", rid))
+            if removed:
+                for it in removed:
+                    conn.execute("DELETE FROM receipt_items WHERE id=?", (it["id"],))
+                old_sub = round(sum(it["total_price"] for it in items), 2)
+                new_sub = round(old_sub - sum(it["total_price"] for it in removed), 2)
+                if not conn.execute("SELECT 1 FROM receipt_items WHERE receipt_id=?", (rid,)).fetchone():
+                    conn.execute("DELETE FROM receipts WHERE id=?", (rid,))
+                    reason = f"Every item on order {oid} was cancelled; its receipt was deleted"
+                else:
+                    tax = rec["tax"]
+                    if tax is not None and old_sub > 0:
+                        tax = round(tax * new_sub / old_sub, 2)
+                    note = (f" Cancelled per Amazon's email of {day}: "
+                            + ", ".join(it["description"] for it in removed)
+                            + (" (tax reduced in proportion)." if tax is not None else "."))
+                    conn.execute("UPDATE receipts SET subtotal=?, tax=?, total=?, notes=COALESCE(notes, '') || ? "
+                                 "WHERE id=?", (new_sub, tax, round(new_sub + (tax or 0), 2), note, rid))
+                db.prune_products(conn)
+        conn.execute("UPDATE amazon_emails SET status=?, reason=?, processed_at=? WHERE message_id=?",
+                     (status, reason, _now(), message_id))
+    except Exception as e:
+        msg = str(e) if isinstance(e, AmazonError) else f"{type(e).__name__}: {e}"
+        conn.rollback()
+        conn.execute("UPDATE amazon_emails SET status='error', reason=?, processed_at=? WHERE message_id=?",
+                     (msg, _now(), message_id))
+        raise
+    finally:
+        conn.commit()
 
 
 _lock = threading.Lock()
@@ -320,10 +466,15 @@ def scan(db_path: str) -> dict:
         try:
             index = email_archive.open_index(db_path)
             try:
-                rows = index.execute(
+                # Orders first, so a cancellation finds its order's receipt
+                rows = [dict(r, kind="order") for r in index.execute(
                     "SELECT message_id, received_at, subject FROM messages WHERE sender LIKE ? AND subject LIKE ? "
                     "AND received_at >= ? AND deleted_at IS NULL ORDER BY received_at",
-                    (SENDER_LIKE, SUBJECT_LIKE, START_DATE)).fetchall()
+                    (SENDER_LIKE, SUBJECT_LIKE, START_DATE))]
+                rows += [dict(r, kind="cancellation") for r in index.execute(
+                    "SELECT message_id, received_at, subject FROM messages WHERE sender LIKE ? AND subject LIKE ? "
+                    "AND received_at >= ? AND deleted_at IS NULL ORDER BY received_at",
+                    (CANCEL_SENDER_LIKE, CANCEL_SUBJECT_LIKE, START_DATE))]
             finally:
                 index.close()
             stale = (datetime.datetime.now() - STALE_AFTER).strftime("%Y-%m-%d %H:%M:%S")
@@ -339,13 +490,17 @@ def scan(db_path: str) -> dict:
                 else:
                     # The other process (web server or monitor) may be scanning too
                     claimed = conn.execute(
-                        "INSERT OR IGNORE INTO amazon_emails (message_id, received_at, subject, status, processed_at) "
-                        "VALUES (?, ?, ?, 'processing', ?)", (mid, r["received_at"], r["subject"], _now())).rowcount
+                        "INSERT OR IGNORE INTO amazon_emails (message_id, received_at, subject, status, processed_at, kind) "
+                        "VALUES (?, ?, ?, 'processing', ?, ?)",
+                        (mid, r["received_at"], r["subject"], _now(), r["kind"])).rowcount
                 conn.commit()
                 if not claimed:
                     continue
                 try:
-                    read_email(conn, db_path, mid)
+                    if r["kind"] == "cancellation":
+                        read_cancellation(conn, db_path, mid)
+                    else:
+                        read_email(conn, db_path, mid)
                     n_new += 1
                 except Exception:
                     n_errors += 1  # recorded on the email's row
@@ -367,10 +522,19 @@ def status(conn: sqlite3.Connection) -> dict:
         "SELECT message_id, received_at, subject, reason FROM amazon_emails WHERE status='error' "
         "ORDER BY received_at DESC")]
     n = conn.execute("SELECT COUNT(*) FROM amazon_emails WHERE status='imported'").fetchone()[0]
+    # Receipts a cancellation email couldn't be applied to (no amounts given)
+    to_correct = []
+    for r in conn.execute("SELECT id, purchase_date, total, raw_json FROM receipts WHERE source='amazon' "
+                          "AND raw_json LIKE '%cancellation_pending%'"):
+        j = json.loads(r["raw_json"])
+        if j.get("cancellation_pending") and not j.get("detailed"):
+            to_correct.append({"receipt_id": r["id"], "purchase_date": r["purchase_date"], "total": r["total"],
+                               "orders": j.get("orders") or []})
     exp = conn.execute("SELECT value FROM settings WHERE key='amazon_export'").fetchone()
     return {"last_scan": json.loads(row[0]) if row else None, "errors": errors, "n_imported": n,
             "scanning": _lock.locked(), "last_export": json.loads(exp[0]) if exp else None,
-            "importing_export": _export_lock.locked(), "extension": extension_log(conn)[:15]}
+            "importing_export": _export_lock.locked(), "extension": extension_log(conn)[:15],
+            "to_correct": to_correct}
 
 
 _rereading: set[str] = set()

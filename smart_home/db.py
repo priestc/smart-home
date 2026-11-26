@@ -377,7 +377,9 @@ def open_db(path: str) -> sqlite3.Connection:
     """)
     # Amazon order emails amazon.py has looked at (from the email archive).
     # status is 'processing', 'imported' (its receipts have source='amazon'
-    # and email_id=message_id) or 'error' (reason says why; retried each scan).
+    # and email_id=message_id; for a cancellation, applied to the order's
+    # receipt), 'skipped' or 'needs_attention' (a cancellation, reason says
+    # why) or 'error' (reason says why; retried each scan).
     conn.execute("""
         CREATE TABLE IF NOT EXISTS amazon_emails (
             message_id   TEXT PRIMARY KEY,
@@ -388,6 +390,14 @@ def open_db(path: str) -> sqlite3.Connection:
             processed_at TEXT
         )
     """)
+    # kind is 'order' (NULL on older rows) or 'cancellation'; order_id is the
+    # order a cancellation is for
+    for col in ("kind TEXT", "order_id TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE amazon_emails ADD COLUMN {col}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
     # Money coming in (see income.py). received_on is the day it was paid;
     # email_id is the Gmail message it was read from, NULL if entered by hand.
     conn.execute("""
