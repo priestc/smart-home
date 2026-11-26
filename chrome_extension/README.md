@@ -43,13 +43,24 @@ After pulling changes, click the reload arrow on its card in
    site access off; it can also be turned on in `about:addons` → the
    extension → Permissions).
 
-A temporary add-on is removed when Firefox quits. To keep it installed,
-either use Firefox Developer Edition or Nightly with
-`xpinstall.signatures.required` set to false in `about:config` and install
-a zip of this folder from `about:addons` → gear → **Install Add-on From
-File**, or have Mozilla sign it for free as an unlisted add-on with
-`npx web-ext sign --channel=unlisted` (needs AMO API keys) and install the
-.xpi it gives you.
+A temporary add-on is removed when Firefox quits. To keep it installed, have
+Mozilla sign it as an unlisted (private, not on the add-on store) add-on:
+
+1. Sign in at https://addons.mozilla.org, then generate API credentials at
+   https://addons.mozilla.org/developers/addon/api/key/.
+2. Put them in `~/.config/web-ext/amo.env` (not in the repo):
+   ```
+   export WEB_EXT_API_KEY='user:...'
+   export WEB_EXT_API_SECRET='...'
+   ```
+3. Run `tools/sign-firefox-extension.sh`. It prints the signed `.xpi`.
+4. In Firefox, remove the temporary add-on in `about:debugging`, then open
+   the `.xpi` (drag it onto a Firefox window, or `about:addons` → gear →
+   **Install Add-on From File**). It stays installed, and the popup's **Allow
+   access** button may be needed once more.
+
+Mozilla accepts each version only once, so bump `version` in `manifest.json`
+before signing a changed extension; install the new `.xpi` over the old one.
 
 The manifest sets its own `content_security_policy`: Firefox's default for
 MV3 extensions includes `upgrade-insecure-requests`, which would turn every

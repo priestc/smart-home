@@ -40,7 +40,14 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "amazon-orders@smart-home.local",
-      "strict_min_version": "121.0"
+      "strict_min_version": "142.0",
+      "data_collection_permissions": {
+        "required": [
+          "websiteContent",
+          "financialAndPaymentInfo",
+          "personallyIdentifyingInfo"
+        ]
+      }
     }
   },
   "content_security_policy": {
