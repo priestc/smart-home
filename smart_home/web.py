@@ -12108,6 +12108,22 @@ def api_receipts_amazon_scan():
     return jsonify({'ok': True, 'started': True}), 202
 
 
+@app.post("/api/receipts/amazon/export")
+def api_receipts_amazon_export():
+    """Body is Amazon's "Your Orders" data export (the .zip, or a .csv from
+    it); ?filename= its name. Fills in the items of the Amazon receipts in the
+    background; the result shows in GET /api/receipts/amazon."""
+    from smart_home import amazon as _amazon
+    data = request.get_data()
+    if not data:
+        return jsonify({'error': 'No file in the request'}), 400
+    if len(data) > _amazon.EXPORT_MAX_BYTES:
+        return jsonify({'error': f'The file is larger than {_amazon.EXPORT_MAX_BYTES // (1024 * 1024)} MB'}), 413
+    if not _amazon.import_export_in_background(_db_path, data, request.args.get('filename', '')):
+        return jsonify({'error': 'An Amazon export is already being imported'}), 409
+    return jsonify({'ok': True, 'started': True}), 202
+
+
 @app.get("/api/receipts/<int:rid>")
 def api_receipt_detail(rid):
     with _conn() as conn:
@@ -12669,6 +12685,11 @@ _RECEIPTS_PAGE = """\\
         <h2>Amazon orders</h2>
         <div id="amazon-status" class="muted">Loading&hellip;</div>
         <div class="actions" style="margin-top:.6rem"><button class="btn secondary" id="amazon-scan">Check emails now</button></div>
+        <p class="muted" style="margin:.9rem 0 .4rem">The newer emails don&rsquo;t list the items. For every item, request
+          Amazon&rsquo;s data export (Account &rarr; Request Your Data &rarr; Your Orders) and upload the zip it sends.</p>
+        <div class="actions"><button class="btn secondary" id="amazon-export-btn">Upload Amazon export</button>
+          <input type="file" id="amazon-export" accept=".zip,.csv,application/zip,text/csv" hidden></div>
+        <div id="amazon-export-status" class="muted" style="margin-top:.5rem"></div>
       </div>
     </div>
   </div>
@@ -12816,9 +12837,48 @@ async function loadAmazon() {
   if (d.scanning) html = 'Checking for new Amazon order emails\\u2026 ' + html;
   el.innerHTML = html;
   document.getElementById('amazon-scan').disabled = d.scanning;
+  renderAmazonExport(d);
   clearTimeout(amazonTimer);
-  if (d.scanning) amazonTimer = setTimeout(() => { loadAmazon(); load(); }, 4000);
+  if (d.scanning || d.importing_export) amazonTimer = setTimeout(() => { loadAmazon(); load(); }, 4000);
 }
+function renderAmazonExport(d) {
+  const el = document.getElementById('amazon-export-status');
+  document.getElementById('amazon-export-btn').disabled = d.importing_export;
+  if (d.importing_export) { el.className = 'muted'; el.textContent = 'Importing the export\\u2026 (the model picks each item\\u2019s category, so this can take a few minutes)'; return; }
+  const x = d.last_export;
+  if (!x) { el.textContent = ''; return; }
+  if (!x.ok) { el.className = 'err'; el.textContent = `The export from ${x.ts} couldn\\u2019t be imported: ${x.error}`; return; }
+  el.className = 'muted';
+  const parts = [`${x.n_updated} receipt${x.n_updated === 1 ? '' : 's'} filled in`, `${x.n_created} added`];
+  if (x.n_already) parts.push(`${x.n_already} already filled in from an earlier export (left as they are)`);
+  if (x.n_old) parts.push(`${x.n_old} orders before 2025 skipped`);
+  if (x.n_cancelled) parts.push(`${x.n_cancelled} cancelled items skipped`);
+  let html = `Last export (${esc(x.filename || 'upload')}, ${esc(x.ts)}): ${parts.join(', ')}.`;
+  if (x.errors.length) html += `<div class="err" style="margin-top:.3rem">${x.errors.length} couldn\\u2019t be filled in:</div><ul>`
+    + x.errors.map(e => `<li>${e.receipt_id ? `<a href="/receipts/${e.receipt_id}">` : ''}${esc(e.orders.join(', '))}${e.receipt_id ? '</a>' : ''}: <span class="err">${esc(e.error)}</span></li>`).join('') + '</ul>';
+  el.innerHTML = html;
+}
+document.getElementById('amazon-export-btn').addEventListener('click', () => document.getElementById('amazon-export').click());
+document.getElementById('amazon-export').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  const el = document.getElementById('amazon-export-status');
+  el.className = 'muted'; el.textContent = `Uploading ${f.name}\\u2026`;
+  try {
+    const resp = await fetch(`/api/receipts/amazon/export?filename=${encodeURIComponent(f.name)}`,
+                             {method: 'POST', headers: {'Content-Type': 'application/octet-stream'}, body: f});
+    if (!resp.ok) {
+      let msg = resp.status === 413 ? 'the file is too big to upload. Unzip it and upload just the order history spreadsheet (the .csv with \\u201cOrderHistory\\u201d in its name).' : `HTTP ${resp.status}`;
+      try { msg = (await resp.json()).error || msg; } catch (_) {}
+      throw new Error(msg);
+    }
+  } catch (err) {
+    el.className = 'err'; el.textContent = `Could not upload ${f.name}: ${err.message}`;
+    return;
+  }
+  loadAmazon();
+});
 document.getElementById('amazon-scan').addEventListener('click', async () => {
   const btn = document.getElementById('amazon-scan');
   btn.disabled = true;

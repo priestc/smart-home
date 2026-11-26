@@ -201,6 +201,16 @@ def _order_kind(order: dict) -> str | None:
     return kinds.pop() if len(kinds) == 1 and None not in kinds else None
 
 
+def _exported_orders(conn: sqlite3.Connection) -> dict[str, int]:
+    """{order id: receipt id} for receipts filled in from Amazon's export."""
+    out = {}
+    for rid, raw in conn.execute("SELECT id, raw_json FROM receipts WHERE source='amazon' "
+                                 "AND raw_json LIKE '%\"from_export\": true%'"):
+        for oid in json.loads(raw).get("orders") or []:
+            out[oid] = rid
+    return out
+
+
 def _lines(order: dict) -> list[dict]:
     if order["items"]:
         return order["items"]
@@ -218,6 +228,15 @@ def read_email(conn: sqlite3.Connection, db_path: str, message_id: str) -> None:
         if not found:
             raise AmazonError("The email is no longer in the archive")
         orders = parse(email_archive.parse(found[1]))
+        # Orders already filled in from Amazon's export (amazon_export below)
+        # keep those items; the receipt is just linked to this email
+        exported = _exported_orders(conn)
+        for o in orders:
+            for oid in o["orders"]:
+                if oid in exported:
+                    conn.execute("UPDATE receipts SET email_id=? WHERE id=? AND email_id IS NULL",
+                                 (message_id, exported[oid]))
+        orders = [o for o in orders if not any(oid in exported for oid in o["orders"])]
         # Product names, and the kind of product in a summary that names only
         # one, go to the model; a summary of several kinds is "Other"
         kinds = [None if o["items"] else _order_kind(o) for o in orders]
@@ -230,7 +249,7 @@ def read_email(conn: sqlite3.Connection, db_path: str, message_id: str) -> None:
         answers = iter(_categories(asks))
         # Reading it again keeps the receipts' ids (pages link to them)
         old = [r[0] for r in conn.execute("SELECT id FROM receipts WHERE source='amazon' AND email_id=? ORDER BY id",
-                                          (message_id,))]
+                                          (message_id,)) if r[0] not in exported.values()]
         for rid in old[len(orders):]:
             conn.execute("DELETE FROM receipt_items WHERE receipt_id=?", (rid,))
             conn.execute("DELETE FROM receipts WHERE id=?", (rid,))
@@ -347,8 +366,10 @@ def status(conn: sqlite3.Connection) -> dict:
         "SELECT message_id, received_at, subject, reason FROM amazon_emails WHERE status='error' "
         "ORDER BY received_at DESC")]
     n = conn.execute("SELECT COUNT(*) FROM amazon_emails WHERE status='imported'").fetchone()[0]
+    exp = conn.execute("SELECT value FROM settings WHERE key='amazon_export'").fetchone()
     return {"last_scan": json.loads(row[0]) if row else None, "errors": errors, "n_imported": n,
-            "scanning": _lock.locked()}
+            "scanning": _lock.locked(), "last_export": json.loads(exp[0]) if exp else None,
+            "importing_export": _export_lock.locked()}
 
 
 _rereading: set[str] = set()
@@ -384,6 +405,274 @@ def scan_in_background(db_path: str) -> bool:
         r = scan(db_path)  # the result, errors included, is shown on /receipts
         if not r["ok"]:
             print(f"Amazon email scan failed: {r['error']}", flush=True)
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return True
+
+
+# ---- Amazon's data export ------------------------------------------------------
+#
+# Amazon > Account > "Request Your Data" > "Your Orders" emails, after a few
+# days, a zip with a spreadsheet of every item ever ordered (order ID, date,
+# full product name, ASIN, quantity, prices, tax). Uploading it on /receipts
+# puts the real items on the receipts made from the emails, matched by order
+# number: the "4 items: ..." summary lines become the products, and the tax
+# is the tax Amazon charged. Orders with no receipt yet (no email in the
+# archive) get one. A receipt already filled in from an export is left alone,
+# so uploading a newer export keeps your edits. Orders before START_DATE and
+# cancelled items are skipped.
+#
+# Amazon has changed the file's layout over the years, so columns are found
+# by name (case and punctuation ignored) and the spreadsheet by having them.
+
+_COLUMNS = {
+    "order_id": ("orderid",),
+    "date": ("orderdate",),
+    "name": ("productname", "title"),
+    "asin": ("asin", "asinisbn"),
+    "quantity": ("quantity", "originalquantity"),
+    "owed": ("totalowed", "itemtotal"),
+    "unit_price": ("unitprice", "purchaseppu", "listedppu"),
+    "tax": ("shipmentitemsubtotaltax", "itemsubtotaltax"),
+    "unit_tax": ("unitpricetax",),
+    "status": ("orderstatus",),
+}
+_REQUIRED = ("order_id", "date", "name", "quantity")
+EXPORT_MAX_BYTES = 200 * 1024 * 1024
+
+
+def _norm(h: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", h.lower())
+
+
+def _money(v: str | None) -> float | None:
+    """'$12.99', "'12.99'", '1,234.50' -> number; 'Not Available' or '' -> None."""
+    s = re.sub(r"[^\d.\-]", "", v or "")
+    try:
+        return float(s) if s not in ("", "-", ".") else None
+    except ValueError:
+        return None
+
+
+def _local_date(v: str) -> str | None:
+    """The order date in local time (Amazon gives UTC, e.g. 2026-07-07T18:43:09Z)."""
+    v = (v or "").strip()
+    try:
+        d = datetime.datetime.fromisoformat(v.replace("Z", "+00:00"))
+        return (d.astimezone() if d.tzinfo else d).date().isoformat()
+    except ValueError:
+        pass
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(v, fmt).date().isoformat()
+        except ValueError:
+            pass
+    return None
+
+
+def _export_rows(data: bytes, filename: str) -> list[dict]:
+    """Rows of the order-history spreadsheet in an uploaded zip or CSV, with
+    keys from _COLUMNS. Raises AmazonError saying what was found instead."""
+    import csv
+    import io
+    import zipfile
+
+    files: list[tuple[str, bytes]] = []
+    if data[:4] == b"PK\x03\x04":
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                files = [(n, z.read(n)) for n in z.namelist() if n.lower().endswith(".csv")]
+        except zipfile.BadZipFile as e:
+            raise AmazonError(f"The zip file can't be opened: {e}")
+        if not files:
+            raise AmazonError("The zip has no spreadsheets (.csv files) in it")
+    else:
+        files = [(filename or "upload.csv", data)]
+    seen = []
+    for name, raw in files:
+        text = raw.decode("utf-8-sig", errors="replace")
+        reader = csv.reader(io.StringIO(text))
+        header = next(reader, None)
+        if not header:
+            continue
+        norm = [_norm(h) for h in header]
+        cols = {}
+        for key, names in _COLUMNS.items():
+            for n in names:
+                if n in norm:
+                    cols[key] = norm.index(n)
+                    break
+        # The digital-orders file has the same columns; only physical orders here
+        if any(k not in cols for k in _REQUIRED) or "digital" in name.lower() or (
+                "owed" not in cols and "unit_price" not in cols):
+            seen.append(f"{name} ({', '.join(header[:8])}{'...' if len(header) > 8 else ''})")
+            continue
+        rows = []
+        for rec in reader:
+            if not any(rec):
+                continue
+            rows.append({k: (rec[i] if i < len(rec) else "") for k, i in cols.items()})
+        return rows
+    raise AmazonError("Couldn't find the order history in the upload. Expected a spreadsheet with "
+                      "Order ID, Order Date, Product Name and Quantity columns; found: "
+                      + ("; ".join(seen) if seen else "no spreadsheets"))
+
+
+def _export_orders(rows: list[dict]) -> tuple[dict[str, dict], int]:
+    """{order id: {date, items: [{name, asin, quantity, price, tax}]}} and how
+    many cancelled rows were left out. An item's price plus its tax is what
+    was owed for it (discounts and shipping included)."""
+    orders: dict[str, dict] = {}
+    cancelled = 0
+    for r in rows:
+        oid = (r.get("order_id") or "").strip()
+        if not _ORDER_RE.fullmatch(oid):
+            continue  # e.g. a totals row
+        if "cancel" in (r.get("status") or "").lower():
+            cancelled += 1
+            continue
+        try:
+            qty = max(int(float(r.get("quantity") or 1)), 1)
+        except ValueError:
+            qty = 1
+        tax = _money(r.get("tax"))
+        if tax is None and _money(r.get("unit_tax")) is not None:
+            tax = _money(r.get("unit_tax")) * qty
+        owed = _money(r.get("owed"))
+        if owed is None:
+            each = _money(r.get("unit_price"))
+            if each is None:
+                continue
+            owed = each * qty + (tax or 0)
+        tax = round(tax or 0, 2)
+        date = _local_date(r.get("date") or "")
+        o = orders.setdefault(oid, {"date": date, "items": []})
+        o["items"].append({"name": " ".join((r.get("name") or "").split()) or "Amazon item",
+                           "asin": (r.get("asin") or "").strip() or None, "quantity": qty,
+                           "price": round(owed - tax, 2), "tax": tax})
+    return orders, cancelled
+
+
+def _fill_receipt(conn: sqlite3.Connection, rid: int | None, oids: list[str], orders: dict[str, dict],
+                  cats) -> int:
+    """Put the export's items for these orders on receipt rid (made if None)."""
+    items = [it for oid in oids for it in orders[oid]["items"]]
+    subtotal = round(sum(it["price"] for it in items), 2)
+    tax = round(sum(it["tax"] for it in items), 2)
+    date = min((orders[oid]["date"] for oid in oids if orders[oid]["date"]), default=None)
+    raw = json.dumps({"orders": oids, "from_export": True, "items": items})
+    notes = (f"From Amazon's order history export (order {', '.join(oids)}). An item's price includes its "
+             "share of any discount and shipping; tax is what Amazon charged.")
+    old_keys = []
+    if rid is None:
+        rid = conn.execute(
+            "INSERT INTO receipts (uploaded_at, status, processed_at, image_path, media_type, merchant, "
+            "purchase_date, subtotal, tax, total, notes, raw_json, kind, source) "
+            "VALUES (?, 'done', ?, '', '', ?, ?, ?, ?, ?, ?, ?, 'receipt', 'amazon')",
+            (_now(), _now(), MERCHANT, date, subtotal, tax, round(subtotal + tax, 2), notes, raw)).lastrowid
+    else:
+        old_keys = [r[0] for r in conn.execute(
+            "SELECT name_key FROM receipt_items WHERE receipt_id=? AND name_key IS NOT NULL", (rid,))]
+        conn.execute("UPDATE receipts SET status='done', error=NULL, processed_at=?, subtotal=?, tax=?, total=?, "
+                     "notes=?, raw_json=? WHERE id=?",
+                     (_now(), subtotal, tax, round(subtotal + tax, 2), notes, raw, rid))
+        conn.execute("DELETE FROM receipt_items WHERE receipt_id=?", (rid,))
+    for i, it in enumerate(items):
+        key = f"asin:{it['asin']}" if it["asin"] else receipts.name_key(it["name"], None)
+        pid = db.match_product(conn, key, it["name"])
+        qty = it["quantity"] if it["quantity"] > 1 else None
+        conn.execute(
+            "INSERT INTO receipt_items (receipt_id, position, description, quantity, unit, total_price, category, "
+            "raw_text, item_code, name_key, product_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (rid, i, it["name"], qty, "ea" if qty else None, it["price"], next(cats), it["name"], None, key, pid))
+    # The shortened names from the email no longer describe anything
+    for k in old_keys:
+        conn.execute("DELETE FROM product_keys WHERE name_key=? AND product_id NOT IN "
+                     "(SELECT product_id FROM receipt_items WHERE product_id IS NOT NULL)", (k,))
+    return rid
+
+
+def import_export(db_path: str, data: bytes, filename: str = "") -> dict:
+    """Apply an uploaded export. Returns {ok, ts, n_updated, n_created,
+    n_already, n_old, n_cancelled, errors: [{orders, error}]}, also saved as
+    the setting amazon_export."""
+    with _export_lock:
+        started = _now()
+        conn = sqlite3.connect(db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        result = {"ok": True, "ts": started, "filename": filename, "n_updated": 0, "n_created": 0,
+                  "n_already": 0, "n_old": 0, "n_cancelled": 0, "errors": []}
+        try:
+            orders, result["n_cancelled"] = _export_orders(_export_rows(data, filename))
+            if not orders:
+                raise AmazonError("The order history has no orders in it")
+            # Receipts made from emails (or an earlier export), by order number
+            by_order: dict[str, int] = {}
+            filled: set[int] = set()
+            for r in conn.execute("SELECT id, raw_json FROM receipts WHERE source='amazon'"):
+                try:
+                    j = json.loads(r["raw_json"] or "{}")
+                except json.JSONDecodeError:
+                    continue
+                for oid in j.get("orders") or []:
+                    by_order[oid] = r["id"]
+                if j.get("from_export"):
+                    filled.add(r["id"])
+            # Group the export's orders the way the receipts are (one email
+            # receipt can cover several orders)
+            groups: dict[int | str, list[str]] = {}
+            for oid, o in orders.items():
+                rid = by_order.get(oid)
+                if rid is None and (o["date"] or "") < START_DATE:
+                    result["n_old"] += 1
+                    continue
+                groups.setdefault(rid if rid is not None else oid, []).append(oid)
+            for key, oids in sorted(groups.items(), key=lambda kv: orders[kv[1][0]]["date"] or ""):
+                rid = key if isinstance(key, int) else None
+                if rid in filled:
+                    result["n_already"] += 1
+                    continue
+                if rid is not None:
+                    # An order on this receipt that isn't in the export yet: leave it for a later one
+                    j = json.loads(conn.execute("SELECT raw_json FROM receipts WHERE id=?", (rid,)).fetchone()[0])
+                    missing = [o for o in j.get("orders") or [] if o not in orders]
+                    if missing:
+                        result["errors"].append({"orders": oids, "receipt_id": rid,
+                                                 "error": f"Order {', '.join(missing)} on the same receipt isn't in this export"})
+                        continue
+                try:
+                    cats = iter(_categories([it["name"] for oid in oids for it in orders[oid]["items"]]))
+                    new = _fill_receipt(conn, rid, oids, orders, cats)
+                    db.prune_products(conn)
+                    conn.commit()
+                    result["n_created" if rid is None else "n_updated"] += 1
+                    filled.add(new)
+                except Exception as e:
+                    conn.rollback()
+                    result["errors"].append({"orders": oids, "receipt_id": rid,
+                                             "error": str(e) if isinstance(e, AmazonError) else f"{type(e).__name__}: {e}"})
+        except Exception as e:
+            result.update(ok=False, error=str(e) if isinstance(e, AmazonError) else f"{type(e).__name__}: {e}")
+        result["ended"] = _now()
+        conn.execute("INSERT INTO settings (key, value) VALUES ('amazon_export', ?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(result),))
+        conn.commit()
+        conn.close()
+        return result
+
+
+_export_lock = threading.Lock()
+
+
+def import_export_in_background(db_path: str, data: bytes, filename: str) -> bool:
+    """Start import_export() unless one is running. Returns whether it started."""
+    if _export_lock.locked():
+        return False
+
+    def _bg():
+        r = import_export(db_path, data, filename)  # result shown on /receipts
+        if not r["ok"]:
+            print(f"Amazon export import failed: {r['error']}", flush=True)
 
     threading.Thread(target=_bg, daemon=True).start()
     return True
