@@ -83,7 +83,9 @@ UTILITIES = ["Electricity", "Water", "Propane", "Natural Gas", "Internet", "Phon
 # (products.zone, the zone's name), set by hand on /receipts/sort. The zones
 # are the ones on /zones (wc_zones, shared with water chemistry), except
 # running-water ones (faucets and spigots are places readings are taken, not
-# where things go). PRODUCT_ZONES_TO_ADD were added there once. NO_ZONE is
+# where things go); Grocery is built in (categories.py) and comes first.
+# PRODUCT_ZONES_TO_ADD were added there once. Below a zone is a tree of
+# categories (categories.py). NO_ZONE is
 # "doesn't go in a room" (food, fuel...); NULL is not sorted yet. A line's
 # category (above) is only used to count heating fuel and softener salt as
 # utilities.
@@ -111,7 +113,7 @@ def amazon_subcategory(path: list[str] | None) -> str | None:
 def zones(conn) -> list[str]:
     """The names of the zones products can be sorted into, in /zones order."""
     return [r[0] for r in conn.execute(
-        "SELECT name FROM wc_zones WHERE COALESCE(zone_type, '') != 'running_water' ORDER BY id")]
+        "SELECT name FROM wc_zones WHERE COALESCE(zone_type, '') != 'running_water' ORDER BY builtin DESC, id")]
 
 
 def zone_label(zone: str | None) -> str:
@@ -598,6 +600,9 @@ def process(db_path: str, rid: int) -> None:
                 # Product photos taken with this shopping trip were waiting for it
                 from smart_home import product_photos
                 product_photos.on_receipt_scanned(db_path, rid)
+                # New groceries go to the Grocery zone, with a category the model picks
+                from smart_home import categories
+                categories.categorize_groceries_in_background(db_path, categories.unsorted_groceries(conn, rid))
         except Exception as e:
             msg = str(e) if isinstance(e, ReceiptError) else f"{type(e).__name__}: {e}"
             conn.execute("UPDATE receipts SET status='error', error=?, processed_at=? WHERE id=?", (msg, _now(), rid))

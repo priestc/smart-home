@@ -302,6 +302,10 @@ def read_email(conn: sqlite3.Connection, db_path: str, message_id: str) -> None:
         db.prune_products(conn)
         conn.execute("UPDATE amazon_emails SET status='imported', reason=NULL, processed_at=? WHERE message_id=?",
                      (_now(), message_id))
+        from smart_home import categories
+        new_groceries = [pid for (rid,) in conn.execute(
+            "SELECT id FROM receipts WHERE source='amazon' AND email_id=?", (message_id,)).fetchall()
+            for pid in categories.unsorted_groceries(conn, rid)]
     except Exception as e:
         msg = str(e) if isinstance(e, AmazonError) else f"{type(e).__name__}: {e}"
         conn.rollback()
@@ -312,6 +316,7 @@ def read_email(conn: sqlite3.Connection, db_path: str, message_id: str) -> None:
         raise
     finally:
         conn.commit()
+    categories.categorize_groceries_in_background(db_path, new_groceries)
     # Reading it again brought back items cancelled since: take them off again
     # (each cancellation records its own outcome)
     oids = [oid for o in orders for oid in o["orders"]]
@@ -1192,6 +1197,9 @@ def _categorize_in_background(db_path: str, rid: int) -> None:
             for (iid, _), cat in zip(rows, cats):
                 conn.execute("UPDATE receipt_items SET category=? WHERE id=?", (cat, iid))
             conn.commit()
+            # Groceries go to the Grocery zone, with a category the model picks
+            from smart_home import categories
+            categories.categorize_groceries_in_background(db_path, categories.unsorted_groceries(conn, rid))
             # Refund lines take their item's category: put them back now that it's known
             raw = conn.execute("SELECT raw_json FROM receipts WHERE id=?", (rid,)).fetchone()
             if raw:

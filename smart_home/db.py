@@ -546,16 +546,40 @@ def open_db(path: str) -> sqlite3.Connection:
                 conn.execute("INSERT INTO wc_zones (name, zone_type) VALUES (?, 'indoor_room')", (z,))
         conn.execute("INSERT INTO settings (key, value) VALUES ('product_zones_added', '1')")
         conn.commit()
+    # builtin: a zone that can't be renamed or deleted (Grocery; see categories.py)
+    try:
+        conn.execute("ALTER TABLE wc_zones ADD COLUMN builtin INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    # Categories below a zone, a tree (see categories.py). zone is the zone's
+    # name; parent_id NULL is the top of the zone; builtin ones (Grocery's)
+    # can't be renamed, moved or deleted.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS categories (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            zone       TEXT NOT NULL,
+            parent_id  INTEGER REFERENCES categories(id),
+            name       TEXT NOT NULL,
+            builtin    INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS categories_zone ON categories (zone, parent_id)")
     # zone: where the product goes (a /zones zone's name, 'none', or NULL = not
     # sorted yet). amazon_category: Amazon's category path for it, a JSON list
     # (read by the Chrome extension); amazon_category_tried: when the
     # extension last tried to read it and couldn't.
-    for col in ("zone TEXT", "amazon_category TEXT", "amazon_category_tried TEXT"):
+    # category_id: the product's category in its zone's tree (categories.py)
+    for col in ("zone TEXT", "amazon_category TEXT", "amazon_category_tried TEXT",
+                "category_id INTEGER REFERENCES categories(id)"):
         try:
             conn.execute(f"ALTER TABLE products ADD COLUMN {col}")
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+    from smart_home import categories as _categories
+    _categories.ensure_builtin(conn)
     if conn.execute("SELECT COUNT(*) FROM subcategories").fetchone()[0] == 0:
         now = _now()
         conn.executemany("INSERT INTO subcategories (category, name, created_at) VALUES ('Groceries', ?, ?)",

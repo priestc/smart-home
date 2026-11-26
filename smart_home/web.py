@@ -140,6 +140,8 @@ def _crumb_for(path: str) -> tuple[str, str | None] | None:
         return ("Unzoned" if name == "__unzoned__" else name, "/water-chemistry")
     if path.startswith("/email-archive/"):
         return ("Message", "/email-archive")
+    if _re.fullmatch(r"/zones/\d+/categories", path):
+        return ("Categories", "/zones")
     return None
 
 
@@ -8417,9 +8419,11 @@ def api_wc_zones_get():
     """List all zones (water chemistry, and where products go), with
     n_products: how many products are sorted into each."""
     with _conn() as conn:
-        rows = conn.execute("SELECT z.id, z.name, z.mode, z.zone_type, datetime(z.created_at, 'localtime') AS created_at, "
-                            "(SELECT COUNT(*) FROM products p WHERE p.zone = z.name) AS n_products "
-                            "FROM wc_zones z ORDER BY z.id ASC").fetchall()
+        rows = conn.execute("SELECT z.id, z.name, z.mode, z.zone_type, z.builtin, "
+                            "datetime(z.created_at, 'localtime') AS created_at, "
+                            "(SELECT COUNT(*) FROM products p WHERE p.zone = z.name) AS n_products, "
+                            "(SELECT COUNT(*) FROM categories c WHERE c.zone = z.name) AS n_categories "
+                            "FROM wc_zones z ORDER BY z.builtin DESC, z.id ASC").fetchall()
     return jsonify([dict(r) for r in rows])
 
 
@@ -8429,7 +8433,8 @@ def api_wc_zones_create():
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     zone_type = (data.get("zone_type") or "").strip() or None
-    valid_types = {"running_water", "pooling_water", "indoor_room", "outdoor_shade", "outdoor_sun", "unclassified"}
+    valid_types = {"running_water", "pooling_water", "indoor_room", "outdoor_shade", "outdoor_sun", "unclassified",
+                   "grocery"}
     if zone_type and zone_type not in valid_types:
         return jsonify({"error": f"invalid zone_type '{zone_type}'"}), 400
     if not name:
@@ -8457,14 +8462,17 @@ def api_wc_zones_update(zone_id):
     if new_name and new_name.lower() == "none":
         return jsonify({"error": '"none" is reserved (it means a product has no zone)'}), 400
     zone_type = data.get("zone_type", "__unset__")
-    valid_types = {"running_water", "pooling_water", "indoor_room", "outdoor_shade", "outdoor_sun", "unclassified", None}
+    valid_types = {"running_water", "pooling_water", "indoor_room", "outdoor_shade", "outdoor_sun", "unclassified",
+                   "grocery", None}
     if zone_type != "__unset__" and zone_type not in valid_types:
         return jsonify({"error": f"invalid zone_type '{zone_type}'"}), 400
     with _conn() as conn:
-        row = conn.execute("SELECT id, name, mode, zone_type FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
+        row = conn.execute("SELECT id, name, mode, zone_type, builtin FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
         if row is None:
             return jsonify({"error": "zone not found"}), 404
         old_name = row["name"]
+        if row["builtin"] and ((new_name and new_name != old_name) or zone_type != "__unset__"):
+            return jsonify({"error": f"{old_name} is built in and can't be renamed or retyped"}), 400
         updates, params = [], []
         if new_name and new_name != old_name:
             updates.append("name=?"); params.append(new_name)
@@ -8480,8 +8488,9 @@ def api_wc_zones_update(zone_id):
                 return jsonify({"error": str(e)}), 500
             if new_name and new_name != old_name:
                 conn.execute("UPDATE pool_readings SET zone=? WHERE zone=?", (new_name, old_name))
-                # Products sorted into it follow the new name
+                # Products sorted into it, and its categories, follow the new name
                 conn.execute("UPDATE products SET zone=? WHERE zone=?", (new_name, old_name))
+                conn.execute("UPDATE categories SET zone=? WHERE zone=?", (new_name, old_name))
             conn.commit()
         row = conn.execute("SELECT id, name, mode, zone_type, datetime(created_at, 'localtime') AS created_at FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
     return jsonify(dict(row))
@@ -8492,13 +8501,16 @@ def api_wc_zones_delete(zone_id):
     """Delete a water chemistry zone by ID. ?purge=true also deletes all readings for that zone."""
     purge = request.args.get("purge") == "true"
     with _conn() as conn:
-        row = conn.execute("SELECT name FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
+        row = conn.execute("SELECT name, builtin FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
         if row is None:
             return jsonify({"error": "zone not found"}), 404
         zone_name = row["name"]
+        if row["builtin"]:
+            return jsonify({"error": f"{zone_name} is built in and can't be deleted"}), 400
         conn.execute("DELETE FROM wc_zones WHERE id=?", (zone_id,))
-        # Products sorted into it go back to be sorted again
-        unsorted = conn.execute("UPDATE products SET zone=NULL WHERE zone=?", (zone_name,)).rowcount
+        # Products sorted into it go back to be sorted again; its categories go
+        unsorted = conn.execute("UPDATE products SET zone=NULL, category_id=NULL WHERE zone=?", (zone_name,)).rowcount
+        conn.execute("DELETE FROM categories WHERE zone=?", (zone_name,))
         if purge:
             conn.execute("DELETE FROM pool_readings WHERE zone=?", (zone_name,))
         conn.commit()
@@ -9012,6 +9024,7 @@ const ZONE_TYPE_LABELS = {
   outdoor_shade:  'Outdoor Shade',
   outdoor_sun:    'Outdoor Sun',
   unclassified:   'Unclassified',
+  grocery:        'Groceries',
 };
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -9046,8 +9059,10 @@ function renderZones() {
       <span class="zone-name">${esc(z.name)}</span>
       ${typeBadge}
       ${z.n_products ? `<a class="zone-type-badge" style="text-decoration:none;color:#2e7dd4" href="/receipts/items?q=${encodeURIComponent(z.name)}">${z.n_products} product${z.n_products === 1 ? '' : 's'}</a>` : ''}
+      ${z.zone_type !== 'running_water' ? `<a class="edit-btn" style="text-decoration:none" href="/zones/${z.id}/categories">Categories${z.n_categories ? ' (' + z.n_categories + ')' : ''}</a>` : ''}
+      ${z.builtin ? '<span class="zone-type-badge">Built in</span>' : `
       <button class="edit-btn" onclick="openEditZone(${z.id})">Edit</button>
-      <button class="del-btn" onclick="confirmDelete(${z.id},'${z.name.replace(/'/g,"\\\\'")}')">Delete</button>
+      <button class="del-btn" onclick="confirmDelete(${z.id},'${z.name.replace(/'/g,"\\\\'")}')">Delete</button>`}
     </div>`;
   }).join('');
 }
@@ -10052,6 +10067,158 @@ setInterval(loadRecentReadings, 30000);
 </script>
 </body>
 </html>"""
+
+
+_ZONE_CATEGORIES_PAGE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Categories &mdash; Smart Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    a { color: #2e7dd4; text-decoration: none; } a:hover { text-decoration: underline; }
+    h1 { font-size: 1.4rem; font-weight: 700; letter-spacing: -.02em; margin-bottom: .3rem; }
+    .intro { color: #5a6e84; font-size: .85rem; margin-bottom: 1.1rem; max-width: 46rem; }
+    .card { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); max-width: 760px; overflow: hidden; }
+    .row { display: flex; align-items: center; gap: .5rem; padding: .45rem 1rem; border-bottom: 1px solid #f0f4f8; min-height: 2.4rem; }
+    .row:last-child { border-bottom: none; }
+    .name { flex: 1; font-size: .93rem; }
+    .top > .name { font-weight: 600; }
+    .count { font-size: .75rem; color: #5a6e84; background: #eef2f7; border-radius: 6px; padding: .1rem .45rem; }
+    .lock { font-size: .72rem; color: #9aaabb; }
+    .row button { font-size: .78rem; color: #2e7dd4; background: none; border: none; cursor: pointer; padding: .2rem .45rem; border-radius: 6px; }
+    .row button:hover { background: #e8f1fb; }
+    .row button.del { color: #c0392b; }
+    .row button.del.armed { background: #c0392b; color: #fff; }
+    input[type=text] { font-size: .9rem; padding: .35rem .55rem; border: 1.5px solid #d0dce8; border-radius: 7px; }
+    .add { display: flex; gap: .5rem; padding: .8rem 1rem; background: #f8fafc; border-top: 1px solid #e8edf3; }
+    .add button { background: #2e7dd4; color: #fff; border: none; border-radius: 7px; padding: .35rem .9rem; cursor: pointer; }
+    .err { color: #c0392b; } .muted { color: #7a90a8; }
+    #status { margin: .6rem 0; font-size: .85rem; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <a href="/zones">&larr; Zones</a>
+  <h1 id="title">Categories</h1>
+  <p class="intro">A tree of categories inside this zone. Put a product in one from its page, a receipt, or
+    <a href="/receipts/sort">Sort into zones</a>. Deleting a category moves its sub-categories and products up to its parent.</p>
+  <div id="status"></div>
+  <div class="card">
+    <div id="tree"><div class="row muted">Loading&hellip;</div></div>
+    <div class="add"><input type="text" id="new-top" placeholder="New top-level category" maxlength="60">
+      <button id="add-top">Add</button></div>
+  </div>
+<script>
+const ZID = +location.pathname.split('/')[2];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+let zone = null, cats = [];
+
+function status(text, err) {
+  const el = document.getElementById('status');
+  el.className = err ? 'err' : 'muted'; el.textContent = text || '';
+}
+
+async function api(url, method, body) {
+  const r = await fetch(url, method ? {method, headers: {'Content-Type': 'application/json'}, body: body ? JSON.stringify(body) : undefined} : undefined);
+  const d = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((d && d.error) || `HTTP ${r.status}`);
+  return d;
+}
+
+function render() {
+  const el = document.getElementById('tree');
+  if (!cats.length) { el.innerHTML = '<div class="row muted">No categories yet. Add one below.</div>'; return; }
+  el.innerHTML = cats.map(c => `<div class="row ${c.depth ? '' : 'top'}" data-id="${c.id}" style="padding-left:${1 + c.depth * 1.5}rem">
+      <span class="name">${esc(c.name)}</span>
+      ${c.n_products ? `<span class="count">${c.n_products}</span>` : ''}
+      ${c.builtin ? '<span class="lock" title="Built in: can’t be renamed or deleted">built in</span>' : ''}
+      <button data-act="sub">+ Sub-category</button>
+      ${c.builtin ? '' : '<button data-act="rename">Rename</button><button data-act="del" class="del">Delete</button>'}
+    </div>`).join('');
+}
+
+async function load() {
+  try {
+    const zones = await api('/api/water-chemistry/zones');
+    zone = zones.find(z => z.id === ZID);
+    if (!zone) throw new Error('No such zone');
+    document.title = `${zone.name} categories — Smart Home`;
+    document.getElementById('title').textContent = `Categories in ${zone.name}`;
+    cats = (await api(`/api/categories?zone=${encodeURIComponent(zone.name)}`)).categories;
+    render();
+  } catch (e) {
+    document.getElementById('tree').innerHTML = `<div class="row err">Could not load: ${esc(e.message)}</div>`;
+  }
+}
+
+async function create(parentId, name) {
+  if (!name.trim()) return;
+  try {
+    await api('/api/categories', 'POST', {zone: zone.name, parent_id: parentId, name});
+    status(`Added ${name.trim()}`);
+    await load();
+  } catch (e) { status(`Couldn't add it: ${e.message}`, true); }
+}
+
+// An input in place of a row's name; Enter saves, Escape cancels
+function inlineInput(row, placeholder, value, onSave) {
+  const box = document.createElement('input');
+  box.type = 'text'; box.maxLength = 60; box.placeholder = placeholder; box.value = value || '';
+  const holder = document.createElement('div');
+  holder.className = 'row'; holder.style.paddingLeft = row.style.paddingLeft; holder.appendChild(box);
+  return {box, holder, wire() {
+    box.focus();
+    box.addEventListener('keydown', e => {
+      if (e.key === 'Enter') onSave(box.value);
+      if (e.key === 'Escape') render();
+    });
+  }};
+}
+
+document.getElementById('tree').addEventListener('click', async e => {
+  const btn = e.target.closest('button'); if (!btn) return;
+  const row = btn.closest('.row'), id = +row.dataset.id, c = cats.find(x => x.id === id);
+  if (btn.dataset.act === 'sub') {
+    const pad = `${1 + (c.depth + 1) * 1.5}rem`;
+    const inp = inlineInput(row, `New category under ${c.name} (Enter to add)`, '', v => create(id, v));
+    inp.holder.style.paddingLeft = pad;
+    row.after(inp.holder); inp.wire();
+  } else if (btn.dataset.act === 'rename') {
+    const inp = inlineInput(row, 'Name', c.name, async v => {
+      try { await api(`/api/categories/${id}`, 'PATCH', {name: v}); status(`Renamed to ${v.trim()}`); await load(); }
+      catch (err) { status(`Couldn't rename it: ${err.message}`, true); }
+    });
+    row.replaceWith(inp.holder); inp.wire();
+  } else if (btn.dataset.act === 'del') {
+    if (!btn.classList.contains('armed')) {
+      btn.classList.add('armed'); btn.textContent = 'Click again to delete';
+      setTimeout(() => { btn.classList.remove('armed'); btn.textContent = 'Delete'; }, 4000);
+      return;
+    }
+    try {
+      const r = await api(`/api/categories/${id}`, 'DELETE');
+      status(`Deleted ${c.name}${r.products_moved ? `; ${r.products_moved} product(s) moved up` : ''}`);
+      await load();
+    } catch (err) { status(`Couldn't delete it: ${err.message}`, true); }
+  }
+});
+document.getElementById('add-top').addEventListener('click', () => {
+  const box = document.getElementById('new-top'); create(null, box.value).then(() => { box.value = ''; });
+});
+document.getElementById('new-top').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('add-top').click(); });
+load();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/zones/<int:zone_id>/categories")
+def zone_categories_page(zone_id):
+    """Edit the tree of categories inside one zone (categories.py)."""
+    return Response(_ZONE_CATEGORIES_PAGE, mimetype="text/html")
 
 
 @app.get("/zones")
@@ -12185,6 +12352,58 @@ def api_receipts_amazon_order_states():
         return jsonify({'states': _amazon.order_states(conn, [str(i) for i in ids[:500]])})
 
 
+@app.get("/api/categories")
+def api_categories():
+    """Categories below the zones (categories.py), in tree order, each with
+    its path, depth and n_products. ?zone= limits it to one zone."""
+    from smart_home import categories as _categories
+    with _conn() as conn:
+        return jsonify({'categories': _categories.all_categories(conn, request.args.get('zone') or None)})
+
+
+@app.post("/api/categories")
+def api_category_create():
+    """Body: {zone, parent_id (null for the top of the zone), name}."""
+    from smart_home import categories as _categories
+    data = request.get_json(silent=True) or {}
+    pid = data.get('parent_id')
+    if pid is not None and (not isinstance(pid, int) or isinstance(pid, bool)):
+        return jsonify({'error': 'parent_id must be a number or null'}), 400
+    with _conn() as conn:
+        try:
+            cid = _categories.create(conn, str(data.get('zone') or ''), pid, str(data.get('name') or ''))
+        except _categories.CategoryError as e:
+            return jsonify({'error': str(e)}), 400
+        return jsonify({'ok': True, 'id': cid}), 201
+
+
+@app.patch("/api/categories/<int:cid>")
+def api_category_update(cid):
+    """Body: {name} and/or {parent_id} (null moves it to the top of its zone)."""
+    from smart_home import categories as _categories
+    data = request.get_json(silent=True) or {}
+    pid = data.get('parent_id', ...)
+    if pid is not ... and pid is not None and (not isinstance(pid, int) or isinstance(pid, bool)):
+        return jsonify({'error': 'parent_id must be a number or null'}), 400
+    with _conn() as conn:
+        try:
+            _categories.update(conn, cid, data.get('name'), pid)
+        except _categories.CategoryError as e:
+            return jsonify({'error': str(e)}), 400
+    return jsonify({'ok': True})
+
+
+@app.delete("/api/categories/<int:cid>")
+def api_category_delete(cid):
+    """Its sub-categories and products move up to its parent."""
+    from smart_home import categories as _categories
+    with _conn() as conn:
+        try:
+            return jsonify({'ok': True, **_categories.delete(conn, cid)})
+        except _categories.CategoryError as e:
+            return jsonify({'error': str(e)}), 400
+
+
 @app.get("/api/receipts/amazon/categories-needed")
 def api_receipts_amazon_categories_needed():
     """ASINs of products without Amazon's category path yet (the extension's
@@ -12227,14 +12446,15 @@ def api_receipt_detail(rid):
         r['items'] = [dict(i) for i in conn.execute(
             "SELECT i.id, i.description, i.quantity, i.unit, i.total_price, i.category, i.raw_text, i.item_code, "
             "i.name_key, i.product_id, p.name AS product_name, p.quantity AS default_quantity, p.zone, "
-            "p.amazon_category, "
+            "p.amazon_category, p.category_id, "
             "p.unit AS default_unit, p.subcategory_id, "
             "(SELECT COUNT(*) FROM receipt_items i2 WHERE i2.product_id = i.product_id) AS product_lines, "
             "(SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = i.product_id) AS photo_id "
             "FROM receipt_items i LEFT JOIN products p ON p.id = i.product_id "
             "WHERE i.receipt_id=? ORDER BY i.position", (rid,)
         ).fetchall()]
-        r['items'] = [_with_amazon_category(i) for i in r['items']]
+        paths = _category_paths(conn)
+        r['items'] = [_with_category(_with_amazon_category(i), paths) for i in r['items']]
         # Products on this receipt still without a picture, in receipt order: the
         # app asks for a photo of each one (labelled as printed) right after a scan.
         # Savings/coupon lines (not a positive price) aren't products to photograph.
@@ -12587,7 +12807,7 @@ def api_products():
     day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
     with _conn() as conn:
         rows = conn.execute(f"""
-            SELECT p.id, p.name, p.quantity, p.unit, p.count AS package_count, p.storage, p.subcategory_id, p.zone, p.amazon_category, COUNT(i.id) AS times_bought, MAX({day}) AS last_bought,
+            SELECT p.id, p.name, p.quantity, p.unit, p.count AS package_count, p.storage, p.subcategory_id, p.zone, p.amazon_category, p.category_id, COUNT(i.id) AS times_bought, MAX({day}) AS last_bought,
                    (SELECT i4.category FROM receipt_items i4 WHERE i4.product_id = p.id
                     GROUP BY i4.category ORDER BY COUNT(*) DESC, MAX(i4.id) DESC LIMIT 1) AS category,
                    (SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = p.id) AS photo_id,
@@ -12603,7 +12823,19 @@ def api_products():
             GROUP BY p.id
             ORDER BY p.name COLLATE NOCASE
         """).fetchall()
-    return jsonify({'products': [_with_amazon_category(dict(r)) for r in rows]})
+        paths = _category_paths(conn)
+    return jsonify({'products': [_with_category(_with_amazon_category(dict(r)), paths) for r in rows]})
+
+
+def _category_paths(conn) -> dict[int, list[str]]:
+    from smart_home import categories as _categories
+    return {c['id']: c['path'] for c in _categories.all_categories(conn)}
+
+
+def _with_category(p: dict, paths: dict[int, list[str]]) -> dict:
+    """category_path: the names from the top of the zone down to the product's category."""
+    p['category_path'] = paths.get(p.get('category_id')) or []
+    return p
 
 
 def _zone_names() -> list[str]:
@@ -12629,7 +12861,8 @@ def _with_amazon_category(p: dict) -> dict:
 def api_product_update(pid):
     """Update a product: `name` (renames every receipt-item pointing to it)
     and/or `quantity` + `unit` (null clears it), the amount in one purchase,
-    and/or `subcategory_id` (null clears it), and/or `zone` (a zone's name,
+    and/or `subcategory_id` (null clears it), and/or `category_id` (a
+    category, which also sets the zone; null clears it), and/or `zone` (a zone's name,
     "none" for no zone, null for not sorted yet)."""
     data = request.get_json(silent=True) or {}
     fields = {}
@@ -12648,6 +12881,10 @@ def api_product_update(pid):
         if sid is not None and (not isinstance(sid, int) or isinstance(sid, bool)):
             return jsonify({'error': 'subcategory_id must be a number or null'}), 400
         fields['subcategory_id'] = sid
+    if 'category_id' in data:
+        cid = data['category_id']
+        if cid is not None and (not isinstance(cid, int) or isinstance(cid, bool)):
+            return jsonify({'error': 'category_id must be a number or null'}), 400
     if 'zone' in data:
         from smart_home import receipts as _receipts
         zone = data['zone']
@@ -12656,11 +12893,21 @@ def api_product_update(pid):
             return jsonify({'error': f'zone must be one of: {", ".join(names)}, '
                                      f'"{_receipts.NO_ZONE}" or null'}), 400
         fields['zone'] = zone
-    if not fields:
+    if not fields and 'category_id' not in data:
         return jsonify({'error': 'Nothing to update'}), 400
     with _conn() as conn:
         if conn.execute("SELECT 1 FROM products WHERE id=?", (pid,)).fetchone() is None:
             return jsonify({'error': 'Product not found'}), 404
+        from smart_home import categories as _categories
+        if 'zone' in fields:
+            # A category from another zone no longer applies
+            conn.execute("UPDATE products SET category_id=NULL WHERE id=? AND category_id IN "
+                         "(SELECT id FROM categories WHERE zone IS NOT ?)", (pid, fields['zone']))
+        if 'category_id' in data:
+            try:
+                _categories.set_product(conn, pid, data['category_id'])
+            except _categories.CategoryError as e:
+                return jsonify({'error': str(e)}), 404
         if fields.get('subcategory_id') is not None and conn.execute(
                 "SELECT 1 FROM subcategories WHERE id=?", (fields['subcategory_id'],)).fetchone() is None:
             return jsonify({'error': 'Sub-category not found'}), 404
@@ -13157,7 +13404,7 @@ _RECEIPT_DETAIL_PAGE = """\\
   </dialog>
 <script>__COMMON_JS__
 const RID = __RID__;
-let receipt = null, zones = [], NO_ZONE = 'none', pollTimer = null;
+let receipt = null, zones = [], NO_ZONE = 'none', categories = [], pollTimer = null;
 const HEADER_FIELDS = ['kind', 'merchant', 'purchase_date', 'subtotal', 'tax', 'total'];
 
 function headerValue(k) {
@@ -13254,7 +13501,39 @@ function zoneCell(it) {
     ? `<div class="printed" title="${esc((it.amazon_category || []).join(' \u203a '))}">${esc(it.amazon_subcategory)}</div>` : '';
   return `<select data-zone title="Where this product goes (applies on every receipt it&rsquo;s on)">
     <option value=""${it.zone == null ? ' selected' : ''}>Not sorted</option>${opts}
-    <option value="${NO_ZONE}"${it.zone === NO_ZONE ? ' selected' : ''}>No zone</option></select>${sub}${util}`;
+    <option value="${NO_ZONE}"${it.zone === NO_ZONE ? ' selected' : ''}>No zone</option></select>${categorySelect(it)}${sub}${util}`;
+}
+// The product's category in its zone's tree (indented); none until it has a zone
+function categorySelect(it) {
+  const mine = categories.filter(c => c.zone === it.zone);
+  if (!it.zone || !mine.length) return '';
+  return `<select data-category title="Its category in ${esc(it.zone)} (applies on every receipt it&rsquo;s on)">
+    <option value="">No category</option>${mine.map(c => `<option value="${c.id}"${c.id === it.category_id ? ' selected' : ''}>${'\\u00a0\\u00a0'.repeat(c.depth)}${esc(c.name)}</option>`).join('')}</select>`;
+}
+async function setCategory(tr, cid) {
+  const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
+  const status = tr.querySelector('.row-status');
+  status.className = 'row-status muted'; status.textContent = 'Saving\\u2026';
+  try {
+    await sendJSON(`/api/products/${it.product_id}`, 'PATCH', {category_id: cid});
+    status.className = 'row-status ok'; status.textContent = 'Saved';
+    receipt.items.forEach(x => { if (x.product_id === it.product_id) x.category_id = cid; });
+    redrawZoneCells(it.product_id);
+  } catch (e) {
+    status.className = 'row-status err'; status.textContent = 'Save failed';
+    showNetworkError(`Could not save the category: ${e.message}`);
+    redrawZoneCells(it.product_id);
+  }
+}
+// Every line of the same product shares its zone and category
+function redrawZoneCells(productId) {
+  itemsEl.querySelectorAll('tr[data-id]').forEach(row => {
+    const x = receipt.items.find(y => String(y.id) === row.dataset.id);
+    if (!x || x.product_id !== productId) return;
+    const cell = row.querySelector('td.sub-cell');
+    const hidden = cell.querySelector('[data-f="category"]').outerHTML;
+    cell.innerHTML = hidden + zoneCell(x);
+  });
 }
 async function setZone(tr, zone) {
   const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
@@ -13263,12 +13542,10 @@ async function setZone(tr, zone) {
   try {
     await sendJSON(`/api/products/${it.product_id}`, 'PATCH', {zone});
     status.className = 'row-status ok'; status.textContent = 'Saved';
-    receipt.items.forEach(x => { if (x.product_id === it.product_id) x.zone = zone; });
-    itemsEl.querySelectorAll('tr[data-id]').forEach(row => {
-      const x = receipt.items.find(y => String(y.id) === row.dataset.id);
-      const sel = row.querySelector('[data-zone]');
-      if (x && sel && x.product_id === it.product_id) sel.value = zone || '';
-    });
+    // A category from the old zone no longer applies
+    const keep = categories.some(c => c.id === it.category_id && c.zone === zone);
+    receipt.items.forEach(x => { if (x.product_id === it.product_id) { x.zone = zone; if (!keep) x.category_id = null; } });
+    redrawZoneCells(it.product_id);
   } catch (e) {
     status.className = 'row-status err'; status.textContent = 'Save failed';
     showNetworkError(`Could not save the zone: ${e.message}`);
@@ -13402,6 +13679,7 @@ const itemsEl = document.getElementById('items');
 itemsEl.addEventListener('change', e => {
   const tr = e.target.closest('tr');
   if (e.target.matches('[data-zone]')) { setZone(tr, e.target.value || null); return; }
+  if (e.target.matches('[data-category]')) { setCategory(tr, e.target.value ? +e.target.value : null); return; }
   if (!e.target.dataset.f) return;
   saveRow(tr);
 });
@@ -13511,6 +13789,7 @@ img.onerror = () => { document.getElementById('photo-error').textContent = 'Coul
 
 fetchJSON('/api/receipts/config')
   .then(c => { zones = c.zones; NO_ZONE = c.no_zone; })
+  .then(() => fetchJSON('/api/categories')).then(c => { categories = c.categories; })
   .catch(e => showNetworkError(`Could not load categories: ${e.message}`))
   .finally(load);
 </script>
@@ -14248,7 +14527,7 @@ function zoneSelect(it) {
 
 function render() {
   const q = document.getElementById('filter').value.trim().toLowerCase();
-  const shown = items.filter(it => !q || [it.name, it.printed, it.merchants, it.zone, (it.amazon_category || []).join(' ')]
+  const shown = items.filter(it => !q || [it.name, it.printed, it.merchants, it.zone, (it.amazon_category || []).join(' '), (it.category_path || []).join(' ')]
     .some(v => v && String(v).toLowerCase().includes(q)));
   document.getElementById('count').textContent = `${shown.length} of ${items.length} products`;
   const tbody = document.getElementById('rows');
@@ -14265,7 +14544,7 @@ function render() {
       <td class="muted">${esc(it.merchants) || '&mdash;'}</td>
       <td class="num">${it.times_bought}&times;<div class="muted">${esc(it.last_bought)}</div></td>
       <td class="num">${it.last_price == null ? '&mdash;' : '$' + Number(it.last_price).toFixed(2)}</td>
-      <td class="cat-cell">${zoneSelect(it)}${it.amazon_subcategory ? `<div class="muted" title="${esc((it.amazon_category || []).join(' \\u203a '))}">${esc(it.amazon_subcategory)}</div>` : ''}</td>
+      <td class="cat-cell">${zoneSelect(it)}${(it.category_path || []).length ? `<div><a href="/receipts/products/${it.id}">${esc(it.category_path.join(' \\u203a '))}</a></div>` : ''}${it.amazon_subcategory ? `<div class="muted" title="${esc((it.amazon_category || []).join(' \\u203a '))}">${esc(it.amazon_subcategory)}</div>` : ''}</td>
       <td><div class="qty-cell">
         <input type="text" data-f="quantity" inputmode="decimal" value="${it.quantity ?? ''}" placeholder="none">
         <select data-f="unit">${UNITS.map(u => `<option${u === (it.unit || 'oz') ? ' selected' : ''}>${u}</option>`).join('')}</select>
@@ -15194,7 +15473,7 @@ function render(d) {
       ${p.photo_id ? readBox(p) : ''}</div>
     <div>
       <h1>${esc(p.name)}</h1>
-      <div class="sub zone-row">${zoneSelect(p)}
+      <div class="sub zone-row">${zoneSelect(p)}${categorySelect(p)}
         <span>${p.amazon_category ? esc(p.amazon_category.join(' \u203a ')) : '<span class="muted">No Amazon category yet</span>'}</span></div>
       ${facts.length ? `<dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`
         : '<div class="muted">No package details yet. They come from a photo of the product (Read, then Use, on the Product Photos page).</div>'}
@@ -15237,7 +15516,7 @@ function render(d) {
     <td class="num">${money(x.price)}</td><td class="num">${unitPrice(x.unit_price, x.basis)}</td>
     <td><a href="/receipts/${x.receipt_id}">Receipt #${x.receipt_id}</a></td></tr>`).join('');
   document.getElementById('main').innerHTML = head
-    + `<div class="card"><h2>Price against ${c ? esc(c.group === 'subcategory' ? 'its Amazon sub-category' : 'its zone') : 'similar products'}</h2>${compare}</div>`
+    + `<div class="card"><h2>Price against ${c ? esc(c.group === 'category' ? 'its category' : c.group === 'subcategory' ? 'its Amazon sub-category' : 'its zone') : 'similar products'}</h2>${compare}</div>`
     + `<div class="card"><h2>Purchases</h2>${d.purchases.length ? `<table><thead><tr><th>Date</th><th>Store</th><th>Printed as</th>
         <th class="num">Quantity</th><th class="num">Price</th><th class="num">Unit price</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
         : '<div class="muted">No purchases on scanned receipts.</div>'}</div>`;
@@ -15258,24 +15537,34 @@ function readBox(p) {
 }
 
 // Where the product goes (one of the zones); saved as soon as it's changed
-let ZONES = [], NO_ZONE = 'none';
+let ZONES = [], NO_ZONE = 'none', CATEGORIES = [];
+// Its category in that zone's tree, shown indented
+function categorySelect(p) {
+  const mine = CATEGORIES.filter(c => c.zone === p.zone);
+  if (!p.zone || p.zone === NO_ZONE) return '';
+  if (!mine.length) return `<a class="muted" href="/zones">No categories in ${esc(p.zone)} yet</a>`;
+  return `<select id="category" title="Its category in ${esc(p.zone)}"><option value="">No category</option>${
+    mine.map(c => `<option value="${c.id}"${c.id === p.category_id ? ' selected' : ''}>${'   '.repeat(c.depth)}${esc(c.name)}</option>`).join('')}</select>`;
+}
 function zoneSelect(p) {
   const opt = (v, t) => `<option value="${esc(v)}"${(p.zone || '') === v ? ' selected' : ''}>${esc(t)}</option>`;
   return `<select id="zone" title="Where this product goes">${opt('', 'Not sorted')}${ZONES.map(z => opt(z, z)).join('')}${opt(NO_ZONE, 'No zone')}</select>`;
 }
 document.addEventListener('change', async e => {
-  if (e.target.id !== 'zone') return;
+  if (e.target.id !== 'zone' && e.target.id !== 'category') return;
   e.target.disabled = true;
+  const body = e.target.id === 'zone' ? {zone: e.target.value || null}
+                                      : {category_id: e.target.value ? +e.target.value : null};
   try {
     const r = await fetch(`/api/products/${PID}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
-                                                  body: JSON.stringify({zone: e.target.value || null})});
+                                                  body: JSON.stringify(body)});
     if (!r.ok) {
       const data = await r.json().catch(() => null);
       throw new Error((data && data.error) || `HTTP ${r.status}`);
     }
     loadProduct();
   } catch (err) {
-    showNetworkError('Could not save the zone: ' + err.message);
+    showNetworkError('Could not save: ' + err.message);
     e.target.disabled = false;
   }
 });
@@ -15315,8 +15604,9 @@ document.addEventListener('click', async e => {
   }
   loadProduct();
 });
-fetch('/api/receipts/config').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
-  .then(c => { ZONES = c.zones; NO_ZONE = c.no_zone; })
+Promise.all(['/api/receipts/config', '/api/categories'].map(u =>
+    fetch(u).then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status} from ${u}`)))))
+  .then(([c, cats]) => { ZONES = c.zones; NO_ZONE = c.no_zone; CATEGORIES = cats.categories; })
   .catch(e => showNetworkError('Could not load the zones: ' + e.message))
   .finally(loadProduct);
 </script>
@@ -15827,12 +16117,12 @@ def api_product_detail(pid):
     with _conn() as conn:
         prod = conn.execute(
             "SELECT p.id, p.name, p.quantity, p.unit, p.count AS package_count, p.storage, p.subcategory_id, "
-            "s.name AS subcategory, p.zone, p.amazon_category, "
+            "s.name AS subcategory, p.zone, p.amazon_category, p.category_id, "
             "(SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = p.id) AS photo_id "
             "FROM products p LEFT JOIN subcategories s ON s.id = p.subcategory_id WHERE p.id=?", (pid,)).fetchone()
         if prod is None:
             return jsonify({'error': 'Product not found'}), 404
-        prod = _with_amazon_category(dict(prod))
+        prod = _with_category(_with_amazon_category(dict(prod)), _category_paths(conn))
         info = None
         prod['photo'] = None
         if prod['photo_id']:
@@ -15852,7 +16142,7 @@ def api_product_detail(pid):
         lines = conn.execute(
             "SELECT i.id, i.receipt_id, i.product_id, i.quantity, i.unit, i.total_price, i.category, i.raw_text, "
             "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10)) AS day, r.merchant, "
-            "p.name, p.quantity AS pq, p.unit AS pu, p.subcategory_id, p.zone, p.amazon_category "
+            "p.name, p.quantity AS pq, p.unit AS pu, p.subcategory_id, p.zone, p.amazon_category, p.category_id "
             "FROM receipt_items i JOIN receipts r ON r.id = i.receipt_id JOIN products p ON p.id = i.product_id "
             "WHERE r.kind = 'receipt' ORDER BY day DESC, i.id DESC").fetchall()
 
@@ -15893,13 +16183,17 @@ def api_product_detail(pid):
     from smart_home import receipts as _receipts
     category = _receipts.zone_label(prod['zone'])
     my_price, basis = recent_unit_price(by_product.get(pid, []))
-    # Compared with products in the same Amazon sub-category, else the same zone
+    # Compared with products in the same category, else the same Amazon
+    # sub-category, else the same zone
     mine_sub = prod['amazon_subcategory']
-    group = 'subcategory' if mine_sub else 'zone' if prod['zone'] not in (None, _receipts.NO_ZONE) else None
+    group = ('category' if prod['category_id'] else 'subcategory' if mine_sub
+             else 'zone' if prod['zone'] not in (None, _receipts.NO_ZONE) else None)
     peers = []
     if my_price is not None and group:
         for opid, rows in by_product.items():
-            if group == 'subcategory':
+            if group == 'category':
+                in_group = rows[0]['category_id'] == prod['category_id']
+            elif group == 'subcategory':
                 in_group = _with_amazon_category({'amazon_category': rows[0]['amazon_category']})['amazon_subcategory'] == mine_sub
             else:
                 in_group = rows[0]['zone'] == prod['zone']
@@ -15914,7 +16208,9 @@ def api_product_detail(pid):
     comparison = None
     if peers:
         others = [x['unit_price'] for x in peers if not x['this']]
-        comparison = {'group': group, 'group_name': mine_sub if group == 'subcategory' else category,
+        comparison = {'group': group,
+                      'group_name': (' \u203a '.join(prod['category_path']) if group == 'category'
+                                     else mine_sub if group == 'subcategory' else category),
                       'basis': basis, 'unit_price': round(my_price, 4),
                       'rank': next(i for i, x in enumerate(peers) if x['this']) + 1, 'of': len(peers),
                       'median_others': round(median(others), 4) if others else None, 'products': peers}
@@ -15943,32 +16239,45 @@ _SORT_PAGE = r"""<!DOCTYPE html>
     .name { font-size: 1.15rem; font-weight: 600; line-height: 1.35; margin-bottom: .5rem; }
     .path { color: #4a6080; font-size: .85rem; margin-bottom: .7rem; }
     .facts { color: #4a6080; font-size: .85rem; line-height: 1.6; }
-    .zones { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .5rem; margin-top: 1.2rem; max-width: 860px; }
-    .zones button { background: #fff; border: 1px solid #d0dce8; border-radius: 10px; padding: .8rem .6rem; font-size: .95rem; cursor: pointer; text-align: left; }
-    .zones button:hover { border-color: #e07820; }
+    .step { margin-top: 1.1rem; max-width: 860px; }
+    .step h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: #7a90a8; margin-bottom: .5rem; }
+    .zones { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .5rem; }
+    .zones button, .cats button { background: #fff; border: 1px solid #d0dce8; border-radius: 10px; padding: .7rem .6rem; font-size: .95rem; cursor: pointer; text-align: left; }
+    .zones button:hover, .cats button:hover, .cats button.first { border-color: #e07820; }
     .zones button kbd { float: right; color: #9aaabb; font: .75rem ui-monospace, monospace; }
     .zones button.none { color: #4a6080; }
-    .zones button:disabled { opacity: .5; cursor: default; }
+    button:disabled { opacity: .5; cursor: default; }
+    .cats { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: .45rem; }
+    .cats .group { grid-column: 1 / -1; font-size: .8rem; font-weight: 600; color: #4a6080; margin-top: .4rem; }
+    .cats button { padding: .5rem .6rem; font-size: .9rem; }
+    .cats button.parent { font-weight: 600; }
+    #cat-filter { width: 100%; max-width: 400px; font-size: .95rem; padding: .45rem .6rem; border: 1.5px solid #d0dce8; border-radius: 8px; margin-bottom: .6rem; }
     .actions { display: flex; gap: .6rem; margin-top: .8rem; flex-wrap: wrap; align-items: center; }
     .actions button { background: none; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem .8rem; color: #4a6080; cursor: pointer; font-size: .85rem; }
-    .actions button:disabled { opacity: .5; cursor: default; }
     #status { font-size: .85rem; }
-    .done li { margin: .2rem 0 .2rem 1.2rem; }
   </style>
 </head>
 <body>
   <div class="top"><h1>Sort into zones</h1><span class="muted" id="left"></span>
     <a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Products</a><a href="/zones">Edit zones</a></div>
   <div id="main"><div class="card muted">Loading&hellip;</div></div>
-  <div class="zones" id="zones"></div>
+  <div class="step" id="zone-step"><h2>Zone</h2><div class="zones" id="zones"></div></div>
+  <div class="step" id="cat-step" style="display:none"><h2 id="cat-title">Category</h2>
+    <input type="search" id="cat-filter" placeholder="Type to filter, Enter picks the first (Esc: back to zones)">
+    <div class="cats" id="cats"></div></div>
   <div class="actions"><button id="skip">Skip <span class="muted">(S)</span></button>
     <button id="undo" disabled>Undo <span class="muted">(Z)</span></button><span id="status" class="muted"></span></div>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const money = v => v == null ? '' : '$' + Number(v).toFixed(2);
-let zones = [], NO_ZONE = 'none', queue = [], sorted = [], busy = false;
 // Keyboard shortcut for each zone, in order (S and Z are skip and undo; 0 is No zone)
 const KEYS = '123456789abcdefghijklmnopqrtuvwxy';
+const GROCERY = 'Grocery';
+let zones = [], NO_ZONE = 'none', categories = [], queue = [], done = [], busy = false, step = 'zone';
+
+const catsOf = zone => categories.filter(c => c.zone === zone);
+// A product still to sort: no zone yet, or a grocery without its category
+const needsSorting = p => p.times_bought > 0 && (p.zone == null || (p.zone === GROCERY && p.category_id == null));
 
 function setStatus(text, err) {
   const el = document.getElementById('status');
@@ -15977,45 +16286,102 @@ function setStatus(text, err) {
 
 function render() {
   document.getElementById('left').textContent = `${queue.length} left to sort`;
-  document.getElementById('undo').disabled = !sorted.length || busy;
+  document.getElementById('undo').disabled = !done.length || busy;
   document.getElementById('skip').disabled = !queue.length || busy;
   const p = queue[0];
   const main = document.getElementById('main');
-  document.getElementById('zones').style.display = p ? '' : 'none';
   if (!p) {
+    document.getElementById('zone-step').style.display = document.getElementById('cat-step').style.display = 'none';
     main.innerHTML = `<div class="card">Every product is sorted. <a href="/receipts">See spending by zone &rarr;</a></div>`;
     return;
   }
+  if (p.zone != null && step === 'zone' && p.zone !== NO_ZONE && catsOf(p.zone).length) step = 'category';
   const path = (p.amazon_category || []).join(' › ');
   main.innerHTML = `<div class="card product">
     <div class="pic">${p.photo_id ? `<img src="/api/product-photos/${p.photo_id}/image" alt="">` : '<div class="no-pic">No picture</div>'}</div>
     <div>
       <div class="name"><a href="/receipts/products/${p.id}" target="_blank">${esc(p.name)}</a></div>
-      <div class="path">${path ? esc(path) : '<span class="muted">No Amazon category yet</span>'}</div>
+      ${p.zone && p.zone !== NO_ZONE ? `<div class="path"><b>${esc(p.zone)}</b></div>` : ''}
+      <div class="path">${path ? 'Amazon: ' + esc(path) : ''}</div>
       <div class="facts">${money(p.last_price)}${p.merchants ? ' at ' + esc(p.merchants) : ''}<br>
         Bought ${p.times_bought}&times;${p.last_bought ? ', last on ' + esc(p.last_bought) : ''}</div>
     </div></div>`;
+  document.getElementById('zone-step').style.display = step === 'zone' ? '' : 'none';
+  document.getElementById('cat-step').style.display = step === 'category' ? '' : 'none';
   document.querySelectorAll('#zones button').forEach(b => b.disabled = busy);
+  if (step === 'category') renderCats();
 }
 
-async function patchZone(id, zone) {
+function renderCats() {
+  const p = queue[0];
+  document.getElementById('cat-title').textContent = `Category in ${p.zone}`;
+  const q = document.getElementById('cat-filter').value.trim().toLowerCase();
+  const all = catsOf(p.zone);
+  const hasKids = new Set(all.map(c => c.parent_id));
+  const shown = all.filter(c => !q || c.path.join(' ').toLowerCase().includes(q));
+  let html = '', first = true;
+  for (const c of shown) {
+    const cls = [hasKids.has(c.id) ? 'parent' : '', first ? 'first' : ''].join(' ');
+    if (c.depth === 0 && !q) html += `<div class="group"></div>`;
+    html += `<button class="${cls}" data-cat="${c.id}"${busy ? ' disabled' : ''}>${q ? esc(c.path.join(' › ')) : esc(c.name)}</button>`;
+    first = false;
+  }
+  html += `<button data-cat=""${busy ? ' disabled' : ''} class="${shown.length ? '' : 'first'}">No category</button>`;
+  document.getElementById('cats').innerHTML = html;
+  if (document.activeElement !== document.getElementById('cat-filter')) document.getElementById('cat-filter').focus();
+}
+
+async function patch(id, body) {
   const r = await fetch(`/api/products/${id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
-                                                 body: JSON.stringify({zone})});
+                                                body: JSON.stringify(body)});
   if (!r.ok) {
     const d = await r.json().catch(() => null);
     throw new Error((d && d.error) || `HTTP ${r.status}`);
   }
 }
 
-async function choose(zone) {
+function advance(p, was) {
+  done.push({p, was});
+  queue.shift();
+  step = 'zone';
+  document.getElementById('cat-filter').value = '';
+}
+
+async function chooseZone(zone) {
   const p = queue[0];
   if (!p || busy) return;
   busy = true; render(); setStatus('Saving…');
+  const was = {zone: p.zone, category_id: p.category_id};
   try {
-    await patchZone(p.id, zone);
-    sorted.push(p);
-    queue.shift();
-    setStatus(`${p.name.slice(0, 50)}: ${zone === NO_ZONE ? 'No zone' : zone}`);
+    await patch(p.id, {zone});
+    p.zone = zone; p.category_id = null;
+    if (zone !== NO_ZONE && catsOf(zone).length) {
+      step = 'category'; p._was = was;
+      setStatus(`${zone}: now its category`);
+    } else {
+      advance(p, was);
+      setStatus(`${p.name.slice(0, 50)}: ${zone === NO_ZONE ? 'No zone' : zone}`);
+    }
+  } catch (e) {
+    setStatus(`Couldn't save: ${e.message}`, true);
+  }
+  busy = false; render();
+}
+
+async function chooseCategory(cid) {
+  const p = queue[0];
+  if (!p || busy) return;
+  const was = p._was || {zone: p.zone, category_id: p.category_id};
+  if (cid == null) {  // leave it without a category
+    advance(p, was); setStatus(`${p.name.slice(0, 50)}: ${p.zone}, no category`); render(); return;
+  }
+  busy = true; render(); setStatus('Saving…');
+  try {
+    await patch(p.id, {category_id: cid});
+    p.category_id = cid;
+    const c = categories.find(x => x.id === cid);
+    advance(p, was);
+    setStatus(`${p.name.slice(0, 50)}: ${p.zone} › ${c ? c.path.join(' › ') : ''}`);
   } catch (e) {
     setStatus(`Couldn't save: ${e.message}`, true);
   }
@@ -16023,14 +16389,17 @@ async function choose(zone) {
 }
 
 async function undo() {
-  const p = sorted[sorted.length - 1];
-  if (!p || busy) return;
+  const last = done[done.length - 1];
+  if (!last || busy) return;
   busy = true; render(); setStatus('Undoing…');
   try {
-    await patchZone(p.id, null);
-    sorted.pop();
-    queue.unshift(p);
-    setStatus(`Undid ${p.name.slice(0, 50)}`);
+    await patch(last.p.id, {zone: last.was.zone});
+    if (last.was.category_id != null) await patch(last.p.id, {category_id: last.was.category_id});
+    Object.assign(last.p, last.was);
+    done.pop();
+    queue.unshift(last.p);
+    step = 'zone';
+    setStatus(`Undid ${last.p.name.slice(0, 50)}`);
   } catch (e) {
     setStatus(`Couldn't undo: ${e.message}`, true);
   }
@@ -16040,39 +16409,50 @@ async function undo() {
 function skip() {
   if (!queue.length || busy) return;
   queue.push(queue.shift());
+  step = 'zone';
+  document.getElementById('cat-filter').value = '';
   setStatus('Skipped; it comes back at the end');
   render();
 }
 
 document.getElementById('skip').addEventListener('click', skip);
 document.getElementById('undo').addEventListener('click', undo);
+document.getElementById('cats').addEventListener('click', e => {
+  const b = e.target.closest('button[data-cat]');
+  if (b) chooseCategory(b.dataset.cat ? +b.dataset.cat : null);
+});
+document.getElementById('cat-filter').addEventListener('input', renderCats);
+document.getElementById('cat-filter').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); const b = document.querySelector('#cats button.first'); if (b) b.click(); }
+  if (e.key === 'Escape') { step = 'zone'; e.target.value = ''; e.target.blur(); render(); }
+});
 document.addEventListener('keydown', e => {
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.metaKey || e.ctrlKey || e.altKey || step !== 'zone' || e.target.tagName === 'INPUT') return;
   const k = KEYS.indexOf(e.key.toLowerCase());
-  if (e.key.length === 1 && k >= 0 && k < zones.length) choose(zones[k]);
-  else if (e.key === '0') choose(NO_ZONE);
+  if (e.key.length === 1 && k >= 0 && k < zones.length) chooseZone(zones[k]);
+  else if (e.key === '0') chooseZone(NO_ZONE);
   else if (e.key === 's' || e.key === 'S' || e.key === 'ArrowRight') skip();
   else if (e.key === 'z' || e.key === 'Z' || e.key === 'Backspace') undo();
 });
 
 (async () => {
   try {
-    const [cfg, prods] = await Promise.all(['/api/receipts/config', '/api/products'].map(async u => {
+    const [cfg, prods, cats] = await Promise.all(['/api/receipts/config', '/api/products', '/api/categories'].map(async u => {
       const r = await fetch(u);
       const d = await r.json().catch(() => null);
       if (!r.ok) throw new Error((d && d.error) || `HTTP ${r.status} from ${u}`);
       return d;
     }));
-    zones = cfg.zones; NO_ZONE = cfg.no_zone;
-    // Bought products not sorted yet, most recently bought first
-    queue = prods.products.filter(p => p.zone == null && p.times_bought > 0)
+    zones = cfg.zones; NO_ZONE = cfg.no_zone; categories = cats.categories;
+    // Most recently bought first
+    queue = prods.products.filter(needsSorting)
       .sort((a, b) => (b.last_bought || '').localeCompare(a.last_bought || ''));
     document.getElementById('zones').innerHTML = zones.map((z, i) =>
       `<button data-zone="${esc(z)}">${esc(z)}<kbd>${KEYS[i] || ''}</kbd></button>`).join('')
-      + `<button class="none" data-zone="${esc(NO_ZONE)}" title="Doesn't go in a room: food, fuel, supplies">No zone<kbd>0</kbd></button>`;
+      + `<button class="none" data-zone="${esc(NO_ZONE)}" title="Doesn't go anywhere in particular: fuel, supplies">No zone<kbd>0</kbd></button>`;
     document.getElementById('zones').addEventListener('click', e => {
       const b = e.target.closest('button[data-zone]');
-      if (b) choose(b.dataset.zone);
+      if (b) chooseZone(b.dataset.zone);
     });
     render();
   } catch (e) {
