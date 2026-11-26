@@ -373,3 +373,17 @@ def reread_in_background(db_path: str, message_id: str) -> None:
             _rereading.discard(message_id)
 
     threading.Thread(target=_bg, daemon=True).start()
+
+
+def scan_in_background(db_path: str) -> bool:
+    """Start scan() unless one is running. Returns whether it started."""
+    if _lock.locked():
+        return False
+
+    def _bg():
+        r = scan(db_path)  # the result, errors included, is shown on /receipts
+        if not r["ok"]:
+            print(f"Amazon email scan failed: {r['error']}", flush=True)
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return True

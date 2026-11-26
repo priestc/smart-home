@@ -12099,12 +12099,13 @@ def api_receipts_amazon():
 
 @app.post("/api/receipts/amazon/scan")
 def api_receipts_amazon_scan():
-    """Read new Amazon order emails now (also done after each archive sync)."""
+    """Start reading new Amazon order emails now (also done after each archive
+    sync). Each is read by the model, so it runs in the background; the
+    result shows in GET /api/receipts/amazon."""
     from smart_home import amazon as _amazon
-    r = _amazon.scan(_db_path)
-    if not r['ok']:
-        return jsonify({'error': f"Amazon email check failed: {r['error']}"}), 500
-    return jsonify(r)
+    if not _amazon.scan_in_background(_db_path):
+        return jsonify({'error': 'Already checking Amazon emails'}), 409
+    return jsonify({'ok': True, 'started': True}), 202
 
 
 @app.get("/api/receipts/<int:rid>")
@@ -12795,6 +12796,7 @@ async function load() {
 }
 
 // Amazon order confirmations are read from the email archive after each sync
+let amazonTimer = null;
 async function loadAmazon() {
   const el = document.getElementById('amazon-status');
   let d;
@@ -12811,21 +12813,21 @@ async function loadAmazon() {
   if (s && !s.ok) html += `<div class="err">The last check failed: ${esc(s.error)}</div>`;
   if (d.errors.length) html += `<div class="err" style="margin-top:.4rem">Couldn\\u2019t read ${d.errors.length} (tried again at each check):</div><ul>`
     + d.errors.map(x => `<li><a href="/email-archive/${encodeURIComponent(x.message_id)}">${esc(x.received_at.slice(0, 10))}</a>: <span class="err">${esc(x.reason || '')}</span></li>`).join('') + '</ul>';
+  if (d.scanning) html = 'Checking for new Amazon order emails\\u2026 ' + html;
   el.innerHTML = html;
   document.getElementById('amazon-scan').disabled = d.scanning;
+  clearTimeout(amazonTimer);
+  if (d.scanning) amazonTimer = setTimeout(() => { loadAmazon(); load(); }, 4000);
 }
 document.getElementById('amazon-scan').addEventListener('click', async () => {
   const btn = document.getElementById('amazon-scan');
   btn.disabled = true;
-  document.getElementById('amazon-status').textContent = 'Checking\\u2026 (each new email is read by the model, so this can take a while)';
   try {
     await fetchJSON('/api/receipts/amazon/scan', {method: 'POST'});
   } catch (e) {
     showNetworkError(`Could not check Amazon emails: ${e.message}`);
   }
-  btn.disabled = false;
   loadAmazon();
-  load();
 });
 loadAmazon();
 
