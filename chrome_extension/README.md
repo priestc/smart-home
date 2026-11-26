@@ -49,3 +49,7 @@ a zip of this folder from `about:addons` → gear → **Install Add-on From
 File**, or have Mozilla sign it for free as an unlisted add-on with
 `npx web-ext sign --channel=unlisted` (needs AMO API keys) and install the
 .xpi it gives you.
+
+The manifest sets its own `content_security_policy`: Firefox's default for
+MV3 extensions includes `upgrade-insecure-requests`, which would turn every
+request to `http://smart-home.lan` into `https://` and fail.

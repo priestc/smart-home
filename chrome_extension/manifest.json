@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Smart Home: Amazon orders",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Sends the items of your Amazon orders to your smart-home receipts.",
   "permissions": [
     "storage",
@@ -42,5 +42,8 @@
       "id": "amazon-orders@smart-home.local",
       "strict_min_version": "121.0"
     }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
   }
 }
