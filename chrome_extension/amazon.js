@@ -9,7 +9,7 @@
 
 const SH_DETAILS_URL = id => `https://www.amazon.com/your-orders/order-details?orderID=${encodeURIComponent(id)}`;
 const SH_SYNC_HASH = '#smart-home-sync';
-const SH_SYNC_PAGES = 5;          // order history pages read by a sync (10 orders each)
+const SH_SYNC_PAGES = 20;         // order history pages read by a sync at most (10 orders each)
 const SH_NEW_ORDER_TRIES = 4;     // a just-placed order's page can take a moment to fill in
 const SH_RETRY_MS = 20000;
 
@@ -26,10 +26,10 @@ function shPageHtml(doc) {
 }
 
 // Read one order (from this page, or by fetching its details page) and send it.
-// Returns 'sent', 'queued', 'already' or 'error'.
-async function shProcessOrder(id, doc, url) {
+// `tries` > 1 is for an order placed moments ago, whose page may not be ready.
+// Returns 'sent', 'queued', 'already', 'skipped' or 'error'.
+async function shProcessOrder(id, doc, url, tries = 1) {
   let order, lastError, lastDoc = doc;
-  const tries = doc ? 1 : SH_NEW_ORDER_TRIES;
   for (let n = 0; n < tries; n++) {
     if (!doc) {
       if (n) await shSleep(SH_RETRY_MS);
@@ -38,6 +38,12 @@ async function shProcessOrder(id, doc, url) {
         if (!resp.ok) { lastError = new Error(`amazon.com returned HTTP ${resp.status} for the order page`); continue; }
         url = resp.url;
         lastDoc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+        // Orders Amazon won't show a details page for (some digital and
+        // subscription orders): nothing to read
+        if (/unable to load your order details/i.test(lastDoc.body ? lastDoc.body.textContent : '') && n === tries - 1) {
+          await shSend({type: 'skipped', order_id: id, reason: 'Amazon has no details page for this order (a digital or subscription order?)'});
+          return 'skipped';
+        }
       } catch (e) {
         lastError = new Error(`Could not load the order page: ${e.message}`);
         continue;
@@ -90,16 +96,18 @@ async function shSync() {
     if (!ids.size) throw new Error('No orders found on the order history page (are you signed in?)');
     const states = await shSend({type: 'states', ids: [...ids]});
     if (!states || states.error) throw new Error(states ? states.error : 'No answer from the extension');
-    const todo = [...ids].filter(i => states.states[i] !== 'detailed');
-    const counts = {sent: 0, queued: 0, already: 0, error: 0};
+    const skipped = new Set((await shSend({type: 'skipped-list'})) || []);
+    const todo = [...ids].filter(i => states.states[i] !== 'detailed' && !skipped.has(i));
+    const counts = {sent: 0, queued: 0, already: 0, skipped: 0, error: 0};
     for (let i = 0; i < todo.length; i++) {
-      progress({state: 'running', message: `Reading order ${i + 1} of ${todo.length} (${ids.size} recent orders, the rest already have their items)…`});
+      progress({state: 'running', message: `Reading order ${i + 1} of ${todo.length} (${todo[i]}; ${ids.size} orders found, the rest already have their items)…`});
       const r = await shProcessOrder(todo[i]);
       counts[r] = (counts[r] || 0) + 1;
       await shSleep(1500);  // don't hammer amazon.com
     }
-    progress({state: 'done', message: `${ids.size} recent orders: ${ids.size - todo.length} already had their items, `
-      + `${counts.sent} sent, ${counts.queued} queued until smart-home can be reached, ${counts.error} couldn’t be read.`,
+    progress({state: 'done', message: `Done. ${ids.size} orders found: ${ids.size - todo.length} already had their items, `
+      + `${counts.sent} sent, ${counts.skipped} have no details page`
+      + `${counts.queued ? `, ${counts.queued} queued until smart-home can be reached` : ''}, ${counts.error} couldn’t be read.`,
       error: counts.error > 0});
   } catch (e) {
     progress({state: 'done', message: `Sync failed: ${e.message}`, error: true});
@@ -126,7 +134,7 @@ async function shSync() {
     await shSleep(5000);  // let Amazon finish setting up the order
     for (const id of ids) {
       if ((await shSend({type: 'is-done', id})) === true) continue;
-      await shProcessOrder(id);
+      await shProcessOrder(id, null, null, SH_NEW_ORDER_TRIES);
     }
   } else if (/your-orders\/orders|order-history/i.test(path) && location.hash === SH_SYNC_HASH) {
     await shSync();

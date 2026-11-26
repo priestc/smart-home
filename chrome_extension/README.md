@@ -10,9 +10,10 @@ It sends an order:
 - right after you check out (from the "Order placed, thanks!" page it opens
   each new order's details page in the background),
 - whenever you open an order's details page,
-- for every order of the last 3 months that doesn't have its items yet, when
-  you click **Sync recent orders** in its popup (catches orders placed in the
-  phone app).
+- for every order that doesn't have its items yet, when you click **Sync
+  orders** in its popup (the last 3 months, this year or last year; catches
+  orders placed in the phone app). Orders Amazon has no details page for
+  (some digital and subscription orders) are skipped and remembered.
 
 An order is only sent when its items add up exactly to the page's
 "Item(s) Subtotal". Otherwise it's reported as an error, and the page is

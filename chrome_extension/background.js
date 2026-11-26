@@ -136,6 +136,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       case 'unreadable':
         try { await sendUnreadable(msg); } catch (_) {}
         return {ok: true};
+      case 'skipped': {
+        const skipped = await getLocal('skipped', []);
+        if (!skipped.includes(msg.order_id)) await chrome.storage.local.set({skipped: [msg.order_id, ...skipped].slice(0, 500)});
+        await addLog({order_id: msg.order_id, outcome: 'skipped', error: msg.reason});
+        return {ok: true};
+      }
+      case 'skipped-list':
+        return getLocal('skipped', []);
       case 'is-done':
         return (await getLocal('done', [])).includes(msg.id);
       case 'states':

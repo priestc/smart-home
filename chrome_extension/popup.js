@@ -1,5 +1,5 @@
 const DEFAULT_SERVER = 'http://smart-home.lan';
-const SYNC_URL = 'https://www.amazon.com/your-orders/orders?timeFilter=months-3#smart-home-sync';
+const SYNC_URL = filter => `https://www.amazon.com/your-orders/orders?timeFilter=${filter}#smart-home-sync`;
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 
@@ -8,7 +8,7 @@ async function serverUrl() {
   return (server || DEFAULT_SERVER).replace(/\/+$/, '');
 }
 
-const WORDS = {filled: 'items filled in', created: 'receipt added', already: 'already had its items', error: 'error'};
+const WORDS = {filled: 'items filled in', created: 'receipt added', already: 'already had its items', skipped: 'skipped', error: 'error'};
 
 async function render() {
   const base = await serverUrl();
@@ -24,14 +24,14 @@ async function render() {
     const what = e.receipt_id
       ? `<a href="${esc(base)}/receipts/${e.receipt_id}" target="_blank">${esc(e.order_id || 'receipt')}</a>`
       : esc(e.order_id || 'order');
-    return `<li class="${e.outcome === 'error' ? 'err' : ''}"><span class="muted">${esc(new Date(e.ts).toLocaleString())}</span> `
+    return `<li class="${e.outcome === 'error' ? 'err' : e.outcome === 'skipped' ? 'muted' : ''}"><span class="muted">${esc(new Date(e.ts).toLocaleString())}</span> `
       + `${what}: ${esc(WORDS[e.outcome] || e.outcome)}${e.error ? ` — ${esc(e.error)}` : ''}</li>`;
   }).join('') : '<li class="muted">Nothing sent yet.</li>';
 }
 
 $('sync').addEventListener('click', async () => {
   await chrome.storage.local.set({sync: {state: 'running', message: 'Opening your Amazon order history…', ts: new Date().toISOString()}});
-  await chrome.tabs.create({url: SYNC_URL});
+  await chrome.tabs.create({url: SYNC_URL($('range').value)});
   render();
 });
 
@@ -85,6 +85,13 @@ $('grant').addEventListener('click', async () => {
   if (granted) chrome.runtime.sendMessage({type: 'flush'});
   checkAccess();
 });
+
+// Amazon's order history filters: the last 3 months, or a whole year
+(() => {
+  const y = new Date().getFullYear();
+  $('range').innerHTML = [['months-3', 'last 3 months'], [`year-${y}`, String(y)], [`year-${y - 1}`, String(y - 1)]]
+    .map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
+})();
 
 chrome.storage.onChanged.addListener(render);
 (async () => {
