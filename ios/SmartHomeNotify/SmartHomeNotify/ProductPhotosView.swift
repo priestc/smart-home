@@ -442,7 +442,7 @@ private struct PhotoRow: View {
                     Text("Matched once the receipt it came with is scanned").font(.caption).foregroundColor(.secondary)
                 case "matched":
                     Text(photo.product_name ?? "Product #\(photo.product_id ?? 0)").font(.body)
-                    Text(["manual": "Picked by hand", "receipt": "Taken for this receipt item"][photo.match_source ?? ""]
+                    Text(["manual": "Picked by hand", "receipt": "Taken for this receipt item", "amazon": "From the Amazon order page"][photo.match_source ?? ""]
                          ?? "Matched by the model")
                         .font(.caption).foregroundColor(.secondary)
                 case "unmatched":

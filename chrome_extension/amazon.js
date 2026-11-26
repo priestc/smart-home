@@ -97,6 +97,7 @@ async function shSync() {
     const states = await shSend({type: 'states', ids: [...ids]});
     if (!states || states.error) throw new Error(states ? states.error : 'No answer from the extension');
     const skipped = new Set((await shSend({type: 'skipped-list'})) || []);
+    // 'needs_images': has its items, but its product pictures weren't fetched yet
     const todo = [...ids].filter(i => states.states[i] !== 'detailed' && !skipped.has(i));
     const counts = {sent: 0, queued: 0, already: 0, skipped: 0, error: 0};
     for (let i = 0; i < todo.length; i++) {

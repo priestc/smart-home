@@ -116,7 +116,11 @@ function shParseOrderDetails(doc, url) {
     // Wording only an ordered item has next to it
     const ordered = (/Sold by/i.test(wideText) ? 1 : 0)
       + (/Return or replace|Return items|Eligible through|Return window|Get product support|Track package/i.test(wideText) ? 1 : 0);
-    items.push({name: title, asin, quantity: Math.max(qty, 1), unit_price: price, ordered});
+    // The product's picture, at full size ("71abc._SS142_.jpg" is a thumbnail of "71abc.jpg")
+    const img = [...wide.querySelectorAll('img')].map(i => i.getAttribute('data-a-hires') || i.getAttribute('src') || '')
+      .find(src => /^https:\/\/[^/]*(media-amazon|images-amazon)\.com\/images\/I\//.test(src));
+    const image_url = img ? img.replace(/\._[^/]*_\.(jpg|jpeg|png|webp)$/i, '.$1') : null;
+    items.push({name: title, asin, quantity: Math.max(qty, 1), unit_price: price, ordered, image_url});
   }
   if (!items.length) throw new Error('No products found on the page');
 
@@ -154,7 +158,7 @@ function shParseOrderDetails(doc, url) {
       order_id: orderId,
       order_date: dateMatch ? shIsoDate(dateMatch[1]) : null,
       items: best.map(p => ({name: cands[p.i].name, asin: cands[p.i].asin, quantity: p.quantity,
-                             unit_price: cands[p.i].unit_price})),
+                             unit_price: cands[p.i].unit_price, image_url: cands[p.i].image_url})),
       subtotal, total_before_tax: beforeTax, tax, total,
       url: url || null,
     };

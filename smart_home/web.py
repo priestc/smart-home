@@ -15410,7 +15410,7 @@ function matchLine(ph) {
   switch (ph.status) {
     case 'processing': return '<div class="state warn">Matching to a product…</div>';
     case 'waiting': return '<div class="state warn">Waiting for its receipt to be scanned</div>';
-    case 'matched': return `<div class="state ok">${{manual: 'Picked by hand', receipt: 'Taken for this item after scanning its receipt'}[ph.match_source] || 'Matched by the model'}</div>`;
+    case 'matched': return `<div class="state ok">${{manual: 'Picked by hand', receipt: 'Taken for this item after scanning its receipt', amazon: 'From the Amazon order page'}[ph.match_source] || 'Matched by the model'}</div>`;
     case 'unmatched': return '<div class="state warn">No product</div>';
     default: return `<div class="state err">Matching failed: ${esc(ph.error || 'unknown error')}</div>`;
   }

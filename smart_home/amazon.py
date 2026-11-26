@@ -42,6 +42,10 @@ SUBJECT_LIKE = "Ordered%"
 # "1 of 5 items could not be cancelled: Automotive" (see read_cancellation)
 CANCEL_SENDER_LIKE = "%order-update@amazon.com%"
 CANCEL_SUBJECT_LIKE = "%cancel%"
+# "Your refund for Kasa Smart Plug..." (return@), "Refund on order 112-..."
+# (payments-messages@, e.g. shipping refunded for a late item); see read_refund
+REFUND_SENDERS_LIKE = ("%return@amazon.com%", "%payments-messages@amazon.com%")
+REFUND_SUBJECT_LIKE = "%refund%"
 # Orders before this aren't imported (receipt tracking began in 2025)
 START_DATE = "2025-01-01"
 MERCHANT = "Amazon"
@@ -318,6 +322,7 @@ def read_email(conn: sqlite3.Connection, db_path: str, message_id: str) -> None:
             read_cancellation(conn, db_path, cid)
         except Exception:
             pass  # recorded on the cancellation's row, shown on /receipts
+    reapply_refunds(conn, db_path, oids)
 
 
 # ---- Cancellation emails ----------------------------------------------------------
@@ -452,6 +457,123 @@ def read_cancellation(conn: sqlite3.Connection, db_path: str, message_id: str) -
         conn.commit()
 
 
+# ---- Refund emails --------------------------------------------------------------
+#
+# Each refund becomes a negative line on its order's receipt ("Refund: ..."),
+# in the category of the item it's for when that's clear, and the receipt's
+# total goes down by the amount (tax included, as Amazon refunds it). The
+# line's name_key is "refund:<message id>", so applying an email again
+# replaces its line rather than adding another. Writing a receipt's items
+# again (reading its email again, the export, the extension) drops the
+# lines; reapply_refunds puts them back.
+
+def parse_refund(msg) -> dict:
+    """{orders, amount, names, shipping_only}."""
+    lines = _html_lines(msg)
+    if not lines:
+        raise AmazonError("The email has no HTML part to read")
+    text = "\n".join(lines)
+    m = (re.search(r"Total refund\*?\^?\s*\n?\s*(\$[\d,]+\.\d{2})", text)
+         or re.search(r"refund of (\$[\d,]+\.\d{2})", text)
+         or re.search(r"(\$[\d,]+\.\d{2}) will be credited", text))
+    if not m:
+        raise AmazonError("No refund amount in the email")
+    amount = _price(m.group(1))
+    orders = []
+    for o in _ORDER_RE.findall(text):
+        if o not in orders:
+            orders.append(o)
+    names = []
+    section = False
+    for ln in lines:
+        if ln.startswith("Item: "):
+            names.append(ln[6:].strip())
+        elif re.match(r"Items? to be returned|Item\(s\) in your return", ln):
+            section = True
+        elif section:
+            if ln.startswith(("Quantity", "Order #")):
+                continue
+            if ln.startswith(("View invoice", "Products related", "*If your", "Learn more", "\u00a9")) or "\u00a9" in ln:
+                section = False
+                continue
+            names.append(ln.rstrip(". \u2026").strip())
+    shipping_only = bool(re.search(r"Shipping Refund", text)) and not re.search(r"Item Refund|Item Price", text)
+    if not orders:
+        raise AmazonError("No order number in the refund email")
+    return {"orders": orders, "amount": amount, "names": names, "shipping_only": shipping_only}
+
+
+def _receipt_for_order(conn: sqlite3.Connection, oid: str) -> int | None:
+    for r in conn.execute("SELECT id, raw_json FROM receipts WHERE source='amazon'"):
+        if oid in (json.loads(r["raw_json"] or "{}").get("orders") or []):
+            return r["id"]
+    return None
+
+
+def read_refund(conn: sqlite3.Connection, db_path: str, message_id: str) -> None:
+    """Put one refund email's negative line on its order's receipt and record
+    the outcome on its amazon_emails row. Raises on failure (also recorded)."""
+    em = conn.execute("SELECT * FROM amazon_emails WHERE message_id=?", (message_id,)).fetchone()
+    key = f"refund:{message_id}"
+    try:
+        found = email_archive.get_message(db_path, message_id)
+        if not found:
+            raise AmazonError("The email is no longer in the archive")
+        r = parse_refund(email_archive.parse(found[1]))
+        oid = r["orders"][0]
+        conn.execute("UPDATE amazon_emails SET order_id=? WHERE message_id=?", (oid, message_id))
+        # Take off this email's line wherever it is, giving its amount back
+        for line in conn.execute("SELECT id, receipt_id, total_price FROM receipt_items WHERE name_key=?",
+                                 (key,)).fetchall():
+            conn.execute("UPDATE receipts SET subtotal = ROUND(subtotal - ?, 2), total = ROUND(total - ?, 2) WHERE id=?",
+                         (line["total_price"], line["total_price"], line["receipt_id"]))
+            conn.execute("DELETE FROM receipt_items WHERE id=?", (line["id"],))
+        rid = _receipt_for_order(conn, oid)
+        if rid is None:
+            status, reason = "skipped", f"No receipt for order {oid}"
+        else:
+            items = conn.execute("SELECT description, category FROM receipt_items WHERE receipt_id=? "
+                                 "AND total_price > 0", (rid,)).fetchall()
+            cats = {it["category"] for n in r["names"] for it in items if _same_item(it["description"], n)}
+            category = cats.pop() if len(cats) == 1 else "Other"
+            what = ", ".join(r["names"]) or f"order {oid}"
+            desc = (f"Refund of shipping: {what}" if r["shipping_only"] else f"Refund: {what}")[:300]
+            pos = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM receipt_items WHERE receipt_id=?",
+                               (rid,)).fetchone()[0]
+            conn.execute("INSERT INTO receipt_items (receipt_id, position, description, total_price, category, "
+                         "name_key) VALUES (?, ?, ?, ?, ?, ?)", (rid, pos, desc, -r["amount"], category, key))
+            conn.execute("UPDATE receipts SET subtotal = ROUND(COALESCE(subtotal, 0) - ?, 2), "
+                         "total = ROUND(COALESCE(total, 0) - ?, 2) WHERE id=?", (r["amount"], r["amount"], rid))
+            status = "imported"
+            reason = (f"Refunded {r['amount']:.2f} on receipt {rid}"
+                      + (f" (it covers orders {', '.join(r['orders'])}; all put on {oid}'s receipt)"
+                         if len(r["orders"]) > 1 else ""))
+        conn.execute("UPDATE amazon_emails SET status=?, reason=?, processed_at=? WHERE message_id=?",
+                     (status, reason, _now(), message_id))
+    except Exception as e:
+        msg = str(e) if isinstance(e, AmazonError) else f"{type(e).__name__}: {e}"
+        conn.rollback()
+        conn.execute("UPDATE amazon_emails SET status='error', reason=?, processed_at=? WHERE message_id=?",
+                     (msg, _now(), message_id))
+        raise
+    finally:
+        conn.commit()
+
+
+def reapply_refunds(conn: sqlite3.Connection, db_path: str, order_ids: list[str]) -> None:
+    """Put back the refund lines of these orders after their receipt's items
+    were written again. Each refund records its own outcome."""
+    if not order_ids:
+        return
+    for (mid,) in conn.execute(
+            f"SELECT message_id FROM amazon_emails WHERE kind='refund' AND status='imported' "
+            f"AND order_id IN ({','.join('?' * len(order_ids))}) ORDER BY received_at", order_ids).fetchall():
+        try:
+            read_refund(conn, db_path, mid)
+        except Exception:
+            pass  # recorded on the refund's row, shown on /receipts
+
+
 _lock = threading.Lock()
 
 
@@ -475,6 +597,10 @@ def scan(db_path: str) -> dict:
                     "SELECT message_id, received_at, subject FROM messages WHERE sender LIKE ? AND subject LIKE ? "
                     "AND received_at >= ? AND deleted_at IS NULL ORDER BY received_at",
                     (CANCEL_SENDER_LIKE, CANCEL_SUBJECT_LIKE, START_DATE))]
+                rows += [dict(r, kind="refund") for r in index.execute(
+                    "SELECT message_id, received_at, subject FROM messages WHERE (sender LIKE ? OR sender LIKE ?) "
+                    "AND subject LIKE ? AND received_at >= ? AND deleted_at IS NULL ORDER BY received_at",
+                    (*REFUND_SENDERS_LIKE, REFUND_SUBJECT_LIKE, START_DATE))]
             finally:
                 index.close()
             stale = (datetime.datetime.now() - STALE_AFTER).strftime("%Y-%m-%d %H:%M:%S")
@@ -499,6 +625,8 @@ def scan(db_path: str) -> dict:
                 try:
                     if r["kind"] == "cancellation":
                         read_cancellation(conn, db_path, mid)
+                    elif r["kind"] == "refund":
+                        read_refund(conn, db_path, mid)
                     else:
                         read_email(conn, db_path, mid)
                     n_new += 1
@@ -824,6 +952,7 @@ def import_export(db_path: str, data: bytes, filename: str = "") -> dict:
                     new = _fill_receipt(conn, rid, oids, orders, cats)
                     db.prune_products(conn)
                     conn.commit()
+                    reapply_refunds(conn, db_path, oids)
                     result["n_created" if rid is None else "n_updated"] += 1
                     filled.add(new)
                 except Exception as e:
@@ -902,7 +1031,14 @@ def order_states(conn: sqlite3.Connection, order_ids: list[str]) -> dict[str, st
             known.update(json.loads(raw or "{}").get("orders") or [])
         except json.JSONDecodeError:
             pass
-    return {o: "detailed" if o in detailed else "summary" if o in known else "missing" for o in order_ids}
+    # A receipt with its items whose product pictures weren't fetched yet
+    needs_images = set()
+    for rid in set(detailed.values()):
+        raw = json.loads(conn.execute("SELECT raw_json FROM receipts WHERE id=?", (rid,)).fetchone()[0])
+        if not raw.get("images_tried") and raw.get("detail_source") == "extension":
+            needs_images.update(raw.get("orders") or [])
+    return {o: ("needs_images" if o in needs_images else "detailed") if o in detailed
+            else "summary" if o in known else "missing" for o in order_ids}
 
 
 def _check_page_order(d: dict) -> dict:
@@ -921,7 +1057,8 @@ def _check_page_order(d: dict) -> dict:
         if not name:
             raise AmazonError("An item has no name")
         asin = str(it.get("asin") or "").strip() or None
-        items.append({"name": name, "asin": asin, "quantity": qty, "price": round(each * qty, 2)})
+        items.append({"name": name, "asin": asin, "quantity": qty, "price": round(each * qty, 2),
+                      "image_url": _image_url(it.get("image_url"))})
     if not items:
         raise AmazonError("No items")
     nums = {}
@@ -960,6 +1097,8 @@ def apply_page_order(db_path: str, d: dict) -> dict:
         if oid in detailed:
             result = {"outcome": "already", "receipt_id": detailed[oid]}
             _log_extension(conn, {"order_id": oid, **result})
+            # A sync sends it again for the product pictures (order_states)
+            _attach_images_in_background(db_path, detailed[oid], o["items"])
             return result
         rid, email_id, others = None, None, []
         for r in conn.execute("SELECT id, raw_json, email_id FROM receipts WHERE source='amazon'"):
@@ -1011,9 +1150,11 @@ def apply_page_order(db_path: str, d: dict) -> dict:
         conn.commit()
         result = {"outcome": "created" if created else "filled", "receipt_id": rid}
         _log_extension(conn, {"order_id": oid, **result})
+        reapply_refunds(conn, db_path, [oid])
     finally:
         conn.close()
     _categorize_in_background(db_path, rid)
+    _attach_images_in_background(db_path, rid, o["items"])
     return result
 
 
@@ -1038,6 +1179,75 @@ def _categorize_in_background(db_path: str, rid: int) -> None:
             conn.commit()
         finally:
             conn.close()
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+# Product pictures from the order page. Only Amazon's own image servers are
+# fetched; a product that already has a picture (e.g. a photo you took) keeps it.
+IMAGE_HOSTS = ("m.media-amazon.com", "images-na.ssl-images-amazon.com", "images-amazon.com")
+IMAGE_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _image_url(u) -> str | None:
+    import urllib.parse
+    try:
+        p = urllib.parse.urlparse(str(u or ""))
+    except ValueError:
+        return None
+    host = (p.hostname or "").lower()
+    if p.scheme != "https" or not any(host == h or host.endswith("." + h) for h in IMAGE_HOSTS):
+        return None
+    return p.geturl()
+
+
+def _attach_images_in_background(db_path: str, rid: int, items: list[dict]) -> None:
+    def _bg():
+        from smart_home import product_photos
+        conn = sqlite3.connect(db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        added = []
+        try:
+            for it in items:
+                if not it.get("asin") or not it.get("image_url"):
+                    continue
+                row = conn.execute("SELECT product_id FROM product_keys WHERE name_key=?",
+                                   (f"asin:{it['asin']}",)).fetchone()
+                if row is None or conn.execute("SELECT 1 FROM product_photos WHERE product_id=?",
+                                               (row[0],)).fetchone():
+                    continue
+                try:
+                    resp = httpx.get(it["image_url"], timeout=30, follow_redirects=False)
+                    ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                    if resp.status_code != 200:
+                        raise AmazonError(f"HTTP {resp.status_code}")
+                    if ctype not in ("image/jpeg", "image/png", "image/webp"):
+                        raise AmazonError(f"not a picture ({ctype or 'no type'})")
+                    if len(resp.content) > IMAGE_MAX_BYTES:
+                        raise AmazonError("larger than 10 MB")
+                    photo = product_photos.save_upload(db_path, resp.content, ctype)
+                    conn.execute("UPDATE product_photos SET status='matched', product_id=?, match_source='amazon', "
+                                 "receipt_id=?, processed_at=? WHERE id=?", (row[0], rid, _now(), photo))
+                    conn.commit()
+                    added.append(photo)
+                except Exception as e:
+                    msg = str(e) if isinstance(e, AmazonError) else f"{type(e).__name__}: {e}"
+                    _log_extension(conn, {"receipt_id": rid, "outcome": "error",
+                                          "error": f"Couldn't get the picture of {it['name'][:60]}: {msg}"})
+            raw = conn.execute("SELECT raw_json FROM receipts WHERE id=?", (rid,)).fetchone()
+            if raw:
+                j = json.loads(raw[0] or "{}")
+                j["images_tried"] = True
+                conn.execute("UPDATE receipts SET raw_json=? WHERE id=?", (json.dumps(j), rid))
+                conn.commit()
+        finally:
+            conn.close()
+        # Read brand, size etc. off each picture, like a photo taken in the app
+        for photo in added:
+            try:
+                product_photos.start(db_path, photo, match=False)
+            except Exception as e:
+                print(f"Reading Amazon picture {photo} failed: {e}", flush=True)  # also on the photo's row
 
     threading.Thread(target=_bg, daemon=True).start()
 
