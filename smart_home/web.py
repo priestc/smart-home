@@ -129,6 +129,8 @@ def _crumb_for(path: str) -> tuple[str, str | None] | None:
     from urllib.parse import unquote
     if m := _re.fullmatch(r"/receipts/(\d+)", path):
         return (f"Receipt #{m.group(1)}", "/receipts")
+    if m := _re.fullmatch(r"/receipts/products/(\d+)", path):
+        return (f"Product #{m.group(1)}", "/receipts/items")
     if m := _re.fullmatch(r"/utilities/(\d+)", path):
         return (f"Bill #{m.group(1)}", "/utilities")
     if m := _re.fullmatch(r"/water-chemistry/(.+)", path):
@@ -12676,6 +12678,8 @@ _RECEIPT_DETAIL_PAGE = """\\
     .thumb-cell { width: 52px; }
     .thumb-cell .thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; display: block; background: #f0f4f8; }
     .thumb-cell .no-thumb { width: 44px; height: 44px; border-radius: 6px; border: 1px dashed #d0dce8; }
+      .prod-link { color: #1a2535; font-weight: 600; text-decoration: none; }
+    .prod-link:hover { color: #2e7dd4; text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -12703,7 +12707,7 @@ _RECEIPT_DETAIL_PAGE = """\\
       <div class="card" id="items-card">
         <h2>Items</h2>
         <table>
-          <thead><tr><th></th><th title="The product this line describes. Editing the name renames the product on every receipt.">Product</th><th title="Amount bought on this line. Leave empty to use the product&rsquo;s default from the Products page.">Quantity</th><th class="num">Price</th><th>Category</th><th></th><th></th></tr></thead>
+          <thead><tr><th></th><th title="The product this line describes. Its name comes from a photo of the product (Product Photos page).">Product</th><th title="Amount bought on this line. Leave empty to use the product&rsquo;s default from the Products page.">Quantity</th><th class="num">Price</th><th>Category</th><th></th><th></th></tr></thead>
           <tbody id="items"></tbody>
           <tfoot><tr><td></td><td>Items total</td><td></td><td class="num" id="items-sum"></td><td colspan="3"></td></tr></tfoot>
         </table>
@@ -12800,8 +12804,9 @@ function itemRow(it) {
     : `<div class="no-thumb" title="${it.product_id != null ? 'No picture of this product yet. Take one in the Products tab of the app.' : 'Not matched to a product yet'}"></div>`;
   return `<tr data-id="${it.id ?? ''}">
     <td class="thumb-cell">${thumb}</td>
-    <td><input type="text" data-f="description" value="${esc(it.description)}"
-          title="${it.product_lines > 1 ? `Renames this product on all ${it.product_lines} lines that point to it` : 'Product name'}">
+    <td>${it.id == null || it.product_id == null
+          ? `<input type="text" data-f="description" value="${esc(it.description)}" placeholder="Product name">`
+          : `<a class="prod-link" href="/receipts/products/${it.product_id}">${esc(it.description)}</a>`}
         ${printed && printed !== it.description ? `<div class="printed">${esc(printed)}</div>` : ''}
         ${it.id != null ? `<button class="link-btn" data-change-product>Change product</button>` : ''}${it.product_lines > 1 ? `<span class="shared">on ${it.product_lines} lines</span>` : ''}</td>
     <td class="qty-cell"><input type="text" class="qty" data-f="quantity" inputmode="decimal" value="${it.quantity ?? ''}"
@@ -12946,11 +12951,14 @@ async function saveRow(tr) {
   const get = f => tr.querySelector(`[data-f="${f}"]`).value;
   const price = parseAmount(get('total_price'));
   const qty = parseAmount(get('quantity'));
-  const body = {description: get('description'), total_price: price, quantity: qty, unit: qty == null ? null : get('unit'), category: get('category')};
-  if (!tr.dataset.id && (!body.description.trim() || price == null)) {
+  const body = {total_price: price, quantity: qty, unit: qty == null ? null : get('unit'), category: get('category')};
+  // Only a new line has a name box: product names are set from a photo of the product
+  const nameBox = tr.querySelector('[data-f="description"]');
+  if (nameBox) body.description = nameBox.value;
+  if (!tr.dataset.id && (!(body.description || '').trim() || price == null)) {
     status.className = 'row-status muted'; status.textContent = 'Not saved yet'; return;
   }
-  if (!body.description.trim()) { status.className = 'row-status err'; status.textContent = 'Needs a description'; return; }
+  if (nameBox && !body.description.trim()) { status.className = 'row-status err'; status.textContent = 'Needs a description'; return; }
   if (price == null || Number.isNaN(price)) { status.className = 'row-status err'; status.textContent = 'Needs a price'; return; }
   if (Number.isNaN(qty) || (qty != null && qty <= 0)) { status.className = 'row-status err'; status.textContent = 'Bad quantity'; return; }
   status.className = 'row-status muted'; status.textContent = 'Saving\\u2026';
@@ -13795,6 +13803,8 @@ _RECEIPT_ITEMS_PAGE = """\
     .no-thumb { width: 44px; height: 44px; border-radius: 6px; border: 1px dashed #d0dce8; }
     .cat-cell { min-width: 10rem; }
     .cat-cell select, .cat-cell input { display: block; margin-top: .25rem; width: 100%; padding: .35rem .4rem; border: 1px solid #d0dce8; border-radius: 6px; font-size: .82rem; background: #fff; }
+      .prod-link { color: #1a2535; font-weight: 600; text-decoration: none; }
+    .prod-link:hover { color: #2e7dd4; text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -13802,7 +13812,8 @@ _RECEIPT_ITEMS_PAGE = """\
   <p class="intro">Pictures come from the Products tab in the app. Every line on a receipt points to a product. Lines printed differently, even at different stores,
   can point to the same product: use <b>Change product</b> on a receipt to pick which one. A new receipt line is matched
   to the product its printed text or item number was linked to before, else to a product with the same name, else a
-  new product is made. Renaming a product renames it on every receipt. The default quantity is the amount in one
+  new product is made. A product&rsquo;s name comes from a photo of it: read on the
+  <a href="/receipts/photos">Product Photos</a> page, then <b>Use</b>. The default quantity is the amount in one
   purchase (e.g. a 21.7&nbsp;oz pizza); a quantity on a receipt line, such as a printed weight, overrides it.</p>
   <div class="toolbar">
     <input type="search" id="filter" placeholder="Filter by name, printed text or store">
@@ -13872,9 +13883,7 @@ function render() {
     const idx = items.indexOf(it);
     return `<tr data-idx="${idx}">
       <td>${it.photo_id ? `<a href="/receipts/photos#photo-${it.photo_id}" title="Reassign this picture"><img class="thumb" loading="lazy" src="/api/product-photos/${it.photo_id}/image" alt=""></a>` : '<div class="no-thumb" title="No picture yet. Take one in the Products tab of the app, or assign one on the Product Photos page."></div>'}</td>
-      <td><div class="name-cell">
-        <input type="text" data-f="name" value="${esc(it.name || '')}">
-      </div></td>
+      <td><a class="prod-link" href="/receipts/products/${it.id}">${esc(it.name || '(no name)')}</a></td>
       <td>${it.printed ? it.printed.split(' | ').map(t => `<div class="raw">${esc(t)}</div>`).join('') : '<span class="muted">(entered by hand)</span>'}</td>
       <td class="muted">${esc(it.merchants) || '&mdash;'}</td>
       <td class="num">${it.times_bought}&times;<div class="muted">${esc(it.last_bought)}</div></td>
@@ -13894,12 +13903,11 @@ const UNITS = ['oz', 'lb', 'ea'];
 
 function rowValues(tr) {
   const get = f => tr.querySelector(`[data-f="${f}"]`).value.trim();
-  return {name: get('name'), quantity: get('quantity'), unit: get('unit')};
+  return {quantity: get('quantity'), unit: get('unit')};
 }
 // Which fields differ from what's saved, as an API body (null if none)
 function changes(tr) {
   const it = items[+tr.dataset.idx], v = rowValues(tr), body = {};
-  if (v.name !== (it.name || '')) body.name = v.name;
   const savedQty = it.quantity == null ? '' : String(it.quantity);
   if (v.quantity !== savedQty || (v.quantity && v.unit !== it.unit)) {
     body.quantity = v.quantity === '' ? null : +v.quantity;
@@ -13909,7 +13917,6 @@ function changes(tr) {
 }
 function markDirty(tr) {
   const it = items[+tr.dataset.idx], v = rowValues(tr);
-  tr.querySelector('[data-f="name"]').classList.toggle('dirty', v.name !== (it.name || ''));
   tr.querySelector('[data-f="quantity"]').classList.toggle('dirty',
     v.quantity !== (it.quantity == null ? '' : String(it.quantity)) || (!!v.quantity && v.unit !== it.unit));
   tr.querySelector('[data-save]').disabled = !changes(tr);
@@ -13929,19 +13936,16 @@ async function save(tr) {
   status.className = 'status';
   status.textContent = 'Saving\u2026';
   try {
-    if ('name' in body && !body.name) throw new Error('A product needs a name');
     const res = await fetchJSON(`/api/products/${it.id}`, {
       method: 'PATCH',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
-    if ('name' in body) it.name = body.name;
     if ('quantity' in body) { it.quantity = body.quantity; it.unit = body.unit; }
-    tr.querySelector('[data-f="name"]').value = it.name || '';
     tr.querySelector('[data-f="quantity"]').value = it.quantity ?? '';
     markDirty(tr);
     status.className = 'status ok';
-    status.textContent = res.renamed ? `Saved (${res.renamed} lines renamed)` : 'Saved';
+    status.textContent = 'Saved';
   } catch (e) {
     markDirty(tr);
     status.className = 'status err';
@@ -14565,6 +14569,163 @@ def receipt_items_page():
     return Response(_RECEIPT_ITEMS_PAGE, mimetype="text/html")
 
 
+_PRODUCT_PAGE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Product &mdash; Smart Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    a { color: #2e7dd4; text-decoration: none; } a:hover { text-decoration: underline; }
+    .card { background: #fff; border-radius: 12px; padding: 1.1rem 1.3rem; margin-bottom: 1.1rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); }
+    .card h2 { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-bottom: .8rem; }
+    .head { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 1.3rem; align-items: start; }
+    @media (max-width: 700px) { .head { grid-template-columns: 1fr; } }
+    .photo img { width: 100%; border-radius: 10px; display: block; background: #f0f4f8; }
+    .no-photo { aspect-ratio: 4 / 3; border-radius: 10px; background: #eef2f6; display: flex; align-items: center; justify-content: center; color: #7a90a8; font-size: .85rem; text-align: center; padding: 1rem; }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -.02em; margin-bottom: .2rem; }
+    .sub { color: #4a6080; font-size: .9rem; margin-bottom: .9rem; }
+    .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .3rem .9rem; font-size: .9rem; }
+    .facts dt { color: #7a90a8; }
+    .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: .8rem; margin-top: 1rem; }
+    .tile { background: #f7fafc; border-radius: 8px; padding: .6rem .75rem; }
+    .tile .v { font-size: 1.35rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .tile .l { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; margin-top: .1rem; }
+    .headline { font-size: 1rem; margin-bottom: .9rem; }
+    .headline b { font-variant-numeric: tabular-nums; }
+    .bars { display: grid; grid-template-columns: minmax(8rem, 16rem) minmax(0, 1fr) 6.5rem; gap: 2px .8rem; align-items: center; font-size: .85rem; }
+    .bars .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bars .this { font-weight: 700; }
+    .track { height: 14px; position: relative; }
+    .bar { height: 100%; border-radius: 0 4px 4px 0; background: #9ec5ee; min-width: 2px; }
+    .bar.this { background: #1f5fa8; }
+    .row:hover .bar:not(.this) { background: #7fb0e6; }
+    .row { display: contents; }
+    .val { text-align: right; font-variant-numeric: tabular-nums; color: #1a2535; }
+    .median { font-size: .75rem; color: #7a90a8; margin-top: .6rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+    th { text-align: left; font-size: .7rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; padding: .45rem .55rem; border-bottom: 1px solid #e8eef4; white-space: nowrap; }
+    td { padding: .45rem .55rem; border-bottom: 1px solid #f0f4f8; }
+    tr:last-child td { border-bottom: none; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .raw { font-family: ui-monospace, Menlo, monospace; font-size: .8rem; color: #4a6080; }
+    .muted { color: #7a90a8; font-size: .85rem; }
+    .err { color: #b00; }
+  </style>
+</head>
+<body>
+  <div id="main"><div class="card muted">Loading&hellip;</div></div>
+<script>
+function showNetworkError(msg) {
+  let el = document.getElementById('_net_err');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_net_err';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#b00;color:#fff;padding:8px 16px;z-index:9999;font-size:14px;text-align:center';
+    document.body.prepend(el);
+  }
+  el.textContent = '⚠ ' + msg;
+}
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+const PID = +location.pathname.split('/').pop();
+const STORAGE = {frozen: 'Frozen', refrigerated: 'Refrigerated', shelf: 'Shelf-stable'};
+const money = v => v == null ? '—' : '$' + Number(v).toFixed(2);
+// Per oz in cents under a dollar ("12.4¢/oz"), else dollars; per package as "$3.98 each"
+function unitPrice(v, basis) {
+  if (v == null) return '—';
+  if (basis === 'oz') return v < 1 ? (v * 100).toFixed(1) + '¢/oz' : '$' + v.toFixed(2) + '/oz';
+  return '$' + v.toFixed(2) + ' each';
+}
+const ordinal = n => n + (['th', 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || ['th', 'st', 'nd', 'rd'][n % 100] || 'th');
+const tile = (v, l) => `<div class="tile"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+function fmtDate(d) {
+  if (!d) return '—';
+  return new Date(d + 'T12:00:00').toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'});
+}
+
+function render(d) {
+  const p = d.product, f = d.frequency, info = d.info || {};
+  document.title = `${p.name} — Smart Home`;
+  const size = p.quantity != null ? `${+p.quantity} ${p.unit}` : null;
+  const facts = [
+    ['Net weight', size], ['Count', p.package_count != null ? `${p.package_count} per package` : null],
+    ['Storage', STORAGE[p.storage]], ['Brand', info.brand], ['Size as printed', info.size_text],
+    ['UPC', info.upc], ['Other', info.other_text],
+  ].filter(([, v]) => v);
+  const head = `<div class="card head">
+    <div class="photo">${p.photo_id
+      ? `<a href="/receipts/photos#photo-${p.photo_id}" title="See what was read from this photo"><img src="/api/product-photos/${p.photo_id}/image" alt="${esc(p.name)}"></a>`
+      : '<div class="no-photo">No picture yet. The app asks for one after a receipt with this product is scanned.</div>'}</div>
+    <div>
+      <h1>${esc(p.name)}</h1>
+      <div class="sub">${esc([d.category, p.subcategory].filter(Boolean).join(' · ')) || 'No category'}</div>
+      ${facts.length ? `<dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`
+        : '<div class="muted">No package details yet. They come from a photo of the product (Read, then Use, on the Product Photos page).</div>'}
+      <div class="tiles">
+        ${tile(f.times_bought + '×', 'Times bought')}
+        ${tile(f.avg_days_between != null ? Math.round(f.avg_days_between) + ' days' : '—', 'Bought about every')}
+        ${tile(fmtDate(f.last), 'Last bought')}
+        ${tile(f.next_expected ? fmtDate(f.next_expected) : '—', 'Next expected')}
+        ${tile(money(f.spent_last_year), 'Spent, last 12 months')}
+      </div>
+    </div>
+  </div>`;
+
+  let compare;
+  const c = d.comparison;
+  if (!c) {
+    compare = '<div class="muted">Not enough price information to compare yet.</div>';
+  } else if (c.of < 2) {
+    compare = `<div class="headline">${unitPrice(c.unit_price, c.basis)}. No other product in ${esc(c.group_name)} is priced ${c.basis === 'oz' ? 'by weight' : 'per package'} to compare with.</div>`;
+  } else {
+    const max = Math.max(...c.products.map(x => x.unit_price));
+    const vs = c.median_others ? Math.round((c.unit_price / c.median_others - 1) * 100) : null;
+    const vsText = vs == null ? '' : vs === 0 ? ', the same as the median of the others'
+      : `, ${Math.abs(vs)}% ${vs < 0 ? 'less' : 'more'} than the median of the others (${unitPrice(c.median_others, c.basis)})`;
+    compare = `<div class="headline"><b>${unitPrice(c.unit_price, c.basis)}</b>: the ${c.rank === 1 ? '' : ordinal(c.rank) + ' '}cheapest of
+      ${c.of} products in ${esc(c.group_name)}${vsText}.</div>
+      <div class="bars" role="table" aria-label="Price ${c.basis === 'oz' ? 'per ounce' : 'per package'}, cheapest first">
+      ${c.products.map(x => `<div class="row" role="row" title="${esc(x.name)}: ${unitPrice(x.unit_price, c.basis)}, bought ${x.times_bought}×">
+        <div class="name${x.this ? ' this' : ''}" role="cell">${x.this ? esc(x.name) + ' (this product)' : `<a href="/receipts/products/${x.id}">${esc(x.name)}</a>`}</div>
+        <div class="track" role="cell"><div class="bar${x.this ? ' this' : ''}" style="width:${(x.unit_price / max * 100).toFixed(1)}%"></div></div>
+        <div class="val" role="cell">${unitPrice(x.unit_price, c.basis)}</div></div>`).join('')}
+      </div>
+      <div class="median">Each product's average over its last three purchases, ${c.basis === 'oz' ? 'per ounce of net weight' : 'per package (no net weight known)'}.
+        Only products priced the same way are compared.</div>`;
+  }
+
+  const rows = d.purchases.map(x => `<tr>
+    <td>${fmtDate(x.day)}</td><td>${esc(x.merchant || '—')}</td><td class="raw">${esc(x.raw_text || '')}</td>
+    <td class="num">${x.quantity != null ? `${+x.quantity} ${esc(x.unit || '')}` : ''}</td>
+    <td class="num">${money(x.price)}</td><td class="num">${unitPrice(x.unit_price, x.basis)}</td>
+    <td><a href="/receipts/${x.receipt_id}">Receipt #${x.receipt_id}</a></td></tr>`).join('');
+  document.getElementById('main').innerHTML = head
+    + `<div class="card"><h2>Price against ${c ? esc(c.group === 'subcategory' ? 'its sub-category' : 'its category') : 'similar products'}</h2>${compare}</div>`
+    + `<div class="card"><h2>Purchases</h2>${d.purchases.length ? `<table><thead><tr><th>Date</th><th>Store</th><th>Printed as</th>
+        <th class="num">Quantity</th><th class="num">Price</th><th class="num">Unit price</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<div class="muted">No purchases on scanned receipts.</div>'}</div>`;
+}
+
+fetch(`/api/products/${PID}/detail`)
+  .then(async r => {
+    const data = await r.json().catch(() => null);
+    if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
+    return data;
+  })
+  .then(render)
+  .catch(e => {
+    showNetworkError('Could not load this product: ' + e.message);
+    document.getElementById('main').innerHTML = `<div class="card err">Could not load this product: ${esc(e.message)}</div>`;
+  });
+</script>
+</body>
+</html>"""
+
+
 _PRODUCT_PHOTOS_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -14815,7 +14976,7 @@ function card(ph) {
     </div>
     <div class="col live">
       <h2><span>Product (live)</span></h2>
-      <div class="title${name ? '' : ' none'}">${esc(name || 'No product')}</div>
+      <div class="title${name ? '' : ' none'}">${prod ? `<a href="/receipts/products/${prod.id}">${esc(name)}</a>` : esc(name || 'No product')}</div>
       ${prod ? `<div class="kv"><span>Net weight:</span> ${esc(fmtQty(prod.quantity, prod.unit))}</div>
         <div class="kv"><span>Count:</span> ${esc(prod.package_count ?? '—')}</div>
         <div class="kv"><span>Storage:</span> ${esc(STORAGE[prod.storage] || '—')}</div>
@@ -15042,6 +15203,116 @@ load();
 </script>
 </body>
 </html>"""
+
+
+def _line_unit_price(price, qty, unit, prod_qty, prod_unit):
+    """Price per oz when the weight is known (from the line, else the product's
+    net weight times the packages bought), else per package. Returns (value, basis)."""
+    to_oz = {'oz': 1, 'lb': 16}
+    packages = qty if unit == 'ea' and qty else 1
+    if unit in to_oz and qty:
+        oz = qty * to_oz[unit]
+    elif prod_unit in to_oz and prod_qty:
+        oz = packages * prod_qty * to_oz[prod_unit]
+    else:
+        return price / packages, 'each'
+    return price / oz, 'oz'
+
+
+@app.get("/api/products/<int:pid>/detail")
+def api_product_detail(pid):
+    """One product: its picture and package info, every purchase, how often
+    it's bought, and its price per oz (or per package) against the other
+    products in its sub-category, or else its category."""
+    from statistics import median
+    with _conn() as conn:
+        prod = conn.execute(
+            "SELECT p.id, p.name, p.quantity, p.unit, p.count AS package_count, p.storage, p.subcategory_id, "
+            "s.name AS subcategory, (SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = p.id) AS photo_id "
+            "FROM products p LEFT JOIN subcategories s ON s.id = p.subcategory_id WHERE p.id=?", (pid,)).fetchone()
+        if prod is None:
+            return jsonify({'error': 'Product not found'}), 404
+        prod = dict(prod)
+        info = None
+        if prod['photo_id']:
+            raw = conn.execute("SELECT info_json FROM product_photos WHERE id=?", (prod['photo_id'],)).fetchone()[0]
+            info = json.loads(raw) if raw else None
+        # Every line of every product, newest first: this product's purchases and its peers' prices
+        lines = conn.execute(
+            "SELECT i.id, i.receipt_id, i.product_id, i.quantity, i.unit, i.total_price, i.category, i.raw_text, "
+            "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10)) AS day, r.merchant, "
+            "p.name, p.quantity AS pq, p.unit AS pu, p.subcategory_id "
+            "FROM receipt_items i JOIN receipts r ON r.id = i.receipt_id JOIN products p ON p.id = i.product_id "
+            "WHERE r.kind = 'receipt' ORDER BY day DESC, i.id DESC").fetchall()
+
+    by_product: dict[int, list] = {}
+    for ln in lines:
+        by_product.setdefault(ln['product_id'], []).append(ln)
+    mine = [ln for ln in by_product.get(pid, []) if ln['total_price'] > 0]
+
+    def recent_unit_price(rows):
+        """Average over the last three purchases, in the basis of the newest."""
+        pts = [_line_unit_price(r['total_price'], r['quantity'], r['unit'], r['pq'], r['pu'])
+               for r in rows if r['total_price'] > 0][:3]
+        if not pts:
+            return None, None
+        basis = pts[0][1]
+        vals = [v for v, b in pts if b == basis]
+        return sum(vals) / len(vals), basis
+
+    def main_category(rows):
+        cats = [r['category'] for r in rows]
+        return max(set(cats), key=cats.count) if cats else None
+
+    purchases = []
+    for ln in mine:
+        up, basis = _line_unit_price(ln['total_price'], ln['quantity'], ln['unit'], ln['pq'], ln['pu'])
+        purchases.append({'receipt_id': ln['receipt_id'], 'day': ln['day'], 'merchant': ln['merchant'],
+                          'raw_text': ln['raw_text'], 'quantity': ln['quantity'], 'unit': ln['unit'],
+                          'price': ln['total_price'], 'unit_price': round(up, 4), 'basis': basis})
+
+    days = sorted({ln['day'] for ln in mine})
+    freq = {'times_bought': len(mine), 'first': days[0] if days else None, 'last': days[-1] if days else None,
+            'total_spent': round(sum(ln['total_price'] for ln in mine), 2),
+            'avg_days_between': None, 'next_expected': None}
+    if len(days) >= 2:
+        d0, d1 = (datetime.date.fromisoformat(d) for d in (days[0], days[-1]))
+        gap = (d1 - d0).days / (len(days) - 1)
+        freq['avg_days_between'] = round(gap, 1)
+        freq['next_expected'] = (d1 + datetime.timedelta(days=round(gap))).isoformat()
+    last_year = (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
+    freq['spent_last_year'] = round(sum(ln['total_price'] for ln in mine if ln['day'] >= last_year), 2)
+
+    category = main_category(by_product.get(pid, []))
+    my_price, basis = recent_unit_price(by_product.get(pid, []))
+    group = 'subcategory' if prod['subcategory_id'] else 'category'
+    peers = []
+    if my_price is not None:
+        for opid, rows in by_product.items():
+            in_group = (rows[0]['subcategory_id'] == prod['subcategory_id'] if prod['subcategory_id']
+                        else main_category(rows) == category)
+            if not in_group:
+                continue
+            price, b = recent_unit_price(rows)
+            if price is None or b != basis:
+                continue   # savings lines, or priced per package when this is per oz (or the reverse)
+            peers.append({'id': opid, 'name': rows[0]['name'], 'unit_price': round(price, 4),
+                          'times_bought': sum(1 for r in rows if r['total_price'] > 0), 'this': opid == pid})
+        peers.sort(key=lambda x: x['unit_price'])
+    comparison = None
+    if peers:
+        others = [x['unit_price'] for x in peers if not x['this']]
+        comparison = {'group': group, 'group_name': prod['subcategory'] if group == 'subcategory' else category,
+                      'basis': basis, 'unit_price': round(my_price, 4),
+                      'rank': next(i for i, x in enumerate(peers) if x['this']) + 1, 'of': len(peers),
+                      'median_others': round(median(others), 4) if others else None, 'products': peers}
+    return jsonify({'product': prod, 'info': info, 'category': category, 'frequency': freq,
+                    'purchases': purchases, 'comparison': comparison})
+
+
+@app.get("/receipts/products/<int:pid>")
+def product_page(pid):
+    return Response(_PRODUCT_PAGE, mimetype="text/html")
 
 
 @app.get("/receipts/photos")
