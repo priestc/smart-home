@@ -95,14 +95,27 @@ async function shSync() {
     let page = document;
     for (let n = 1; n < SH_SYNC_PAGES; n++) {
       const next = shNextPageUrl(page);
-      if (!next) break;
+      if (!next) {
+        // A full page of orders with no Next link: probably a link this
+        // doesn't recognize. Keep the page so the reader can be fixed.
+        if (shFindOrderIds(page).length >= 10) {
+          await shSend({type: 'unreadable', order_id: '', url: n === 1 ? location.href : 'order history page ' + (n),
+            error: `No "Next" link found on order history page ${n} (it has ${shFindOrderIds(page).length} orders); only those were synced`,
+            html: shPageHtml(page)});
+        }
+        break;
+      }
       progress({state: 'running', message: `Finding orders: page ${n + 1} (${ids.size} so far)\u2026`});
       const resp = await shFetch(next, {credentials: 'include'});
       if (!resp.ok) throw new Error(`amazon.com returned HTTP ${resp.status} for order history page ${n + 1}`);
       page = new DOMParser().parseFromString(await resp.text(), 'text/html');
       const before = ids.size;
       shFindOrderIds(page).forEach(i => ids.add(i));
-      if (ids.size === before) break;
+      if (ids.size === before) {
+        await shSend({type: 'unreadable', order_id: '', url: next,
+          error: `Order history page ${n + 1} had no new orders; stopped there`, html: shPageHtml(page)});
+        break;
+      }
       await shSleep(1000);
     }
     if (!ids.size) throw new Error('No orders found on the order history page (are you signed in?)');
