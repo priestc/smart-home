@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Smart Home: Amazon orders",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "Sends the items of your Amazon orders to your smart-home receipts.",
   "permissions": [
     "storage",

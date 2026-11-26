@@ -83,6 +83,9 @@ function shParseOrderDetails(doc, url) {
   if (tax == null && beforeTax != null) tax = Math.round((total - beforeTax) * 100) / 100;
   if (tax == null) throw new Error('No tax on the page');
   if (beforeTax == null) beforeTax = Math.round((total - tax) * 100) / 100;
+  // Paid partly from the Amazon balance (often refunds credited to it): a way
+  // of paying, not a discount, so smart-home counts the full amount
+  const giftCard = Math.abs(shAmountAfter(text, 'Gift Card Amount') || 0);
 
   // Product links, the longest-text one per ASIN being its title
   const titles = new Map();
@@ -183,7 +186,7 @@ function shParseOrderDetails(doc, url) {
       order_date: dateMatch ? shIsoDate(dateMatch[1]) : null,
       items: best.map(p => ({name: cands[p.i].name, asin: cands[p.i].asin, quantity: p.quantity,
                              unit_price: cands[p.i].unit_price, image_url: cands[p.i].image_url})),
-      subtotal, total_before_tax: beforeTax, tax, total,
+      subtotal, total_before_tax: beforeTax, tax, total, gift_card: giftCard,
       url: url || null,
     };
   }

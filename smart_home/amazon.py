@@ -1074,11 +1074,22 @@ def _check_page_order(d: dict) -> dict:
     if abs(extra) >= 0.01:
         items.append({"name": "Shipping" if extra > 0 else "Discounts and credits", "asin": None, "quantity": 1,
                       "price": extra, "category": "Fees & Deposits" if extra > 0 else "Other"})
-    if abs(round(nums["total_before_tax"] + nums["tax"], 2) - nums["total"]) >= 0.015:
-        raise AmazonError(f"Total before tax {nums['total_before_tax']:.2f} + tax {nums['tax']:.2f} "
-                          f"isn't the Grand Total {nums['total']:.2f}")
+    # Paid partly from the Amazon balance (a gift card, or refunds credited
+    # to it): that's how it was paid, not a discount, so the receipt is the
+    # full amount. (A refund credited to the balance is already a negative
+    # line on its own order's receipt.)
+    try:
+        gift = round(abs(float(d.get("gift_card") or 0)), 2)
+    except (TypeError, ValueError):
+        raise AmazonError("gift_card must be a number")
+    spent = round(nums["total_before_tax"] + nums["tax"], 2)
+    if abs(spent - gift - nums["total"]) >= 0.015:
+        raise AmazonError(f"Total before tax {nums['total_before_tax']:.2f} + tax {nums['tax']:.2f}"
+                          + (f" - gift card {gift:.2f}" if gift else "")
+                          + f" isn't the Grand Total {nums['total']:.2f}")
     date = _local_date(str(d.get("order_date") or "")) or None
-    return {"order_id": oid, "date": date, "items": items, "tax": nums["tax"], "total": nums["total"]}
+    return {"order_id": oid, "date": date, "items": items, "tax": nums["tax"], "total": spent, "gift_card": gift,
+            "grand_total": nums["total"]}
 
 
 def apply_page_order(db_path: str, d: dict) -> dict:
@@ -1123,9 +1134,10 @@ def apply_page_order(db_path: str, d: dict) -> dict:
         if rid is not None:
             # The page shows what was charged after any cancellations, so it
             # can come to less than the order email did: the page wins, and
-            # the note says by how much
+            # the note says by how much. (The email's total is after any gift
+            # card, like the page's Grand Total.)
             old_total = conn.execute("SELECT total FROM receipts WHERE id=?", (rid,)).fetchone()[0]
-            if old_total is not None and abs(old_total - o["total"]) >= 0.01:
+            if old_total is not None and abs(old_total - o["grand_total"]) >= 0.01:
                 changed = old_total
         # Until the model picks, a product keeps the category it had before
         for it in o["items"]:
@@ -1140,8 +1152,11 @@ def apply_page_order(db_path: str, d: dict) -> dict:
         notes = (f"From the order's page on amazon.com (order {oid}), read by the Chrome extension. "
                  "Tax is what Amazon charged.")
         if changed is not None:
-            notes += (f" The order email came to {changed:.2f}; the page shows {o['total']:.2f} "
+            notes += (f" The order email came to {changed:.2f}; the page shows {o['grand_total']:.2f} "
                       "(items cancelled or changed since the order was placed).")
+        if o["gift_card"]:
+            notes += (f" {o['gift_card']:.2f} of it was paid from the Amazon balance (gift card or refunds "
+                      "credited there); the total is the full amount.")
         created = rid is None
         rid = _write_receipt(conn, rid, [oid], o["items"], o["date"], o["tax"], o["total"], notes, "extension", cats)
         if created and email_id:
