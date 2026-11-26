@@ -438,12 +438,15 @@ def assign_taken_for(db_path: str, photo_id: int, product_id: int, receipt_id: i
 
 def read_unread(db_path: str) -> int:
     """Read the package info of every photo never read (e.g. from before photos
-    were read). Doesn't match them. Returns how many were queued."""
+    were read), except pictures from Amazon. Doesn't match them. Returns how
+    many were queued."""
     conn = sqlite3.connect(db_path, timeout=30)
     try:
         with _pair_lock:
             ids = [r[0] for r in conn.execute(
-                "SELECT id FROM product_photos WHERE info_status IS NULL ORDER BY id") if not is_running(r[0])]
+                # Pictures from Amazon's order pages are read only when asked, from the product's page
+                "SELECT id FROM product_photos WHERE info_status IS NULL AND COALESCE(match_source, '') != 'amazon' "
+                "ORDER BY id") if not is_running(r[0])]
             if not ids:
                 return 0
             _queue(conn, ids, match=False)

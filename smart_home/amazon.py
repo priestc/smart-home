@@ -1206,7 +1206,6 @@ def _attach_images_in_background(db_path: str, rid: int, items: list[dict]) -> N
         from smart_home import product_photos
         conn = sqlite3.connect(db_path, timeout=30)
         conn.row_factory = sqlite3.Row
-        added = []
         try:
             for it in items:
                 if not it.get("asin") or not it.get("image_url"):
@@ -1229,7 +1228,6 @@ def _attach_images_in_background(db_path: str, rid: int, items: list[dict]) -> N
                     conn.execute("UPDATE product_photos SET status='matched', product_id=?, match_source='amazon', "
                                  "receipt_id=?, processed_at=? WHERE id=?", (row[0], rid, _now(), photo))
                     conn.commit()
-                    added.append(photo)
                 except Exception as e:
                     msg = str(e) if isinstance(e, AmazonError) else f"{type(e).__name__}: {e}"
                     _log_extension(conn, {"receipt_id": rid, "outcome": "error",
@@ -1242,12 +1240,8 @@ def _attach_images_in_background(db_path: str, rid: int, items: list[dict]) -> N
                 conn.commit()
         finally:
             conn.close()
-        # Read brand, size etc. off each picture, like a photo taken in the app
-        for photo in added:
-            try:
-                product_photos.start(db_path, photo, match=False)
-            except Exception as e:
-                print(f"Reading Amazon picture {photo} failed: {e}", flush=True)  # also on the photo's row
+        # Not read by the model: Amazon's pictures rarely need it, and it's slow.
+        # The product's page has a button to read one.
 
     threading.Thread(target=_bg, daemon=True).start()
 

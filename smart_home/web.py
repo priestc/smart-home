@@ -15134,6 +15134,9 @@ _PRODUCT_PAGE = r"""<!DOCTYPE html>
     .raw { font-family: ui-monospace, Menlo, monospace; font-size: .8rem; color: #4a6080; }
     .muted { color: #7a90a8; font-size: .85rem; }
     .err { color: #b00; }
+      .read-box { margin-top: .6rem; font-size: .82rem; display: grid; gap: .35rem; }
+    .read-box button { justify-self: start; background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem .8rem; font-size: .82rem; cursor: pointer; }
+    .read-box button:disabled { opacity: .5; cursor: default; }
   </style>
 </head>
 <body>
@@ -15180,7 +15183,8 @@ function render(d) {
   const head = `<div class="card head">
     <div class="photo">${p.photo_id
       ? `<a href="/receipts/photos#photo-${p.photo_id}" title="See what was read from this photo"><img src="/api/product-photos/${p.photo_id}/image" alt="${esc(p.name)}"></a>`
-      : '<div class="no-photo">No picture yet. The app asks for one after a receipt with this product is scanned.</div>'}</div>
+      : '<div class="no-photo">No picture yet. The app asks for one after a receipt with this product is scanned.</div>'}
+      ${p.photo_id ? readBox(p) : ''}</div>
     <div>
       <h1>${esc(p.name)}</h1>
       <div class="sub">${esc([d.category, p.subcategory].filter(Boolean).join(' · ')) || 'No category'}</div>
@@ -15231,17 +15235,56 @@ function render(d) {
         : '<div class="muted">No purchases on scanned receipts.</div>'}</div>`;
 }
 
-fetch(`/api/products/${PID}/detail`)
-  .then(async r => {
-    const data = await r.json().catch(() => null);
-    if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
-    return data;
-  })
-  .then(render)
-  .catch(e => {
-    showNetworkError('Could not load this product: ' + e.message);
-    document.getElementById('main').innerHTML = `<div class="card err">Could not load this product: ${esc(e.message)}</div>`;
-  });
+// Reading the picture with the vision model (brand, size, UPC...). Pictures
+// from Amazon order pages aren't read unless asked, here.
+function readBox(p) {
+  const ph = p.photo || {};
+  if (ph.info_status === 'reading') return '<div class="read-box muted">Reading the picture\u2026 (this page updates when it\u2019s done)</div>';
+  const label = ph.info_status ? 'Read the picture again' : 'Read the picture with the model';
+  return `<div class="read-box">
+    ${ph.match_source === 'amazon' && !ph.info_status ? '<div class="muted">Picture from the Amazon order page, not read yet.</div>' : ''}
+    ${ph.info_status === 'error' ? `<div class="err">Reading failed: ${esc(ph.info_error || 'unknown error')}</div>` : ''}
+    <button class="btn secondary" id="read-photo" data-photo="${p.photo_id}">${label}</button>
+    ${ph.info_status === 'done' ? `<div class="muted">Read. <a href="/receipts/photos#photo-${p.photo_id}">Review it and Use</a> to copy it to the product.</div>` : ''}
+  </div>`;
+}
+
+let pollTimer = null;
+function loadProduct() {
+  clearTimeout(pollTimer);
+  return fetch(`/api/products/${PID}/detail`)
+    .then(async r => {
+      const data = await r.json().catch(() => null);
+      if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
+      return data;
+    })
+    .then(d => {
+      render(d);
+      if (d.product.photo && d.product.photo.info_status === 'reading') pollTimer = setTimeout(loadProduct, 3000);
+    })
+    .catch(e => {
+      showNetworkError('Could not load this product: ' + e.message);
+      document.getElementById('main').innerHTML = `<div class="card err">Could not load this product: ${esc(e.message)}</div>`;
+    });
+}
+document.addEventListener('click', async e => {
+  const btn = e.target.closest('#read-photo');
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/product-photos/${btn.dataset.photo}/retry`, {method: 'POST'});
+    if (!r.ok) {
+      const data = await r.json().catch(() => null);
+      throw new Error((data && data.error) || `HTTP ${r.status}`);
+    }
+  } catch (err) {
+    showNetworkError('Could not start reading the picture: ' + err.message);
+    btn.disabled = false;
+    return;
+  }
+  loadProduct();
+});
+loadProduct();
 </script>
 </body>
 </html>"""
@@ -15529,7 +15572,8 @@ function render() {
   document.querySelector('[data-tab=none]').textContent = `Need a product (${photos.filter(needsProduct).length})`;
   document.querySelector('[data-tab=hidden]').textContent = `Hidden (${photos.filter(isHidden).length})`;
   document.getElementById('count').textContent = `${shown.length} of ${photos.length} photos`;
-  const unread = photos.filter(p => p.info_status == null).length;
+  // Pictures from Amazon order pages are read one at a time, from the product's page
+  const unread = photos.filter(p => p.info_status == null && p.match_source !== 'amazon').length;
   const rb = document.getElementById('read-unread');
   rb.hidden = !unread;
   rb.textContent = `Read ${unread} photo${unread === 1 ? '' : 's'} not read yet`;
@@ -15755,9 +15799,20 @@ def api_product_detail(pid):
             return jsonify({'error': 'Product not found'}), 404
         prod = dict(prod)
         info = None
+        prod['photo'] = None
         if prod['photo_id']:
-            raw = conn.execute("SELECT info_json FROM product_photos WHERE id=?", (prod['photo_id'],)).fetchone()[0]
+            ph = conn.execute("SELECT info_json, info_status, info_error, match_source FROM product_photos WHERE id=?",
+                              (prod['photo_id'],)).fetchone()
+            raw = ph['info_json']
             info = json.loads(raw) if raw else None
+            from smart_home import product_photos as _photos
+            status = ph['info_status']
+            if status == 'reading' and not _photos.is_running(prod['photo_id']):
+                status = 'error'  # interrupted, e.g. by a restart
+            prod['photo'] = {'info_status': status, 'info_error': ph['info_error'] if status == 'error' else None,
+                             'match_source': ph['match_source']}
+            if ph['info_status'] == 'reading' and status == 'error':
+                prod['photo']['info_error'] = 'Reading was interrupted; read it again'
         # Every line of every product, newest first: this product's purchases and its peers' prices
         lines = conn.execute(
             "SELECT i.id, i.receipt_id, i.product_id, i.quantity, i.unit, i.total_price, i.category, i.raw_text, "
