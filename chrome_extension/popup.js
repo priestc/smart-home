@@ -69,11 +69,28 @@ $('test').addEventListener('click', async () => {
   }
 });
 
+// Firefox grants host permissions only when asked; without them nothing runs
+async function neededOrigins() {
+  return ['https://www.amazon.com/*', `${await serverUrl()}/*`];
+}
+async function checkAccess() {
+  const ok = await chrome.permissions.contains({origins: await neededOrigins()});
+  $('access').style.display = ok ? 'none' : '';
+  return ok;
+}
+$('grant').addEventListener('click', async () => {
+  // Must be called straight from the click, before anything else is awaited
+  const granted = await chrome.permissions.request({origins: ['https://www.amazon.com/*', `${$('server').value.trim().replace(/\/+$/, '') || DEFAULT_SERVER}/*`]});
+  if (granted) chrome.runtime.sendMessage({type: 'flush'});
+  checkAccess();
+});
+
 chrome.storage.onChanged.addListener(render);
 (async () => {
   $('server').value = await serverUrl();
   // Opening the popup clears the error badge (the errors stay listed)
   await chrome.storage.local.set({lastError: false});
   chrome.runtime.sendMessage({type: 'flush'});
+  checkAccess();
   render();
 })();

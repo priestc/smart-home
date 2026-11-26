@@ -23,7 +23,7 @@ and on /receipts.
 When smart-home can't be reached (away from home), orders wait in a queue
 (the badge shows how many) and are sent when it's reachable again.
 
-## Install
+## Install in Chrome
 
 1. Chrome → `chrome://extensions` → turn on **Developer mode** (top right).
 2. **Load unpacked** → pick this `chrome_extension` folder.
@@ -32,3 +32,20 @@ When smart-home can't be reached (away from home), orders wait in a queue
 
 After pulling changes, click the reload arrow on its card in
 `chrome://extensions`.
+
+## Install in Firefox (121 or newer)
+
+1. Go to `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…**
+   → pick the **`manifest.json` file** inside this folder (not the folder).
+2. Click the extension's toolbar button. If it says it isn't allowed to use
+   amazon.com yet, click **Allow access** (Firefox starts extensions with
+   site access off; it can also be turned on in `about:addons` → the
+   extension → Permissions).
+
+A temporary add-on is removed when Firefox quits. To keep it installed,
+either use Firefox Developer Edition or Nightly with
+`xpinstall.signatures.required` set to false in `about:config` and install
+a zip of this folder from `about:addons` → gear → **Install Add-on From
+File**, or have Mozilla sign it for free as an unlisted add-on with
+`npx web-ext sign --channel=unlisted` (needs AMO API keys) and install the
+.xpi it gives you.

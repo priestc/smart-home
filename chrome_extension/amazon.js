@@ -13,6 +13,9 @@ const SH_SYNC_PAGES = 5;          // order history pages read by a sync (10 orde
 const SH_NEW_ORDER_TRIES = 4;     // a just-placed order's page can take a moment to fill in
 const SH_RETRY_MS = 20000;
 
+// In Firefox a content script's own fetch() doesn't go out as the page (so
+// without your Amazon login); content.fetch does
+const shFetch = (typeof content !== 'undefined' && content.fetch) ? content.fetch.bind(content) : fetch;
 const shSleep = ms => new Promise(r => setTimeout(r, ms));
 const shSend = msg => chrome.runtime.sendMessage(msg);
 
@@ -31,7 +34,7 @@ async function shProcessOrder(id, doc, url) {
     if (!doc) {
       if (n) await shSleep(SH_RETRY_MS);
       try {
-        const resp = await fetch(SH_DETAILS_URL(id), {credentials: 'include'});
+        const resp = await shFetch(SH_DETAILS_URL(id), {credentials: 'include'});
         if (!resp.ok) { lastError = new Error(`amazon.com returned HTTP ${resp.status} for the order page`); continue; }
         url = resp.url;
         lastDoc = new DOMParser().parseFromString(await resp.text(), 'text/html');
@@ -77,7 +80,7 @@ async function shSync() {
     for (let page = 1; page < SH_SYNC_PAGES; page++) {
       const u = new URL(location.href);
       u.searchParams.set('startIndex', String(page * 10));
-      const resp = await fetch(u, {credentials: 'include'});
+      const resp = await shFetch(u, {credentials: 'include'});
       if (!resp.ok) break;
       const found = shFindOrderIds(new DOMParser().parseFromString(await resp.text(), 'text/html'));
       const before = ids.size;

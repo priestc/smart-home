@@ -24,6 +24,12 @@
   <h1>Amazon orders &rarr; Smart Home</h1>
   <div class="muted">Orders are sent after you check out and when you open an order&rsquo;s page.</div>
 
+  <div id="access" style="display:none;margin-top:10px">
+    <div class="err">The extension isn&rsquo;t allowed to use amazon.com and your smart-home server yet
+      (Firefox starts extensions with site access off).</div>
+    <div class="row"><button id="grant">Allow access</button></div>
+  </div>
+
   <h2>Sync</h2>
   <div class="row"><button id="sync">Sync recent orders</button><span id="queue" class="muted"></span></div>
   <div id="sync-status" class="muted" style="margin-top:6px"></div>
