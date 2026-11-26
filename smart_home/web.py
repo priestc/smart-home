@@ -14105,7 +14105,8 @@ Promise.all([fetchJSON('/api/products'), fetchJSON('/api/receipts/config')])
 _UTILITY_JS = """
 const UTILITY_COLORS = {Electricity: '#e0a800', Water: '#2e7dd4', Propane: '#e07820', 'Natural Gas': '#9b59b6',
                         Internet: '#2db37a', Phone: '#1abc9c', Trash: '#7f8c8d', Sewer: '#8e6e53',
-                        Insurance: '#c0392b', Hosting: '#5865f2', 'Heating Fuel': '#a0522d', Other: '#34495e'};
+                        Insurance: '#c0392b', Hosting: '#5865f2', 'Heating Fuel': '#a0522d',
+                        'Water Softener Salt': '#7fb3d5', Other: '#34495e'};
 // "every 6 months" for a bill covering several months, '' for one month
 function fmtPeriod(b) { return b.period_months > 1 ? `every ${b.period_months} months` : ''; }
 // How a propane bill is spread (a span from /api/utilities/summary): until
@@ -14191,7 +14192,7 @@ _UTILITIES_PAGE = """\\
           <thead><tr><th>Billing date</th><th>Utility</th><th>Company</th><th class="num">Usage</th><th class="num">Cost per unit</th><th class="num">Amount</th></tr></thead>
           <tbody id="bills"><tr><td colspan="6" class="muted">Loading&hellip;</td></tr></tbody>
         </table>
-        <div class="muted" style="margin-top:.8rem">Photograph a paper bill with the app&rsquo;s receipt camera; it&rsquo;s recognized as a bill and shows up here. Heating fuel on a store receipt (wood pellets) counts here too, with its share of the tax. A bill that covers several months is spread over them. A propane bill is spread day by day until the next one; the latest is spread at the rate earlier deliveries were used, and finalized when the next bill comes.</div>
+        <div class="muted" style="margin-top:.8rem">Photograph a paper bill with the app&rsquo;s receipt camera; it&rsquo;s recognized as a bill and shows up here. Wood pellets and water softener salt on a store receipt count here too, with their share of the tax. A bill that covers several months is spread over them. A propane bill is spread day by day until the next one; the latest is spread at the rate earlier deliveries were used, and finalized when the next bill comes.</div>
       </div>
       <div class="card">
         <h2>Bills from email</h2>
@@ -14289,13 +14290,13 @@ function renderBills() {
     tbody.innerHTML = '<tr><td colspan="6" class="muted">No bills yet.</td></tr>';
     return;
   }
-  // Heating fuel from store receipts (wood pellets), among the bills by date
+  // Utilities from store receipts (wood pellets, softener salt), among the bills by date
   const day = b => b.purchase_date || b.uploaded_at.slice(0, 10);
   const rows = [...bills.map(b => ({day: day(b), b})), ...fuel.map(f => ({day: f.day, f}))]
     .sort((x, y) => y.day.localeCompare(x.day));
   tbody.innerHTML = rows.map(({b, f}) => f ? `<tr class="bill" data-receipt="${f.receipt_id}">
       <td>${esc(f.day)}</td>
-      <td><span class="swatch" style="background:${UTILITY_COLORS['Heating Fuel']}"></span>Heating Fuel</td>
+      <td><span class="swatch" style="background:${UTILITY_COLORS[f.utility] || UTILITY_COLORS.Other}"></span>${esc(f.utility)}</td>
       <td>${esc(f.merchant || '')}<div class="muted">${esc(f.items || '')}</div></td>
       <td class="num"></td><td class="num muted"></td>
       <td class="num">${money(f.amount)}<div class="muted">from a receipt, with tax</div></td></tr>` : `<tr class="bill" data-id="${b.id}">
@@ -15581,26 +15582,29 @@ def _months_start(months: int) -> str:
     return f"{y:04d}-{m:02d}-01"
 
 
-def _heating_fuel_purchases(conn: sqlite3.Connection) -> list[dict]:
-    """Store receipts with heating fuel on them (wood pellets etc., see
-    receipts.HEATING_FUEL_CATEGORY), oldest first: receipt id, day, merchant,
-    what was bought, and amount = those items plus their share of the
-    receipt's tax (tax_share), in proportion to the items' prices."""
+def _utility_item_purchases(conn: sqlite3.Connection) -> list[dict]:
+    """Store receipt items that are really utilities (wood pellets, softener
+    salt; see receipts.UTILITY_ITEM_CATEGORIES), one entry per receipt and
+    category, oldest first: receipt id, day, merchant, utility (the
+    category), what was bought, and amount = those items plus their share
+    of the receipt's tax (tax_share), in proportion to the items' prices."""
     from smart_home import receipts as _receipts
     day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
+    cats = _receipts.UTILITY_ITEM_CATEGORIES
     rows = conn.execute(
-        f"SELECT r.id, {day} AS day, r.merchant, r.tax, SUM(i.total_price) AS fuel, "
+        f"SELECT r.id, {day} AS day, r.merchant, r.tax, i.category, SUM(i.total_price) AS spent, "
         f"GROUP_CONCAT(i.description, '; ') AS items, "
         f"(SELECT SUM(x.total_price) FROM receipt_items x WHERE x.receipt_id = r.id) AS all_items "
         f"FROM receipt_items i JOIN receipts r ON r.id = i.receipt_id "
-        f"WHERE r.status='done' AND r.kind='receipt' AND i.category = ? GROUP BY r.id ORDER BY day, r.id",
-        (_receipts.HEATING_FUEL_CATEGORY,),
+        f"WHERE r.status='done' AND r.kind='receipt' AND i.category IN ({','.join('?' * len(cats))}) "
+        f"GROUP BY r.id, i.category ORDER BY day, r.id",
+        cats,
     ).fetchall()
     out = []
     for r in rows:
-        share = r['tax'] * r['fuel'] / r['all_items'] if r['tax'] and r['all_items'] else 0.0
-        out.append({'receipt_id': r['id'], 'day': r['day'], 'merchant': r['merchant'], 'items': r['items'],
-                    'tax_share': share, 'amount': round(r['fuel'] + share, 2)})
+        share = r['tax'] * r['spent'] / r['all_items'] if r['tax'] and r['all_items'] else 0.0
+        out.append({'receipt_id': r['id'], 'day': r['day'], 'merchant': r['merchant'], 'utility': r['category'],
+                    'items': r['items'], 'tax_share': share, 'amount': round(r['spent'] + share, 2)})
     return out
 
 
@@ -15609,8 +15613,8 @@ def api_receipts_summary():
     """Spending per month per category over the last N months (default 12),
     including the current month. Sales tax is reported as its own category.
     Utility bills are left out; they're summed by /api/utilities/summary, as
-    are heating fuel items (with their share of the tax, see
-    _heating_fuel_purchases)."""
+    are items that are really utilities (wood pellets, softener salt; with
+    their share of the tax, see _utility_item_purchases)."""
     from smart_home import receipts as _receipts
     months = max(1, min(int(request.args.get('months', 12)), 120))
     start = _months_start(months)
@@ -15619,12 +15623,13 @@ def api_receipts_summary():
         item_rows = conn.execute(
             f"SELECT substr({day}, 1, 7) AS month, i.category, SUM(i.total_price) AS amount "
             f"FROM receipt_items i JOIN receipts r ON r.id = i.receipt_id "
-            f"WHERE r.status='done' AND r.kind='receipt' AND {day} >= ? AND i.category != ? "
+            f"WHERE r.status='done' AND r.kind='receipt' AND {day} >= ? "
+            f"AND i.category NOT IN ({','.join('?' * len(_receipts.UTILITY_ITEM_CATEGORIES))}) "
             f"GROUP BY month, i.category",
-            (start, _receipts.HEATING_FUEL_CATEGORY),
+            (start, *_receipts.UTILITY_ITEM_CATEGORIES),
         ).fetchall()
         fuel_tax: dict[str, float] = {}
-        for p in _heating_fuel_purchases(conn):
+        for p in _utility_item_purchases(conn):
             if p['day'] >= start:
                 fuel_tax[p['day'][:7]] = fuel_tax.get(p['day'][:7], 0) + p['tax_share']
         tax_rows = conn.execute(
@@ -15862,8 +15867,8 @@ def api_utilities_summary():
     by billing date. A bill's amount is its total, or its charges + tax if no
     total was read. A bill covering several months (period_months) is spread
     evenly over them, starting with its billing month; months after this one
-    aren't counted yet. Heating fuel on store receipts (wood pellets) counts
-    as a utility in the month it was bought; fuel_purchases lists them. A
+    aren't counted yet. Store receipt items that are utilities (wood pellets,
+    softener salt) count in the month bought; fuel_purchases lists them. A
     propane bill is spread by day until the next one
     (see _delivery_spans), counting only the days so far, and its lease fee
     over 12 months; spans gives how each was spread."""
@@ -15882,15 +15887,14 @@ def api_utilities_summary():
             f"WHERE r.status='done' AND r.kind='bill'"
         ).fetchall()
         tank_gallons, readings = _propane_tank(conn)
-        fuel = _heating_fuel_purchases(conn)
+        fuel = _utility_item_purchases(conn)
     spans = _delivery_spans(bills, today, tank_gallons, readings)
     cells: dict[tuple[str, str], dict] = {}
-    # Heating fuel bought at a store counts in the month it was bought
-    from smart_home import receipts as _receipts
+    # Utilities bought at a store (pellets, softener salt) count in the month bought
     for p in fuel:
         month = p['day'][:7]
         if start <= month <= this_month:
-            c = cells.setdefault((month, _receipts.HEATING_FUEL_CATEGORY), {'amount': 0.0, 'n_bills': 0})
+            c = cells.setdefault((month, p['utility']), {'amount': 0.0, 'n_bills': 0})
             c['amount'] += p['amount']
             c['n_bills'] += 1
     for b in bills:

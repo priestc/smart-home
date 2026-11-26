@@ -65,15 +65,17 @@ CATEGORIES = [
     "Home Improvement",
     "Auto & Fuel",
     "Heating Fuel",
+    "Water Softener Salt",
     "Entertainment",
     "Gifts",
     "Fees & Deposits",
     "Other",
 ]
-# Store-bought fuel for heating the home (wood pellets, firewood): it stays
-# on its receipt but is counted as a utility, under this name, on /utilities
-# and not in receipt spending.
-HEATING_FUEL_CATEGORY = "Heating Fuel"
+# Item categories that are really utilities: store-bought fuel for heating
+# the home (wood pellets, firewood) and salt for the water softener. Such
+# items stay on their receipt but are counted as a utility, under the
+# category's name, on /utilities and not in receipt spending.
+UTILITY_ITEM_CATEGORIES = ("Heating Fuel", "Water Softener Salt")
 # What a utility bill (kind='bill') is for
 UTILITIES = ["Electricity", "Water", "Propane", "Natural Gas", "Internet", "Phone", "Trash", "Sewer",
              "Insurance", "Hosting", "Other"]
@@ -149,7 +151,7 @@ It may instead be a screenshot of an order in a store's website or app (e.g. a L
   - item_code: the item number, UPC or SKU printed on that line, digits only, or null if there isn't one. Walmart prints a 12-digit number after each item name; Sam's Club prints it before. Copy every digit carefully, and only from that same line. Savings and coupon lines usually have no number of their own: use null.
   - quantity, unit and unit_price: only when the receipt prints an amount for that line, e.g. a weight "1.33 lb @ 5.12 /lb" gives quantity 1.33, unit "lb", unit_price 5.12; "2 @ 3.97" gives quantity 2, unit "ea", unit_price 3.97. Units are "ea", "oz" or "lb". Otherwise null for all three. The "@" line is printed on its own row next to the item: on Sam's Club receipts it is the row just ABOVE the item (e.g. "1.43 @ 5.12" above "MED SALAD" means 1.43 lb at 5.12 per lb), on Walmart receipts usually just below. A Sam's Club "@" line with a decimal amount and no unit is a weight in lb. unit_price is never the line's total_price: the total is the amount printed at the right of the item's own row (1.43 @ 5.12 gives total_price 7.32).
   - description: Expand cryptic abbreviations into a readable description (e.g. "GV 2% MLK GAL" -> "Great Value 2% milk, 1 gal"). total_price is the line's final amount in dollars. A minus sign after the amount means it is negative: "2.00-" is -2.00. Discounts, coupons and instant savings are their own lines with a negative total_price, in the same category as the item they discount; describe them as e.g. "Instant savings: La Croix". On Sam's Club receipts "INST SV" means instant savings and is always negative, even if the minus sign is hard to see. Bottle deposits, bag fees and similar go in "Fees & Deposits". Do not include sales tax, subtotal, total, payment or change lines as items. Each price is on the same row as its item: if a line's price is faded or unreadable, use null for that line rather than taking a price from a neighbouring row.
-- category: choose the single best fit from: {", ".join(CATEGORIES)}. A restaurant meal or takeout is "Dining Out"; food bought at a store is "Groceries". Fuel for heating the home (wood pellets, firewood, heating oil or kerosene) is "Heating Fuel"; fuel for a vehicle is "Auto & Fuel".
+- category: choose the single best fit from: {", ".join(CATEGORIES)}. A restaurant meal or takeout is "Dining Out"; food bought at a store is "Groceries". Fuel for heating the home (wood pellets, firewood, heating oil or kerosene) is "Heating Fuel"; fuel for a vehicle is "Auto & Fuel". Salt for a water softener (solar crystals, pellets, potassium chloride) is "Water Softener Salt"; salt for food is "Groceries".
 - subtotal, tax, total: as printed, or null if missing. For restaurants, include any tip in total.
 - If the image is not a receipt or is unreadable, set is_receipt to false, leave items empty and explain why in notes.
 - notes: one or two short sentences on anything uncertain (e.g. a line you couldn't read), otherwise null."""
