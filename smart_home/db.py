@@ -338,11 +338,12 @@ def open_db(path: str) -> sqlite3.Connection:
     # see gmail.py), otherwise NULL. period_months is how many months a bill
     # covers (e.g. 6 for car insurance); NULL means one. unit_price is the
     # price per unit of usage as printed (a propane bill's price per gallon)
-    # and lease_fee an annual tank lease charged on the bill; both are part
-    # of total.
+    # and lease_fee an annual tank lease charged on the bill, reconnect_fee a
+    # tank reconnection charge; all are part of total (as is tax, which a
+    # propane bill may print).
     for col in ("kind TEXT NOT NULL DEFAULT 'receipt'", "utility TEXT", "usage_amount REAL",
                 "usage_unit TEXT", "due_date TEXT", "source TEXT", "email_id TEXT", "period_months INTEGER",
-                "unit_price REAL", "lease_fee REAL"):
+                "unit_price REAL", "lease_fee REAL", "reconnect_fee REAL"):
         try:
             conn.execute(f"ALTER TABLE receipts ADD COLUMN {col}")
             conn.commit()

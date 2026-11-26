@@ -87,6 +87,7 @@ _SCHEMA = {
         "usage_unit": {"type": ["string", "null"]},
         "unit_price": {"type": ["number", "null"]},
         "lease_fee": {"type": ["number", "null"]},
+        "reconnect_fee": {"type": ["number", "null"]},
         "merchant": {"type": ["string", "null"]},
         "purchase_date": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
         "items": {
@@ -116,7 +117,7 @@ _SCHEMA = {
         # second readings that can't explain a subtotal mismatch).
         "notes": {"type": ["string", "null"], "maxLength": 300},
     },
-    "required": ["is_receipt", "document_type", "utility", "usage", "usage_unit", "unit_price", "lease_fee", "merchant", "purchase_date", "items", "items_sold", "subtotal", "tax", "total", "notes"],
+    "required": ["is_receipt", "document_type", "utility", "usage", "usage_unit", "unit_price", "lease_fee", "reconnect_fee", "merchant", "purchase_date", "items", "items_sold", "subtotal", "tax", "total", "notes"],
     "additionalProperties": False,
 }
 
@@ -124,13 +125,15 @@ _PROMPT = f"""This is a photo of a store or restaurant receipt, or of a utility 
 
 - document_type: "utility_bill" for a bill from a utility or service provider (water, electricity, propane or gas delivery, internet, phone, trash, sewer), otherwise "receipt". A dump, landfill or transfer station scale ticket is a utility bill for "Trash".
 - For a utility bill:
-  - utility: one of {", ".join(UTILITIES)}. For a receipt use null, and null for usage, usage_unit, unit_price and lease_fee too.
+  - utility: one of {", ".join(UTILITIES)}. For a receipt use null, and null for usage, usage_unit, unit_price, lease_fee and reconnect_fee too.
   - merchant: the company's name (e.g. "Moongate Water Co."). purchase_date: the billing or statement date.
   - usage and usage_unit: the amount used this period as printed, e.g. GALLONS USED 1440 gives 1440, "gal"; 812 KWH gives 812, "kWh"; propane delivered in gallons gives "gal"; a transfer station's net weight "20 lb" gives 20, "lb". Null for both if no usage is printed (e.g. internet).
   - unit_price: the price per unit of usage as printed, e.g. a propane delivery's price per gallon "2.899 /gal" gives 2.899; otherwise null.
   - lease_fee: a tank lease or tank rental fee charged on the bill (usually yearly, on propane bills), in dollars; otherwise null.
+  - reconnect_fee: a tank reconnection, reconnect or re-hookup fee charged on the bill, in dollars; otherwise null.
   - total: the amount charged for this period, including every fee, surcharge and tax (wherever they are printed, even below the subtotal), but not any balance forward or past-due amount.
-  - items: empty. subtotal, tax and items_sold: null. Skip the store-receipt rules below.
+  - tax: the tax charged, if printed as its own line (propane deliveries often show one), otherwise null.
+  - items: empty. subtotal and items_sold: null. Skip the store-receipt rules below.
 
 - merchant: the store or restaurant name as a person would say it (e.g. "Costco", not "COSTCO WHOLESALE #1234").
 - purchase_date: the transaction date as YYYY-MM-DD, or null if it isn't printed. US receipts print dates month first: "11/03/26" is 2026-11-03 (November 3), not March 11.
@@ -504,9 +507,10 @@ def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
         rows,
     )
     db.prune_products(conn)
-    utility = usage = usage_unit = unit_price = lease_fee = None
+    utility = usage = usage_unit = unit_price = lease_fee = reconnect_fee = None
     if bill:
         unit_price, lease_fee = data.get("unit_price"), data.get("lease_fee")
+        reconnect_fee = data.get("reconnect_fee")
         utility = data.get("utility") if data.get("utility") in UTILITIES else "Other"
         usage = data.get("usage")
         usage_unit = (data.get("usage_unit") or "").strip() or None
@@ -515,10 +519,10 @@ def _store_result(conn: sqlite3.Connection, rid: int, data: dict) -> None:
     conn.execute(
         "UPDATE receipts SET status='done', error=NULL, processed_at=?, merchant=?, purchase_date=?, "
         "subtotal=?, tax=?, total=?, notes=?, raw_json=?, kind=?, utility=?, usage_amount=?, usage_unit=?, "
-        "unit_price=?, lease_fee=? WHERE id=?",
+        "unit_price=?, lease_fee=?, reconnect_fee=? WHERE id=?",
         (_now(), data.get("merchant"), date, data.get("subtotal"), data.get("tax"),
          data.get("total"), data.get("notes"), json.dumps(data), "bill" if bill else "receipt",
-         utility, usage, usage_unit, unit_price, lease_fee, rid),
+         utility, usage, usage_unit, unit_price, lease_fee, reconnect_fee, rid),
     )
 
 

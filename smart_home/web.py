@@ -11906,7 +11906,7 @@ def gas_page():
 # email_id is the Gmail message. period_months is how many months it covers.
 _RECEIPT_COLS = ("id, uploaded_at, status, error, processed_at, merchant, purchase_date, "
                  "subtotal, tax, total, notes, image_path = '' AND email_id IS NULL AS manual, "
-                 "kind, utility, usage_amount, usage_unit, source, email_id, period_months, unit_price, lease_fee")
+                 "kind, utility, usage_amount, usage_unit, source, email_id, period_months, unit_price, lease_fee, reconnect_fee")
 
 
 def _receipt_json(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
@@ -12166,10 +12166,12 @@ def _period_months_field(v) -> tuple[int | None, str | None]:
 
 
 def _bill_money_fields(data: dict) -> tuple[dict, str | None]:
-    """unit_price (e.g. a propane bill's price per gallon) and lease_fee (an
-    annual tank lease) from a bill form; blank clears them."""
+    """unit_price (e.g. a propane bill's price per gallon), lease_fee (an
+    annual tank lease), reconnect_fee (a tank reconnection) and tax from a
+    bill form; blank clears them."""
     out = {}
-    for k, label in (('unit_price', 'Price per unit'), ('lease_fee', 'Lease fee')):
+    for k, label in (('unit_price', 'Price per unit'), ('lease_fee', 'Lease fee'),
+                     ('reconnect_fee', 'Reconnection fee'), ('tax', 'Tax')):
         if k not in data:
             continue
         v = data[k]
@@ -12182,7 +12184,7 @@ def _bill_money_fields(data: dict) -> tuple[dict, str | None]:
             return {}, f'{label} must be a number'
         if v < 0:
             return {}, f'{label} can\'t be negative'
-        out[k] = round(v, 2) if k == 'lease_fee' else v
+        out[k] = v if k == 'unit_price' else round(v, 2)
     return out, None
 
 
@@ -12200,7 +12202,8 @@ def api_receipt_update(rid):
             return jsonify({'error': 'kind must be receipt or bill'}), 400
         fields['kind'] = data['kind']
         if data['kind'] == 'receipt':
-            fields.update(utility=None, usage_amount=None, usage_unit=None, unit_price=None, lease_fee=None)
+            fields.update(utility=None, usage_amount=None, usage_unit=None, unit_price=None, lease_fee=None,
+                          reconnect_fee=None)
         elif not data.get('utility'):
             fields['utility'] = 'Other'
     if data.get('utility') is not None:
@@ -12219,7 +12222,7 @@ def api_receipt_update(rid):
             if not unit:
                 return jsonify({'error': 'Give a unit for the usage, e.g. gal or kWh'}), 400
             fields.update(usage_amount=amount, usage_unit=unit)
-    money_fields, err = _bill_money_fields(data)
+    money_fields, err = _bill_money_fields({k: v for k, v in data.items() if k != 'tax'})
     if err:
         return jsonify({'error': err}), 400
     fields.update(money_fields)
@@ -14160,6 +14163,8 @@ _UTILITIES_PAGE = """\\
           <div class="propane-only"><label for="f-gallons">Gallons</label><input type="text" id="f-gallons" inputmode="decimal" placeholder="e.g. 150"></div>
           <div class="propane-only"><label for="f-price">Price per gallon</label><input type="text" id="f-price" inputmode="decimal" placeholder="0.000"></div>
           <div class="propane-only"><label for="f-lease">Annual tank lease fee</label><input type="text" id="f-lease" inputmode="decimal" placeholder="0.00 (optional)"></div>
+          <div class="propane-only"><label for="f-reconnect">Tank reconnection fee</label><input type="text" id="f-reconnect" inputmode="decimal" placeholder="0.00 (optional)"></div>
+          <div class="propane-only"><label for="f-tax">Tax</label><input type="text" id="f-tax" inputmode="decimal" placeholder="0.00 (optional)"></div>
           <div class="propane-only wide muted" id="f-calc"></div>
           <div><label for="f-months">Months covered</label><input type="number" id="f-months" min="1" max="24" value="1"></div>
           <div class="wide actions"><button class="btn" id="f-save">Add bill</button> <span id="f-status" class="muted"></span></div>
@@ -14317,14 +14322,17 @@ function setUtilityForm() {
   document.getElementById('add-form').classList.toggle('propane', isPropane());
 }
 utilitySel.addEventListener('change', () => { setUtilityForm(); updateCompanies(); });
-// Propane: amount = gallons x price per gallon + tank lease fee
+// Propane: amount = gallons x price per gallon + tank lease + reconnection fee + tax
 const num = id => { const t = document.getElementById(id).value.replace(/[$,\\s]/g, ''); return t === '' ? null : +t; };
-['f-gallons', 'f-price', 'f-lease'].forEach(id => document.getElementById(id).addEventListener('input', () => {
-  const g = num('f-gallons'), p = num('f-price'), l = num('f-lease') || 0, calc = document.getElementById('f-calc');
-  if (g == null || p == null || isNaN(g) || isNaN(p) || isNaN(l)) { calc.textContent = ''; return; }
-  const t = g * p + l;
+const PROPANE_EXTRAS = [['f-lease', 'lease'], ['f-reconnect', 'reconnection'], ['f-tax', 'tax']];
+['f-gallons', 'f-price', ...PROPANE_EXTRAS.map(e => e[0])].forEach(id => document.getElementById(id).addEventListener('input', () => {
+  const g = num('f-gallons'), p = num('f-price'), calc = document.getElementById('f-calc');
+  const extras = PROPANE_EXTRAS.map(([id, what]) => [num(id) || 0, what]);
+  if (g == null || p == null || isNaN(g) || isNaN(p) || extras.some(([v]) => isNaN(v))) { calc.textContent = ''; return; }
+  const t = g * p + extras.reduce((sum, [v]) => sum + v, 0);
   document.getElementById('f-total').value = t.toFixed(2);
-  calc.textContent = `${g.toLocaleString()} gal \\u00d7 ${money(p)}${l ? ` + ${money(l)} lease` : ''} = ${money(t)}`;
+  calc.textContent = `${g.toLocaleString()} gal \\u00d7 ${money(p)}`
+    + extras.filter(([v]) => v).map(([v, what]) => ` + ${money(v)} ${what}`).join('') + ` = ${money(t)}`;
 }));
 document.getElementById('f-date').value = new Date().toLocaleDateString('en-CA');
 document.getElementById('f-save').addEventListener('click', async () => {
@@ -14338,15 +14346,17 @@ document.getElementById('f-save').addEventListener('click', async () => {
                 total, usage_amount: val('f-usage').replace(/,/g, '') || null, usage_unit: val('f-unit') || null,
                 period_months: val('f-months') || null};
   if (isPropane()) {
-    for (const [id, what] of [['f-gallons', 'gallons'], ['f-price', 'price per gallon'], ['f-lease', 'lease fee']])
+    for (const [id, what] of [['f-gallons', 'gallons'], ['f-price', 'price per gallon'], ['f-lease', 'lease fee'],
+                              ['f-reconnect', 'reconnection fee'], ['f-tax', 'tax']])
       if (Number.isNaN(num(id))) { status.className = 'err'; status.textContent = `The ${what} isn\\u2019t a number.`; return; }
-    Object.assign(body, {usage_amount: num('f-gallons'), usage_unit: 'gal', unit_price: num('f-price'), lease_fee: num('f-lease')});
+    Object.assign(body, {usage_amount: num('f-gallons'), usage_unit: 'gal', unit_price: num('f-price'), lease_fee: num('f-lease'),
+                         reconnect_fee: num('f-reconnect'), tax: num('f-tax')});
   }
   status.className = 'muted'; status.textContent = 'Saving\\u2026';
   try {
     await sendJSON('/api/utilities/bills', 'POST', body);
     status.textContent = 'Added';
-    ['f-merchant', 'f-total', 'f-usage', 'f-gallons', 'f-price', 'f-lease'].forEach(id => { document.getElementById(id).value = ''; });
+    ['f-merchant', 'f-total', 'f-usage', 'f-gallons', 'f-price', 'f-lease', 'f-reconnect', 'f-tax'].forEach(id => { document.getElementById(id).value = ''; });
     document.getElementById('f-calc').textContent = '';
     document.getElementById('f-months').value = 1;
     await load();
@@ -14421,6 +14431,8 @@ _UTILITY_BILL_PAGE = """\\
           <div><label for="usage_amount">Usage</label><div class="usage"><input type="text" id="usage_amount" inputmode="decimal" placeholder="e.g. 1440"><input type="text" id="usage_unit" placeholder="unit"></div></div>
           <div class="propane-only"><label for="unit_price">Price per gallon</label><input type="text" id="unit_price" inputmode="decimal" placeholder="0.000"></div>
           <div class="propane-only"><label for="lease_fee">Annual tank lease fee</label><input type="text" id="lease_fee" inputmode="decimal" placeholder="0.00"></div>
+          <div class="propane-only"><label for="reconnect_fee">Tank reconnection fee</label><input type="text" id="reconnect_fee" inputmode="decimal" placeholder="0.00"></div>
+          <div class="propane-only"><label for="tax">Tax</label><input type="text" id="tax" inputmode="decimal" placeholder="0.00"></div>
           <div><label for="total">Amount</label><input type="text" id="total" inputmode="decimal" placeholder="0.00"></div>
           <div><label for="period_months">Months covered</label><input type="number" id="period_months" min="1" max="24"></div>
         </div>
@@ -14455,13 +14467,14 @@ _UTILITY_BILL_PAGE = """\\
 <script>__COMMON_JS____UTILITY_JS__
 const RID = __RID__;
 const FIELDS = ['utility', 'merchant', 'purchase_date', 'usage_amount', 'usage_unit', 'unit_price', 'lease_fee',
-                'total', 'period_months'];
+                'reconnect_fee', 'tax', 'total', 'period_months'];
+const MONEY_FIELDS = ['total', 'lease_fee', 'reconnect_fee', 'tax'];
 let bill = null, pollTimer = null;
 
 function fieldValue(k) {
   const v = bill[k];
   if (v == null) return k === 'utility' ? 'Other' : k === 'period_months' ? '1' : '';
-  return k === 'total' || k === 'lease_fee' ? v.toFixed(2) : String(v);
+  return MONEY_FIELDS.includes(k) ? v.toFixed(2) : String(v);
 }
 function parseAmount(s) {
   const t = String(s).replace(/[$,\\s]/g, '');
@@ -14527,6 +14540,9 @@ function render() {
       ${unitCost(b) ? `<div class="s">${unitCost(b)}</div>` : ''}</div>`);
   if (b.lease_fee != null) figures.push(`<div class="figure"><div class="v">${money(b.lease_fee)}</div>
       <div class="l">Tank lease</div><div class="s">Annual fee on this bill</div></div>`);
+  if (b.reconnect_fee != null) figures.push(`<div class="figure"><div class="v">${money(b.reconnect_fee)}</div>
+      <div class="l">Tank reconnection</div></div>`);
+  if (b.tax != null) figures.push(`<div class="figure"><div class="v">${money(b.tax)}</div><div class="l">Tax</div></div>`);
   if (b.period_months > 1 && b.total != null) figures.push(`<div class="figure"><div class="v">${money(b.total / b.period_months)}</div>
       <div class="l">A month</div><div class="s">Covers ${b.period_months} months</div></div>`);
   figures.push(`<div class="figure"><div class="v">${esc(b.purchase_date || '\\u2014')}</div><div class="l">Billing date</div></div>`);
@@ -14556,13 +14572,13 @@ function setPropane() {
   document.getElementById('edit-form').classList.toggle('propane', document.getElementById('utility').value === 'Propane');
 }
 document.getElementById('utility').addEventListener('change', setPropane);
-// Propane: amount = gallons x price per gallon + tank lease fee
-['usage_amount', 'unit_price', 'lease_fee'].forEach(id => document.getElementById(id).addEventListener('input', () => {
+// Propane: amount = gallons x price per gallon + tank lease + reconnection fee + tax
+['usage_amount', 'unit_price', 'lease_fee', 'reconnect_fee', 'tax'].forEach(id => document.getElementById(id).addEventListener('input', () => {
   if (document.getElementById('utility').value !== 'Propane') return;
   const v = k => parseAmount(document.getElementById(k).value);
-  const g = v('usage_amount'), p = v('unit_price'), l = v('lease_fee') || 0;
-  if (g == null || p == null || [g, p, l].some(Number.isNaN)) return;
-  document.getElementById('total').value = (g * p + l).toFixed(2);
+  const g = v('usage_amount'), p = v('unit_price'), extras = ['lease_fee', 'reconnect_fee', 'tax'].map(k => v(k) || 0);
+  if (g == null || p == null || [g, p, ...extras].some(Number.isNaN)) return;
+  document.getElementById('total').value = (g * p + extras.reduce((a, b) => a + b, 0)).toFixed(2);
 }));
 document.getElementById('edit-card').addEventListener('input', () => {
   let dirty = false;
@@ -14586,11 +14602,15 @@ document.getElementById('save').addEventListener('click', async () => {
   const unitPrice = propane ? parseAmount(val('unit_price')) : null, lease = propane ? parseAmount(val('lease_fee')) : null;
   if (Number.isNaN(unitPrice)) return fail('The price per gallon isn\\u2019t a number.');
   if (Number.isNaN(lease)) return fail('The lease fee isn\\u2019t a number.');
+  const reconnect = propane ? parseAmount(val('reconnect_fee')) : null, tax = propane ? parseAmount(val('tax')) : null;
+  if (Number.isNaN(reconnect)) return fail('The reconnection fee isn\\u2019t a number.');
+  if (Number.isNaN(tax)) return fail('The tax isn\\u2019t a number.');
   status.className = 'muted'; status.textContent = 'Saving\\u2026';
   try {
     await sendJSON(`/api/receipts/${RID}`, 'PATCH', {
       utility: val('utility'), merchant: val('merchant'), purchase_date: val('purchase_date') || null,
-      usage_amount: usage, usage_unit: val('usage_unit'), unit_price: unitPrice, lease_fee: lease,
+      usage_amount: usage, usage_unit: val('usage_unit'),
+      ...(propane ? {unit_price: unitPrice, lease_fee: lease, reconnect_fee: reconnect, tax} : {}),
       total, period_months: val('period_months') || null});
     status.textContent = 'Saved';
     await load();
@@ -15554,8 +15574,9 @@ def api_utilities_email_read(message_id):
 def api_utility_bill_add():
     """Enter a utility bill by hand (e.g. internet paid by autopay with no paper
     bill). Body: utility, merchant, purchase_date, total, and optionally
-    usage_amount + usage_unit, period_months, and unit_price + lease_fee
-    (a propane bill's price per gallon and annual tank lease)."""
+    usage_amount + usage_unit, period_months, and unit_price, lease_fee,
+    reconnect_fee and tax (a propane bill's price per gallon, annual tank
+    lease, tank reconnection fee and tax)."""
     from smart_home import receipts as _receipts
     data = request.get_json(silent=True) or {}
     utility = data.get('utility')
@@ -15594,10 +15615,10 @@ def api_utility_bill_add():
         cur = conn.execute(
             "INSERT INTO receipts (uploaded_at, status, processed_at, image_path, media_type, merchant, "
             "purchase_date, total, notes, kind, utility, usage_amount, usage_unit, period_months, "
-            "unit_price, lease_fee) "
-            "VALUES (?, 'done', ?, '', '', ?, ?, ?, 'Entered by hand', 'bill', ?, ?, ?, ?, ?, ?)",
+            "unit_price, lease_fee, reconnect_fee, tax) "
+            "VALUES (?, 'done', ?, '', '', ?, ?, ?, 'Entered by hand', 'bill', ?, ?, ?, ?, ?, ?, ?, ?)",
             (now, now, merchant, date, total, utility, usage, unit, period,
-             extra.get('unit_price'), extra.get('lease_fee')),
+             extra.get('unit_price'), extra.get('lease_fee'), extra.get('reconnect_fee'), extra.get('tax')),
         )
     return jsonify({'ok': True, 'id': cur.lastrowid}), 201
 
