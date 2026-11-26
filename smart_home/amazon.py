@@ -702,7 +702,8 @@ def import_export_in_background(db_path: str, data: bytes, filename: str) -> boo
 # the extension reports an error instead. Shipping and discounts (Total before
 # tax minus the subtotal) become a line of their own. The receipt made from
 # the order's email gets the items; with no email yet, a receipt is made. An
-# email receipt that covers several orders is split. Categories are picked by
+# email receipt that covers several orders is split. The page shows what was
+# charged after cancellations, so it wins over the email's total. Categories are picked by
 # the model afterwards, in the background; until then a product keeps the
 # category it had on an earlier receipt, else "Other".
 #
@@ -815,14 +816,14 @@ def apply_page_order(db_path: str, d: dict) -> dict:
             if len(lines) == 1:
                 conn.execute("UPDATE receipt_items SET total_price=? WHERE id=?", (rest, lines[0][0]))
             rid = None
-        elif rid is not None and rid not in detailed.values():
-            # The order's page can account for less than its email did (the
-            # email covered another order too, e.g. one with no details page):
-            # keep the rest as its own receipt rather than lose it
-            old = conn.execute("SELECT total, purchase_date, uploaded_at FROM receipts WHERE id=?", (rid,)).fetchone()
-            rest = round((old["total"] or 0) - o["total"], 2)
-            if rest >= 0.01:
-                _keep_remainder(conn, email_id, old["purchase_date"], old["uploaded_at"], rest, oid, old["total"])
+        changed = None
+        if rid is not None:
+            # The page shows what was charged after any cancellations, so it
+            # can come to less than the order email did: the page wins, and
+            # the note says by how much
+            old_total = conn.execute("SELECT total FROM receipts WHERE id=?", (rid,)).fetchone()[0]
+            if old_total is not None and abs(old_total - o["total"]) >= 0.01:
+                changed = old_total
         # Until the model picks, a product keeps the category it had before
         for it in o["items"]:
             if it.get("category") is None and it["asin"]:
@@ -835,6 +836,9 @@ def apply_page_order(db_path: str, d: dict) -> dict:
             it.pop("guess", None)
         notes = (f"From the order's page on amazon.com (order {oid}), read by the Chrome extension. "
                  "Tax is what Amazon charged.")
+        if changed is not None:
+            notes += (f" The order email came to {changed:.2f}; the page shows {o['total']:.2f} "
+                      "(items cancelled or changed since the order was placed).")
         created = rid is None
         rid = _write_receipt(conn, rid, [oid], o["items"], o["date"], o["tax"], o["total"], notes, "extension", cats)
         if created and email_id:
@@ -847,23 +851,6 @@ def apply_page_order(db_path: str, d: dict) -> dict:
         conn.close()
     _categorize_in_background(db_path, rid)
     return result
-
-
-def _keep_remainder(conn: sqlite3.Connection, email_id: str | None, date: str | None, uploaded_at: str,
-                    rest: float, oid: str, email_total: float) -> int:
-    """A receipt for the part of an order email no order page accounts for."""
-    notes = (f"The rest of Amazon's order email of {date}: it came to {email_total:.2f}, but the page for "
-             f"order {oid} only accounts for {email_total - rest:.2f}. Probably another order in the same "
-             "checkout (one Amazon may show no details page for); fill it in by hand if you know what it was.")
-    rid = conn.execute(
-        "INSERT INTO receipts (uploaded_at, status, processed_at, image_path, media_type, merchant, purchase_date, "
-        "subtotal, total, notes, raw_json, kind, source, email_id) "
-        "VALUES (?, 'done', ?, '', '', ?, ?, ?, ?, ?, ?, 'receipt', 'amazon', ?)",
-        (uploaded_at, _now(), MERCHANT, date, rest, rest, notes, json.dumps({"orders": [], "remainder_of": oid}),
-         email_id)).lastrowid
-    conn.execute("INSERT INTO receipt_items (receipt_id, position, description, total_price, category) "
-                 "VALUES (?, 0, ?, ?, 'Other')", (rid, f"Rest of the order email (not on order {oid}'s page)", rest))
-    return rid
 
 
 def _categorize_in_background(db_path: str, rid: int) -> None:
