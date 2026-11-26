@@ -16444,9 +16444,12 @@ document.addEventListener('keydown', e => {
       return d;
     }));
     zones = cfg.zones; NO_ZONE = cfg.no_zone; categories = cats.categories;
-    // Most recently bought first
-    queue = prods.products.filter(needsSorting)
-      .sort((a, b) => (b.last_bought || '').localeCompare(a.last_bought || ''));
+    // In random order (a fresh shuffle each visit)
+    queue = prods.products.filter(needsSorting);
+    for (let i = queue.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [queue[i], queue[j]] = [queue[j], queue[i]];
+    }
     document.getElementById('zones').innerHTML = zones.map((z, i) =>
       `<button data-zone="${esc(z)}">${esc(z)}<kbd>${KEYS[i] || ''}</kbd></button>`).join('')
       + `<button class="none" data-zone="${esc(NO_ZONE)}" title="Doesn't go anywhere in particular: fuel, supplies">No zone<kbd>0</kbd></button>`;
