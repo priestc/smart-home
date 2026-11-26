@@ -43,7 +43,8 @@ async function post(path, body) {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
     });
   } catch (e) {
-    throw new Unreachable(`Can't reach ${await server()}: ${e.message}`);
+    const hint = /NetworkError/.test(e.message) ? ' (In Firefox: Settings \u2192 Privacy & Security \u2192 HTTPS-Only Mode must be off, or have an exception for this address; and about:addons \u2192 this extension \u2192 Permissions must allow it.)' : '';
+    throw new Unreachable(`Can't reach ${await server()}: ${e.message}${hint}`);
   }
   let data = {};
   try { data = await resp.json(); } catch (_) {}

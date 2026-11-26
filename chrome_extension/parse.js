@@ -113,23 +113,53 @@ function shParseOrderDetails(doc, url) {
         .map(e => shText(e.textContent)).find(t => /^\d{1,3}$/.test(t));
       if (badge) qty = parseInt(badge, 10);
     }
-    items.push({name: title, asin, quantity: Math.max(qty, 1), unit_price: price, soldBy: /Sold by/i.test(wideText)});
+    // Wording only an ordered item has next to it
+    const ordered = (/Sold by/i.test(wideText) ? 1 : 0)
+      + (/Return or replace|Return items|Eligible through|Return window|Get product support|Track package/i.test(wideText) ? 1 : 0);
+    items.push({name: title, asin, quantity: Math.max(qty, 1), unit_price: price, ordered});
   }
   if (!items.length) throw new Error('No products found on the page');
 
-  // Ordered items say who sold them; suggested products usually don't
-  const sum = list => Math.round(list.reduce((a, it) => a + it.unit_price * it.quantity, 0) * 100) / 100;
-  for (const list of [items.filter(it => it.soldBy), items]) {
-    if (list.length && Math.abs(sum(list) - subtotal) < 0.005) {
-      return {
-        order_id: orderId,
-        order_date: dateMatch ? shIsoDate(dateMatch[1]) : null,
-        items: list.map(({name, asin, quantity, unit_price}) => ({name, asin, quantity, unit_price})),
-        subtotal, total_before_tax: beforeTax, tax, total,
-        url: url || null,
-      };
+  // The page also shows suggested products ("Buy it again", "Related to
+  // items you've viewed"). The order's items are the ones that add up exactly
+  // to the Item(s) Subtotal; quantity badges can be misread, so each item may
+  // also count as 1. Of several combinations that fit, prefer the one using
+  // the quantities as read, then the one whose items have the most ordered-
+  // item wording ("Sold by", "Return or replace items"), then items nearer
+  // the top of the page.
+  const cands = items.slice(0, 30);
+  const target = Math.round(subtotal * 100);
+  const solutions = [];
+  const pick = [];
+  (function search(i, sum) {
+    if (solutions.length >= 200) return;
+    if (sum === target && pick.length) { solutions.push(pick.slice()); return; }
+    if (i === cands.length || sum > target) return;
+    const it = cands[i], each = Math.round(it.unit_price * 100);
+    for (const q of it.quantity > 1 ? [it.quantity, 1] : [1]) {
+      pick.push({i, quantity: q});
+      search(i + 1, sum + each * q);
+      pick.pop();
     }
+    search(i + 1, sum);
+  })(0, 0);
+  if (solutions.length) {
+    const score = sol => [sol.filter(p => p.quantity !== cands[p.i].quantity).length,
+                          -sol.reduce((a, p) => a + cands[p.i].ordered, 0),
+                          Math.max(...sol.map(p => p.i))];
+    const better = (a, b) => { for (let k = 0; k < a.length; k++) if (a[k] !== b[k]) return a[k] < b[k]; return false; };
+    let best = solutions[0];
+    for (const sol of solutions) if (better(score(sol), score(best))) best = sol;
+    return {
+      order_id: orderId,
+      order_date: dateMatch ? shIsoDate(dateMatch[1]) : null,
+      items: best.map(p => ({name: cands[p.i].name, asin: cands[p.i].asin, quantity: p.quantity,
+                             unit_price: cands[p.i].unit_price})),
+      subtotal, total_before_tax: beforeTax, tax, total,
+      url: url || null,
+    };
   }
-  throw new Error(`The products found add up to $${sum(items).toFixed(2)}, not the page's Item(s) Subtotal ` +
-    `$${subtotal.toFixed(2)} (found: ${items.map(it => `${it.quantity} x ${it.name.slice(0, 40)} $${it.unit_price}`).join('; ')})`);
+  const sum = list => Math.round(list.reduce((a, it) => a + it.unit_price * it.quantity, 0) * 100) / 100;
+  throw new Error(`No combination of the products found adds up to the page's Item(s) Subtotal (all of them: $${sum(items).toFixed(2)}, subtotal ` +
+    `$${subtotal.toFixed(2)}; found: ${items.map(it => `${it.quantity} x ${it.name.slice(0, 40)} $${it.unit_price}`).join('; ')})`);
 }

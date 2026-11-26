@@ -65,7 +65,8 @@ $('test').addEventListener('click', async () => {
     status.className = 'ok'; status.textContent = `Connected (${d.n_imported} order emails imported)`;
     chrome.runtime.sendMessage({type: 'flush'});
   } catch (e) {
-    status.className = 'err'; status.textContent = `Can't connect: ${e.message}`;
+    const hint = /NetworkError/.test(e.message) ? ' (In Firefox: Settings \u2192 Privacy & Security \u2192 HTTPS-Only Mode must be off, or have an exception for this address; and about:addons \u2192 this extension \u2192 Permissions must allow it.)' : '';
+    status.className = 'err'; status.textContent = `Can't connect: ${e.message}${hint}`;
   }
 });
 
