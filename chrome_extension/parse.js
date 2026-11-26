@@ -51,6 +51,13 @@ function shFindOrderIds(doc) {
   const body = shCleanBody(doc);
   const ids = new Set();
   for (const m of shText(body.textContent).matchAll(/\b(\d{3}-\d{7}-\d{7})\b/g)) ids.add(m[1]);
+  // On an order history page fetched in the background each order card's
+  // contents are encrypted (Amazon's scripts decode them in a real tab), but
+  // the card still names its order: data-csa-c-slot-id="...order-card.112-..."
+  body.querySelectorAll('[data-csa-c-slot-id*="order-card"]').forEach(el => {
+    const m = (el.getAttribute('data-csa-c-slot-id') || '').match(/(\d{3}-\d{7}-\d{7})/);
+    if (m) ids.add(m[1]);
+  });
   body.querySelectorAll('a[href*="rderI"]').forEach(a => {
     const m = (a.getAttribute('href') || '').match(/order[Ii][Dd]=(\d{3}-\d{7}-\d{7})/);
     if (m) ids.add(m[1]);
