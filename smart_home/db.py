@@ -375,6 +375,19 @@ def open_db(path: str) -> sqlite3.Connection:
             percent REAL NOT NULL
         )
     """)
+    # Amazon order emails amazon.py has looked at (from the email archive).
+    # status is 'processing', 'imported' (its receipts have source='amazon'
+    # and email_id=message_id) or 'error' (reason says why; retried each scan).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS amazon_emails (
+            message_id   TEXT PRIMARY KEY,
+            received_at  TEXT NOT NULL,
+            subject      TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            reason       TEXT,
+            processed_at TEXT
+        )
+    """)
     # Money coming in (see income.py). received_on is the day it was paid;
     # email_id is the Gmail message it was read from, NULL if entered by hand.
     conn.execute("""

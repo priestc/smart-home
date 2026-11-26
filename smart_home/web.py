@@ -11979,16 +11979,21 @@ def gas_page():
 # kind is 'receipt' or 'bill' (a utility bill, shown on /utilities).
 # A bill read from an email has no photo either; source is 'email' and
 # email_id is the Gmail message. period_months is how many months it covers.
+# An Amazon order read from the email archive (amazon.py) has source 'amazon'
+# and email_id the archived message.
 _RECEIPT_COLS = ("id, uploaded_at, status, error, processed_at, merchant, purchase_date, "
                  "subtotal, tax, total, notes, image_path = '' AND email_id IS NULL AS manual, "
                  "kind, utility, usage_amount, usage_unit, source, email_id, period_months, unit_price, lease_fee, reconnect_fee")
 
 
 def _receipt_json(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
-    from smart_home import receipts as _receipts, gmail as _gmail
+    from smart_home import receipts as _receipts, gmail as _gmail, amazon as _amazon
     r = dict(row)
     # A 'processing' row with no live worker was interrupted (e.g. by a server restart)
-    running = _gmail.is_rereading(r['email_id']) if r['email_id'] else _receipts.is_running(r['id'])
+    if r['source'] == 'amazon':
+        running = _amazon.is_rereading(r['email_id'])
+    else:
+        running = _gmail.is_rereading(r['email_id']) if r['email_id'] else _receipts.is_running(r['id'])
     if r['status'] == 'processing' and not running:
         r['status'] = 'error'
         r['error'] = 'Processing was interrupted; tap Retry'
@@ -12085,6 +12090,23 @@ def api_receipts_list():
         return jsonify({'receipts': [_receipt_json(conn, r) for r in rows]})
 
 
+@app.get("/api/receipts/amazon")
+def api_receipts_amazon():
+    from smart_home import amazon as _amazon
+    with _conn() as conn:
+        return jsonify(_amazon.status(conn))
+
+
+@app.post("/api/receipts/amazon/scan")
+def api_receipts_amazon_scan():
+    """Read new Amazon order emails now (also done after each archive sync)."""
+    from smart_home import amazon as _amazon
+    r = _amazon.scan(_db_path)
+    if not r['ok']:
+        return jsonify({'error': f"Amazon email check failed: {r['error']}"}), 500
+    return jsonify(r)
+
+
 @app.get("/api/receipts/<int:rid>")
 def api_receipt_detail(rid):
     with _conn() as conn:
@@ -12092,7 +12114,7 @@ def api_receipt_detail(rid):
         if row is None:
             return jsonify({'error': 'Receipt not found'}), 404
         r = _receipt_json(conn, row)
-        if r['email_id']:
+        if r['email_id'] and r['source'] != 'amazon':
             em = conn.execute("SELECT sender, subject, received_at, body_text FROM email_bills WHERE message_id=?",
                               (r['email_id'],)).fetchone()
             r['email'] = dict(em) if em else None
@@ -12141,11 +12163,19 @@ def api_receipt_image(rid):
 @app.post("/api/receipts/<int:rid>/retry")
 def api_receipt_retry(rid):
     from smart_home import receipts as _receipts
-    from smart_home import gmail as _gmail
+    from smart_home import gmail as _gmail, amazon as _amazon
     with _conn() as conn:
-        row = conn.execute("SELECT image_path, email_id FROM receipts WHERE id=?", (rid,)).fetchone()
+        row = conn.execute("SELECT image_path, email_id, source FROM receipts WHERE id=?", (rid,)).fetchone()
         if row is None:
             return jsonify({'error': 'Receipt not found'}), 404
+        if row['source'] == 'amazon':
+            if _amazon.is_rereading(row['email_id']):
+                return jsonify({'error': 'This email is already being read'}), 409
+            conn.execute("UPDATE receipts SET status='processing' WHERE source='amazon' AND email_id=?",
+                         (row['email_id'],))
+            conn.commit()
+            _amazon.reread_in_background(_db_path, row['email_id'])
+            return jsonify({'ok': True, 'started': True}), 202
         if row['email_id']:
             conn.execute("UPDATE email_bills SET status='processing', processed_at=? WHERE message_id=?",
                          (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row['email_id']))
@@ -12629,9 +12659,16 @@ _RECEIPTS_PAGE = """\\
         </table>
       </div>
     </div>
-    <div class="card">
-      <h2>By category</h2>
-      <table><tbody id="totals"></tbody></table>
+    <div>
+      <div class="card">
+        <h2>By category</h2>
+        <table><tbody id="totals"></tbody></table>
+      </div>
+      <div class="card">
+        <h2>Amazon orders</h2>
+        <div id="amazon-status" class="muted">Loading&hellip;</div>
+        <div class="actions" style="margin-top:.6rem"><button class="btn secondary" id="amazon-scan">Check emails now</button></div>
+      </div>
     </div>
   </div>
 <script>__COMMON_JS__
@@ -12757,6 +12794,41 @@ async function load() {
   }
 }
 
+// Amazon order confirmations are read from the email archive after each sync
+async function loadAmazon() {
+  const el = document.getElementById('amazon-status');
+  let d;
+  try {
+    d = await fetchJSON('/api/receipts/amazon');
+  } catch (e) {
+    el.innerHTML = `<span class="err">Could not load the Amazon email status: ${esc(e.message)}</span>`;
+    return;
+  }
+  const s = d.last_scan;
+  let html = `Read from Amazon\\u2019s order confirmation emails in the <a href="/email-archive">email archive</a>. `
+    + `${d.n_imported} email${d.n_imported === 1 ? '' : 's'} imported`
+    + (s ? `; last checked ${esc(s.ts)}.` : '; not checked yet.');
+  if (s && !s.ok) html += `<div class="err">The last check failed: ${esc(s.error)}</div>`;
+  if (d.errors.length) html += `<div class="err" style="margin-top:.4rem">Couldn\\u2019t read ${d.errors.length} (tried again at each check):</div><ul>`
+    + d.errors.map(x => `<li><a href="/email-archive/${encodeURIComponent(x.message_id)}">${esc(x.received_at.slice(0, 10))}</a>: <span class="err">${esc(x.reason || '')}</span></li>`).join('') + '</ul>';
+  el.innerHTML = html;
+  document.getElementById('amazon-scan').disabled = d.scanning;
+}
+document.getElementById('amazon-scan').addEventListener('click', async () => {
+  const btn = document.getElementById('amazon-scan');
+  btn.disabled = true;
+  document.getElementById('amazon-status').textContent = 'Checking\\u2026 (each new email is read by the model, so this can take a while)';
+  try {
+    await fetchJSON('/api/receipts/amazon/scan', {method: 'POST'});
+  } catch (e) {
+    showNetworkError(`Could not check Amazon emails: ${e.message}`);
+  }
+  btn.disabled = false;
+  loadAmazon();
+  load();
+});
+loadAmazon();
+
 document.getElementById('periods').addEventListener('click', e => {
   const b = e.target.closest('button[data-months]');
   if (!b) return;
@@ -12865,7 +12937,7 @@ _RECEIPT_DETAIL_PAGE = """\\
       <div class="card">
         <div class="actions" id="retry-row">
           <button class="btn secondary" id="retry">Read again</button>
-          <span class="muted">Re-reads the photo and replaces all items and edits.</span>
+          <span class="muted" id="retry-note">Re-reads the photo and replaces all items and edits.</span>
         </div>
         <div class="actions" style="margin-top:.8rem">
           <button class="btn danger" id="delete">Delete receipt</button>
@@ -12873,9 +12945,10 @@ _RECEIPT_DETAIL_PAGE = """\\
       </div>
     </div>
     <div class="card photo">
-      <h2>Photo</h2>
+      <h2 id="photo-title">Photo</h2>
       <a id="photo-link" target="_blank"><img id="photo" alt="Receipt photo"></a>
       <div class="muted err" id="photo-error"></div>
+      <div id="email-link" style="display:none"></div>
     </div>
   </div>
   <dialog id="product-dialog">
@@ -12926,7 +12999,16 @@ function render() {
   document.querySelector('.card.photo').style.display = r.manual ? 'none' : '';
   document.querySelector('.layout').style.gridTemplateColumns = r.manual ? '1fr' : '';
   document.getElementById('retry-row').style.display = r.manual ? 'none' : '';
-  if (!r.manual && !img.getAttribute('src')) img.src = document.getElementById('photo-link').href = `/api/receipts/${RID}/image`;
+  // An Amazon order read from its confirmation email: link to the email instead of a photo
+  const fromEmail = !!r.email_id;
+  document.getElementById('photo-title').textContent = fromEmail ? 'Email' : 'Photo';
+  document.getElementById('photo-link').style.display = fromEmail ? 'none' : '';
+  document.getElementById('retry-note').textContent =
+    `Re-reads the ${fromEmail ? 'email' : 'photo'} and replaces all items and edits.`;
+  const link = document.getElementById('email-link');
+  link.style.display = fromEmail ? '' : 'none';
+  if (fromEmail) link.innerHTML = `Read from Amazon\\u2019s order confirmation. <a href="/email-archive/${encodeURIComponent(r.email_id)}">Open the email &rarr;</a>`;
+  if (!r.manual && !fromEmail && !img.getAttribute('src')) img.src = document.getElementById('photo-link').href = `/api/receipts/${RID}/image`;
   if (!done) return;
 
   HEADER_FIELDS.forEach(k => {

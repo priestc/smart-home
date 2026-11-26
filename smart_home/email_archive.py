@@ -516,6 +516,13 @@ def sync_in_background(db_path: str) -> None:
         if r["n_new"] or not r["ok"]:
             ts = datetime.datetime.now().strftime("%H:%M:%S")
             print(f"[{ts}] Income: {r['n_new']} new" + ("" if r["ok"] else f", scan failed: {r['error']}"), flush=True)
+        # And Amazon orders (see amazon.py); shown on /receipts
+        from smart_home import amazon
+        r = amazon.scan(db_path)
+        if r["n_new"] or r["n_errors"] or not r["ok"]:
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] Amazon orders: {r['n_new']} new, {r['n_errors']} unreadable"
+                  + ("" if r["ok"] else f", scan failed: {r['error']}"), flush=True)
 
     threading.Thread(target=_bg, daemon=True).start()
 
