@@ -14067,14 +14067,16 @@ const UTILITY_COLORS = {Electricity: '#e0a800', Water: '#2e7dd4', Propane: '#e07
 function fmtPeriod(b) { return b.period_months > 1 ? `every ${b.period_months} months` : ''; }
 // How a propane bill is spread (a span from /api/utilities/summary): until
 // the next bill, or for an open one, an estimate from earlier usage
-function fmtSpan(span, total) {
+function fmtSpan(span, b) {
   if (!span) return '';
+  // The lease fee is spread over 12 months on its own
+  const total = b.total == null ? null : b.total - (b.lease_fee || 0);
   const perMonth = total != null ? ` \\u00b7 ${money(total / span.days * 30.44)} a month` : '';
   if (span.final) return `Lasted ${span.days} days${perMonth}`;
   const elapsed = Math.round((Date.now() - new Date(span.start + 'T00:00')) / 864e5) + 1;
   if (span.estimated_days == null) return `Spread until the next bill (${elapsed} days so far)`;
   const over = elapsed > span.estimated_days;
-  return `Estimated to last ${span.estimated_days} days` + (over ? `, now ${elapsed}` : '')
+  return `Estimated from ${esc(span.rate_basis)} to last ${span.estimated_days} days` + (over ? `, now ${elapsed}` : '')
     + ` \\u00b7 spread until the next bill`;
 }
 // Unit suggested when entering a bill by hand
@@ -14164,6 +14166,21 @@ _UTILITIES_PAGE = """\\
         <table><tbody id="totals"></tbody></table>
       </div>
       <div class="card">
+        <h2>Propane tank</h2>
+        <div id="tank-status" class="muted">Loading&hellip;</div>
+        <div class="form" style="margin-top:.8rem">
+          <div><label for="t-date">Reading date</label><input type="date" id="t-date"></div>
+          <div><label for="t-pct">Tank gauge %</label><input type="text" id="t-pct" inputmode="decimal" placeholder="e.g. 21"></div>
+          <div class="wide actions"><button class="btn" id="t-add">Record reading</button> <span id="t-msg" class="muted"></span></div>
+        </div>
+        <table style="margin-top:.6rem"><tbody id="tank-readings"></tbody></table>
+        <div class="form" style="margin-top:.8rem">
+          <div><label for="t-size">Tank size (gal)</label><input type="text" id="t-size" inputmode="decimal" placeholder="e.g. 500"></div>
+          <div class="actions" style="align-self:end"><button class="btn secondary" id="t-size-save">Save size</button></div>
+        </div>
+        <div class="muted" style="margin-top:.6rem">A reading on a delivery&rsquo;s date counts as after the delivery. With two readings, usage comes from the drop in the tank (plus anything delivered in between) instead of from the bills.</div>
+      </div>
+      <div class="card">
         <h2>Add a bill by hand</h2>
         <div class="form" id="add-form">
           <div><label for="f-utility">Utility</label><select id="f-utility"></select></div>
@@ -14235,7 +14252,7 @@ function renderBills() {
       <td class="num">${fmtUsage(b)}</td>
       <td class="num muted">${unitCost(b)}</td>
       <td class="num">${money(b.total)}${fmtPeriod(b) ? `<div class="muted">${fmtPeriod(b)}</div>` : ''}${
-        spans[b.id] ? `<div class="muted">${fmtSpan(spans[b.id], b.total)}</div>` : ''}</td></tr>`).join('');
+        spans[b.id] ? `<div class="muted">${fmtSpan(spans[b.id], b)}</div>` : ''}</td></tr>`).join('');
   // Companies already billed for the chosen utility, for the hand-entry form
   updateCompanies();
 }
@@ -14378,6 +14395,68 @@ document.getElementById('f-save').addEventListener('click', async () => {
     status.className = 'err'; status.textContent = 'Could not add bill: ' + e.message;
   }
 });
+
+async function loadTank() {
+  const status = document.getElementById('tank-status');
+  let t;
+  try {
+    t = await fetchJSON('/api/utilities/propane');
+  } catch (e) {
+    status.innerHTML = `<span class="err">Could not load the propane tank: ${esc(e.message)}</span>`;
+    return;
+  }
+  const size = document.getElementById('t-size');
+  if (document.activeElement !== size) size.value = t.tank_gallons ?? '';
+  let html = '';
+  if (!t.tank_gallons) html = 'Enter the tank&rsquo;s size to turn gauge readings into gallons.';
+  else if (!t.burn) html = t.readings.length ? 'Record another reading (at least a day later) to measure usage.'
+                                             : 'No readings yet.';
+  else {
+    html = `Burning about <strong>${t.burn.gallons_per_day.toFixed(1)} gal a day</strong> (${(t.burn.gallons_per_day * 30.44).toFixed(0)} a month), over ${t.burn.over_days} days of readings.`;
+    if (t.now) html += `<div>About ${t.now.percent}% (${t.now.gallons} gal) today, roughly ${t.now.days_left} days until empty.</div>`;
+  }
+  status.innerHTML = html;
+  document.getElementById('tank-readings').innerHTML = t.readings.map(r => `<tr>
+      <td>${esc(r.read_on)}</td><td class="num">${r.percent}%</td>
+      <td class="num">${t.tank_gallons ? Math.round(r.percent / 100 * t.tank_gallons) + ' gal' : ''}</td>
+      <td class="num"><button class="btn secondary" data-del-reading="${r.id}">Delete</button></td></tr>`).join('');
+}
+document.getElementById('t-date').value = new Date().toLocaleDateString('en-CA');
+document.getElementById('t-add').addEventListener('click', async () => {
+  const msg = document.getElementById('t-msg');
+  const pct = document.getElementById('t-pct').value.replace('%', '').trim();
+  if (pct === '' || isNaN(+pct)) { msg.className = 'err'; msg.textContent = 'Enter the gauge reading, e.g. 21.'; return; }
+  msg.className = 'muted'; msg.textContent = 'Saving\\u2026';
+  try {
+    await sendJSON('/api/utilities/propane/readings', 'POST', {read_on: document.getElementById('t-date').value, percent: +pct});
+    msg.textContent = 'Recorded';
+    document.getElementById('t-pct').value = '';
+    await Promise.all([loadTank(), load()]);
+  } catch (e) {
+    msg.className = 'err'; msg.textContent = 'Could not record it: ' + e.message;
+  }
+});
+document.getElementById('t-size-save').addEventListener('click', async () => {
+  const msg = document.getElementById('t-msg');
+  try {
+    await sendJSON('/api/utilities/propane/tank', 'PUT', {gallons: document.getElementById('t-size').value.trim()});
+    msg.className = 'muted'; msg.textContent = 'Tank size saved';
+    await Promise.all([loadTank(), load()]);
+  } catch (e) {
+    msg.className = 'err'; msg.textContent = 'Could not save the size: ' + e.message;
+  }
+});
+document.getElementById('tank-readings').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-del-reading]');
+  if (!b || !confirm('Delete this reading?')) return;
+  try {
+    await fetchJSON(`/api/utilities/propane/readings/${b.dataset.delReading}`, {method: 'DELETE'});
+    await Promise.all([loadTank(), load()]);
+  } catch (err) {
+    showNetworkError(`Could not delete the reading: ${err.message}`);
+  }
+});
+loadTank();
 
 fetchJSON('/api/receipts/config')
   .then(c => {
@@ -14553,14 +14632,14 @@ function render() {
   if (b.usage_amount != null) figures.push(`<div class="figure"><div class="v">${fmtUsage(b)}</div><div class="l">Used</div>
       ${unitCost(b) ? `<div class="s">${unitCost(b)}</div>` : ''}</div>`);
   if (b.lease_fee != null) figures.push(`<div class="figure"><div class="v">${money(b.lease_fee)}</div>
-      <div class="l">Tank lease</div><div class="s">Annual fee on this bill</div></div>`);
+      <div class="l">Tank lease</div><div class="s">${money(b.lease_fee / 12)} a month over 12 months</div></div>`);
   if (b.reconnect_fee != null) figures.push(`<div class="figure"><div class="v">${money(b.reconnect_fee)}</div>
       <div class="l">Tank reconnection</div></div>`);
   if (b.tax != null) figures.push(`<div class="figure"><div class="v">${money(b.tax)}</div><div class="l">Tax</div></div>`);
   const span = spans[b.id];
   if (span) figures.push(`<div class="figure"><div class="v">${span.final ? span.days + ' days'
         : span.estimated_days != null ? '~' + span.estimated_days + ' days' : 'Open'}</div>
-      <div class="l">${span.final ? 'Lasted' : 'Expected to last'}</div><div class="s">${fmtSpan(span, b.total)}</div></div>`);
+      <div class="l">${span.final ? 'Lasted' : 'Expected to last'}</div><div class="s">${fmtSpan(span, b)}</div></div>`);
   if (b.period_months > 1 && b.total != null) figures.push(`<div class="figure"><div class="v">${money(b.total / b.period_months)}</div>
       <div class="l">A month</div><div class="s">Covers ${b.period_months} months</div></div>`);
   figures.push(`<div class="figure"><div class="v">${esc(b.purchase_date || '\\u2014')}</div><div class="l">Billing date</div></div>`);
@@ -15489,19 +15568,64 @@ def api_receipts_summary():
 # Utilities delivered on no schedule (a propane tank is filled when it runs
 # low). Such a bill pays for what's burned from its billing date until the
 # next delivery, so it's spread day by day over that span instead of by
-# period_months.
+# period_months. Its lease fee (yearly) is spread over 12 months instead.
 _DELIVERED_UTILITIES = ('Propane',)
+_LEASE_MONTHS = 12
 
 
-def _delivery_spans(bills: list, today: datetime.date) -> dict[int, dict]:
+def _propane_burn(readings: list, deliveries: list, tank_gallons: float | None) -> dict | None:
+    """Gallons of propane burned a day, from the tank readings (dicts with
+    read_on and percent, oldest first) and deliveries (dicts with day and
+    gallons). Between two readings, what was burned is the drop in the tank
+    plus anything delivered after the first reading and on or before the
+    second (a reading on a delivery day is taken after it). The readings
+    since the latest delivery are used when there are two of them, since
+    they're the most current; otherwise every pair. None without a tank
+    size or two readings at least a day apart."""
+    if not tank_gallons or len(readings) < 2:
+        return None
+
+    def rate(rs):
+        used = days = 0.0
+        for r0, r1 in zip(rs, rs[1:]):
+            d = (datetime.date.fromisoformat(r1['read_on']) - datetime.date.fromisoformat(r0['read_on'])).days
+            if d <= 0:
+                continue
+            delivered = sum(x['gallons'] or 0 for x in deliveries if r0['read_on'] < x['day'] <= r1['read_on'])
+            used += (r0['percent'] - r1['percent']) / 100 * tank_gallons + delivered
+            days += d
+        return (used / days, days) if days and used > 0 else None
+
+    latest = max((x['day'] for x in deliveries), default=None)
+    recent = [r for r in readings if latest is None or r['read_on'] >= latest]
+    got = rate(recent) or rate(readings)
+    if got is None:
+        return None
+    per_day, days = got
+    return {'gallons_per_day': per_day, 'over_days': round(days)}
+
+
+def _propane_tank(conn: sqlite3.Connection) -> tuple[float | None, list]:
+    """The tank's size in gallons (None if not set) and its readings, oldest first."""
+    row = conn.execute("SELECT value FROM settings WHERE key='propane_tank_gallons'").fetchone()
+    size = float(row['value']) if row and row['value'] else None
+    readings = [dict(r) for r in conn.execute(
+        "SELECT id, read_on, percent FROM propane_readings ORDER BY read_on, id")]
+    return size, readings
+
+
+def _delivery_spans(bills: list, today: datetime.date, tank_gallons: float | None = None,
+                    readings: list | None = None) -> dict[int, dict]:
     """How each delivered-utility bill (see _DELIVERED_UTILITIES) is spread.
-    bills are rows with id, day, utility, amount and usage_amount. A bill
-    followed by a later one is final: it lasted until that bill's date. The
-    latest bill is open: how long it will last is estimated from the usage
-    rate of the earlier ones (gallons a day, or dollars a day if gallons
-    weren't entered), and with no earlier bill, or once it outlasts that
-    estimate, it's spread evenly through today. Returns {bill id: {start,
-    end (exclusive), days, final, estimated_days, rate_basis}}."""
+    bills are rows with id, day, utility, amount, lease_fee and usage_amount;
+    what's spread by day is the amount less the lease fee. A bill followed
+    by a later one is final: it lasted until that bill's date. The latest
+    bill is open: how long it will last is its gallons over the propane
+    burned a day, from the tank readings when there are enough (see
+    _propane_burn), else from the earlier bills (gallons a day, or dollars a
+    day if gallons weren't entered). With no estimate, or once it outlasts
+    it, it's spread evenly through today. Returns {bill id: {start, end
+    (exclusive), days, final, estimated_days, rate_basis}}."""
     spans: dict[int, dict] = {}
     for utility in _DELIVERED_UTILITIES:
         # Bills on the same day (e.g. a delivery and a fee) share one span
@@ -15510,12 +15634,16 @@ def _delivery_spans(bills: list, today: datetime.date) -> dict[int, dict]:
             if b['utility'] == utility:
                 groups.setdefault(b['day'], []).append(b)
         days = sorted(groups)
+        burn = None
+        if utility == 'Propane':
+            burn = _propane_burn(readings or [], [{'day': d, 'gallons': sum(b['usage_amount'] or 0 for b in groups[d])}
+                                                  for d in days], tank_gallons)
         finals = []  # (gallons or None, amount, days) of each finished span
         for i, d in enumerate(days):
             start = datetime.date.fromisoformat(d)
             group = groups[d]
             gallons = sum(b['usage_amount'] or 0 for b in group)
-            amount = sum(b['amount'] or 0 for b in group)
+            amount = sum((b['amount'] or 0) - (b['lease_fee'] or 0) for b in group)
             info = {'start': d, 'final': i + 1 < len(days), 'estimated_days': None, 'rate_basis': None}
             if info['final']:
                 end = datetime.date.fromisoformat(days[i + 1])
@@ -15523,12 +15651,14 @@ def _delivery_spans(bills: list, today: datetime.date) -> dict[int, dict]:
             else:
                 est = None
                 with_gal = [f for f in finals if f[0]]
-                if gallons and with_gal:
+                if gallons and burn:
+                    est, info['rate_basis'] = gallons / burn['gallons_per_day'], 'tank readings'
+                elif gallons and with_gal:
                     per_day = sum(f[0] for f in with_gal) / sum(f[2] for f in with_gal)
-                    est, info['rate_basis'] = gallons / per_day, 'gallons'
+                    est, info['rate_basis'] = gallons / per_day, 'earlier bills'
                 elif finals and sum(f[1] for f in finals) > 0:
                     per_day = sum(f[1] for f in finals) / sum(f[2] for f in finals)
-                    est, info['rate_basis'] = amount / per_day, 'dollars'
+                    est, info['rate_basis'] = amount / per_day, 'earlier bills'
                 if est is not None:
                     info['estimated_days'] = round(est)
                 end = max(start + datetime.timedelta(days=max(1, round(est or 0))),
@@ -15555,6 +15685,78 @@ def _spread_by_day(amount: float, start: datetime.date, end: datetime.date,
     return out
 
 
+@app.get("/api/utilities/propane")
+def api_propane():
+    """The propane tank: its size, gauge readings (newest first), gallons
+    burned a day (from the readings, see _propane_burn) and an estimate of
+    how full it is today and how many days until it's empty."""
+    with _conn() as conn:
+        size, readings = _propane_tank(conn)
+        deliveries = [dict(r) for r in conn.execute(
+            "SELECT COALESCE(purchase_date, substr(uploaded_at, 1, 10)) AS day, usage_amount AS gallons "
+            "FROM receipts WHERE status='done' AND kind='bill' AND utility='Propane'")]
+    burn = _propane_burn(readings, deliveries, size)
+    now = None
+    if burn and readings:
+        last = readings[-1]
+        today = datetime.date.today()
+        since = (today - datetime.date.fromisoformat(last['read_on'])).days
+        delivered = sum(d['gallons'] or 0 for d in deliveries if last['read_on'] < d['day'] <= today.isoformat())
+        gallons = max(0.0, last['percent'] / 100 * size + delivered - burn['gallons_per_day'] * since)
+        gallons = min(gallons, size)
+        now = {'percent': round(gallons / size * 100, 1), 'gallons': round(gallons),
+               'days_left': round(gallons / burn['gallons_per_day'])}
+    return jsonify({'tank_gallons': size, 'readings': readings[::-1], 'burn': burn, 'now': now})
+
+
+@app.put("/api/utilities/propane/tank")
+def api_propane_tank():
+    """Set the tank's size: {gallons} (e.g. 500)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        gallons = float(data.get('gallons'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'gallons must be a number'}), 400
+    if not 1 <= gallons <= 100000:
+        return jsonify({'error': 'gallons must be between 1 and 100,000'}), 400
+    with _conn() as conn:
+        conn.execute("INSERT INTO settings (key, value) VALUES ('propane_tank_gallons', ?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(gallons),))
+    return jsonify({'ok': True})
+
+
+@app.post("/api/utilities/propane/readings")
+def api_propane_reading_add():
+    """Record the tank gauge: {read_on: YYYY-MM-DD, percent}. A reading on a
+    delivery day counts as taken after the delivery."""
+    data = request.get_json(silent=True) or {}
+    try:
+        read_on = datetime.date.fromisoformat(data.get('read_on') or '')
+    except (TypeError, ValueError):
+        return jsonify({'error': 'read_on must be YYYY-MM-DD'}), 400
+    if read_on > datetime.date.today():
+        return jsonify({'error': 'The reading can\'t be in the future'}), 400
+    try:
+        pct = float(str(data.get('percent')).replace('%', ''))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'percent must be a number'}), 400
+    if not 0 <= pct <= 100:
+        return jsonify({'error': 'percent must be between 0 and 100'}), 400
+    with _conn() as conn:
+        cur = conn.execute("INSERT INTO propane_readings (read_on, percent) VALUES (?, ?)",
+                           (read_on.isoformat(), pct))
+    return jsonify({'ok': True, 'id': cur.lastrowid}), 201
+
+
+@app.delete("/api/utilities/propane/readings/<int:reading_id>")
+def api_propane_reading_delete(reading_id):
+    with _conn() as conn:
+        n = conn.execute("DELETE FROM propane_readings WHERE id=?", (reading_id,)).rowcount
+    if not n:
+        return jsonify({'error': 'Reading not found'}), 404
+    return jsonify({'ok': True})
+
+
 @app.get("/api/utilities/summary")
 def api_utilities_summary():
     """Utility bills per month per utility over the last N months (default 12),
@@ -15562,8 +15764,8 @@ def api_utilities_summary():
     total was read. A bill covering several months (period_months) is spread
     evenly over them, starting with its billing month; months after this one
     aren't counted yet. A propane bill is spread by day until the next one
-    (see _delivery_spans), counting only the days so far; spans gives how
-    each was spread."""
+    (see _delivery_spans), counting only the days so far, and its lease fee
+    over 12 months; spans gives how each was spread."""
     months = max(1, min(int(request.args.get('months', 12)), 120))
     start = _months_start(months)[:7]
     today = datetime.date.today()
@@ -15574,18 +15776,26 @@ def api_utilities_summary():
     with _conn() as conn:
         bills = conn.execute(
             f"SELECT r.id, {day} AS day, COALESCE(r.utility, 'Other') AS utility, {amount} AS amount, "
-            f"r.usage_amount, COALESCE(r.period_months, 1) AS n FROM receipts r "
+            f"r.usage_amount, r.lease_fee, COALESCE(r.period_months, 1) AS n FROM receipts r "
             f"WHERE r.status='done' AND r.kind='bill'"
         ).fetchall()
-    spans = _delivery_spans(bills, today)
+        tank_gallons, readings = _propane_tank(conn)
+    spans = _delivery_spans(bills, today, tank_gallons, readings)
     cells: dict[tuple[str, str], dict] = {}
     for b in bills:
         span = spans.get(b['id'])
         if span:
+            lease = b['lease_fee'] or 0
+            shares = _spread_by_day(b['amount'] - lease, datetime.date.fromisoformat(span['start']),
+                                    datetime.date.fromisoformat(span['end']), today + datetime.timedelta(days=1))
+            # The yearly lease fee, a twelfth a month from the billing month
+            y, m = int(b['day'][:4]), int(b['day'][5:7])
+            for _ in range(_LEASE_MONTHS if lease else 0):
+                month = f"{y:04d}-{m:02d}"
+                shares[month] = shares.get(month, 0) + lease / _LEASE_MONTHS
+                y, m = (y + 1, 1) if m == 12 else (y, m + 1)
             counted = False
-            for month, amt in sorted(_spread_by_day(
-                    b['amount'], datetime.date.fromisoformat(span['start']),
-                    datetime.date.fromisoformat(span['end']), today + datetime.timedelta(days=1)).items()):
+            for month, amt in sorted(shares.items()):
                 if start <= month <= this_month:
                     c = cells.setdefault((month, b['utility']), {'amount': 0.0, 'n_bills': 0})
                     c['amount'] += amt

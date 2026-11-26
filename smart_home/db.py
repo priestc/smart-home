@@ -365,6 +365,16 @@ def open_db(path: str) -> sqlite3.Connection:
             processed_at TEXT
         )
     """)
+    # A propane tank's gauge, read by hand: percent full on read_on. A
+    # reading on a delivery's billing date is taken after the delivery. The
+    # tank's size in gallons is the setting propane_tank_gallons.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS propane_readings (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            read_on TEXT NOT NULL,
+            percent REAL NOT NULL
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS email_bill_checks (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
