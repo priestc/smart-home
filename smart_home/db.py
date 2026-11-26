@@ -336,9 +336,13 @@ def open_db(path: str) -> sqlite3.Connection:
     # due_date is no longer used.
     # source is 'email' for a bill read from Gmail (email_id is its message;
     # see gmail.py), otherwise NULL. period_months is how many months a bill
-    # covers (e.g. 6 for car insurance); NULL means one.
+    # covers (e.g. 6 for car insurance); NULL means one. unit_price is the
+    # price per unit of usage as printed (a propane bill's price per gallon)
+    # and lease_fee an annual tank lease charged on the bill; both are part
+    # of total.
     for col in ("kind TEXT NOT NULL DEFAULT 'receipt'", "utility TEXT", "usage_amount REAL",
-                "usage_unit TEXT", "due_date TEXT", "source TEXT", "email_id TEXT", "period_months INTEGER"):
+                "usage_unit TEXT", "due_date TEXT", "source TEXT", "email_id TEXT", "period_months INTEGER",
+                "unit_price REAL", "lease_fee REAL"):
         try:
             conn.execute(f"ALTER TABLE receipts ADD COLUMN {col}")
             conn.commit()
