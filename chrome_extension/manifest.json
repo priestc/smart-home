@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Smart Home: Amazon orders",
+  "version": "1.0.0",
+  "description": "Sends the items of your Amazon orders to your smart-home receipts.",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": ["https://www.amazon.com/*", "http://smart-home.lan/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [
+    {
+      "matches": ["https://www.amazon.com/*"],
+      "js": ["parse.js", "amazon.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {"default_popup": "popup.html", "default_title": "Amazon orders to Smart Home"}
+}

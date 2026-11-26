@@ -12124,6 +12124,45 @@ def api_receipts_amazon_export():
     return jsonify({'ok': True, 'started': True}), 202
 
 
+# The Chrome extension (chrome_extension/) posts orders it read on amazon.com
+@app.post("/api/receipts/amazon/order")
+def api_receipts_amazon_order():
+    """Body: {order_id, order_date, items: [{name, asin, quantity, unit_price}],
+    subtotal, total_before_tax, tax, total, url}. Fills in (or makes) the
+    order's receipt; see amazon.apply_page_order."""
+    from smart_home import amazon as _amazon
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Send the order as JSON'}), 400
+    try:
+        return jsonify({'ok': True, **_amazon.apply_page_order(_db_path, data)})
+    except _amazon.AmazonError as e:
+        return jsonify({'error': str(e)}), 422
+
+
+@app.post("/api/receipts/amazon/order-error")
+def api_receipts_amazon_order_error():
+    """Body: {order_id, url, error, html}: a page the extension couldn't read.
+    It's saved on tank2 so the reader can be fixed, and listed on /receipts."""
+    from smart_home import amazon as _amazon
+    data = request.get_json(silent=True) or {}
+    path = _amazon.save_unreadable_page(_db_path, str(data.get('order_id') or ''), str(data.get('url') or ''),
+                                        str(data.get('error') or 'Unknown error'), str(data.get('html') or ''))
+    return jsonify({'ok': True, 'saved': path})
+
+
+@app.post("/api/receipts/amazon/order-states")
+def api_receipts_amazon_order_states():
+    """Body: {order_ids: [...]}. Which already have their real items; the
+    extension's Sync only opens the others."""
+    from smart_home import amazon as _amazon
+    ids = (request.get_json(silent=True) or {}).get('order_ids')
+    if not isinstance(ids, list):
+        return jsonify({'error': 'order_ids must be a list'}), 400
+    with _conn() as conn:
+        return jsonify({'states': _amazon.order_states(conn, [str(i) for i in ids[:500]])})
+
+
 @app.get("/api/receipts/<int:rid>")
 def api_receipt_detail(rid):
     with _conn() as conn:
@@ -12835,6 +12874,12 @@ async function loadAmazon() {
   if (d.errors.length) html += `<div class="err" style="margin-top:.4rem">Couldn\\u2019t read ${d.errors.length} (tried again at each check):</div><ul>`
     + d.errors.map(x => `<li><a href="/email-archive/${encodeURIComponent(x.message_id)}">${esc(x.received_at.slice(0, 10))}</a>: <span class="err">${esc(x.reason || '')}</span></li>`).join('') + '</ul>';
   if (d.scanning) html = 'Checking for new Amazon order emails\\u2026 ' + html;
+  const ext = d.extension || [];
+  if (ext.length) {
+    const word = {filled: 'filled in', created: 'added', already: 'already had its items', error: 'couldn\\u2019t be read'};
+    html += `<div style="margin-top:.6rem">From the Chrome extension:</div><ul>` + ext.slice(0, 8).map(x =>
+      `<li class="${x.outcome === 'error' ? 'err' : ''}">${esc(x.ts)}: ${x.receipt_id ? `<a href="/receipts/${x.receipt_id}">` : ''}${esc(x.order_id || 'receipt ' + x.receipt_id)}${x.receipt_id ? '</a>' : ''} ${esc(word[x.outcome] || x.outcome)}${x.error ? ': ' + esc(x.error) : ''}</li>`).join('') + '</ul>';
+  }
   el.innerHTML = html;
   document.getElementById('amazon-scan').disabled = d.scanning;
   renderAmazonExport(d);

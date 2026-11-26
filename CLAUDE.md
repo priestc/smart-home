@@ -42,6 +42,10 @@ To install `arduino-cli` and all ESP32 build dependencies:
 bash "$(smart-home firmware-dir)/setup.sh"
 ```
 
+## Amazon orders Chrome extension
+
+`chrome_extension/` reads order pages on amazon.com and posts them to `/api/receipts/amazon/order` (see its README). It's loaded unpacked in Chrome; after changing it, the user must click reload on its card in `chrome://extensions`. Pages it couldn't read are saved on tank2 in `~/.local/share/smart-home/amazon-extension/` for fixing `parse.js`.
+
 ## Error handling principle
 
 Never silently swallow errors. Whenever something goes wrong — a failed network request, an unexpected API response, a caught exception — always surface it visibly in the UI so the user knows what's happening. This applies to:

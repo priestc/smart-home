@@ -201,11 +201,12 @@ def _order_kind(order: dict) -> str | None:
     return kinds.pop() if len(kinds) == 1 and None not in kinds else None
 
 
-def _exported_orders(conn: sqlite3.Connection) -> dict[str, int]:
-    """{order id: receipt id} for receipts filled in from Amazon's export."""
+def _detailed_orders(conn: sqlite3.Connection) -> dict[str, int]:
+    """{order id: receipt id} for receipts filled in with the real items, from
+    Amazon's export or the Chrome extension."""
     out = {}
     for rid, raw in conn.execute("SELECT id, raw_json FROM receipts WHERE source='amazon' "
-                                 "AND raw_json LIKE '%\"from_export\": true%'"):
+                                 "AND raw_json LIKE '%\"detailed\": true%'"):
         for oid in json.loads(raw).get("orders") or []:
             out[oid] = rid
     return out
@@ -230,7 +231,7 @@ def read_email(conn: sqlite3.Connection, db_path: str, message_id: str) -> None:
         orders = parse(email_archive.parse(found[1]))
         # Orders already filled in from Amazon's export (amazon_export below)
         # keep those items; the receipt is just linked to this email
-        exported = _exported_orders(conn)
+        exported = _detailed_orders(conn)
         for o in orders:
             for oid in o["orders"]:
                 if oid in exported:
@@ -369,7 +370,7 @@ def status(conn: sqlite3.Connection) -> dict:
     exp = conn.execute("SELECT value FROM settings WHERE key='amazon_export'").fetchone()
     return {"last_scan": json.loads(row[0]) if row else None, "errors": errors, "n_imported": n,
             "scanning": _lock.locked(), "last_export": json.loads(exp[0]) if exp else None,
-            "importing_export": _export_lock.locked()}
+            "importing_export": _export_lock.locked(), "extension": extension_log(conn)[:15]}
 
 
 _rereading: set[str] = set()
@@ -553,43 +554,57 @@ def _export_orders(rows: list[dict]) -> tuple[dict[str, dict], int]:
     return orders, cancelled
 
 
-def _fill_receipt(conn: sqlite3.Connection, rid: int | None, oids: list[str], orders: dict[str, dict],
-                  cats) -> int:
-    """Put the export's items for these orders on receipt rid (made if None)."""
-    items = [it for oid in oids for it in orders[oid]["items"]]
+def _write_receipt(conn: sqlite3.Connection, rid: int | None, oids: list[str], items: list[dict],
+                   date: str | None, tax: float, total: float, notes: str, detail_source: str, cats) -> int:
+    """Put these items ({name, asin, quantity, price[, category]}) on receipt
+    rid (made if None), marking it as detailed: a later email, export or
+    extension page for the same order leaves it alone. Items without a
+    category take the next one from cats."""
     subtotal = round(sum(it["price"] for it in items), 2)
-    tax = round(sum(it["tax"] for it in items), 2)
-    date = min((orders[oid]["date"] for oid in oids if orders[oid]["date"]), default=None)
-    raw = json.dumps({"orders": oids, "from_export": True, "items": items})
-    notes = (f"From Amazon's order history export (order {', '.join(oids)}). An item's price includes its "
-             "share of any discount and shipping; tax is what Amazon charged.")
+    raw = json.dumps({"orders": oids, "detailed": True, "detail_source": detail_source, "items": items})
     old_keys = []
     if rid is None:
         rid = conn.execute(
             "INSERT INTO receipts (uploaded_at, status, processed_at, image_path, media_type, merchant, "
             "purchase_date, subtotal, tax, total, notes, raw_json, kind, source) "
             "VALUES (?, 'done', ?, '', '', ?, ?, ?, ?, ?, ?, ?, 'receipt', 'amazon')",
-            (_now(), _now(), MERCHANT, date, subtotal, tax, round(subtotal + tax, 2), notes, raw)).lastrowid
+            (_now(), _now(), MERCHANT, date, subtotal, tax, total, notes, raw)).lastrowid
     else:
         old_keys = [r[0] for r in conn.execute(
             "SELECT name_key FROM receipt_items WHERE receipt_id=? AND name_key IS NOT NULL", (rid,))]
         conn.execute("UPDATE receipts SET status='done', error=NULL, processed_at=?, subtotal=?, tax=?, total=?, "
-                     "notes=?, raw_json=? WHERE id=?",
-                     (_now(), subtotal, tax, round(subtotal + tax, 2), notes, raw, rid))
+                     "notes=?, raw_json=?, purchase_date=COALESCE(?, purchase_date) WHERE id=?",
+                     (_now(), subtotal, tax, total, notes, raw, date, rid))
         conn.execute("DELETE FROM receipt_items WHERE receipt_id=?", (rid,))
     for i, it in enumerate(items):
-        key = f"asin:{it['asin']}" if it["asin"] else receipts.name_key(it["name"], None)
-        pid = db.match_product(conn, key, it["name"])
-        qty = it["quantity"] if it["quantity"] > 1 else None
+        pid = key = None
+        if it.get("category") is None:  # a product, not a shipping or discount line
+            key = f"asin:{it['asin']}" if it.get("asin") else receipts.name_key(it["name"], None)
+            pid = db.match_product(conn, key, it["name"])
+        qty = it["quantity"] if (it.get("quantity") or 1) > 1 else None
         conn.execute(
             "INSERT INTO receipt_items (receipt_id, position, description, quantity, unit, total_price, category, "
             "raw_text, item_code, name_key, product_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (rid, i, it["name"], qty, "ea" if qty else None, it["price"], next(cats), it["name"], None, key, pid))
+            (rid, i, it["name"], qty, "ea" if qty else None, it["price"], it.get("category") or next(cats),
+             it["name"] if key else None, None, key, pid))
     # The shortened names from the email no longer describe anything
     for k in old_keys:
         conn.execute("DELETE FROM product_keys WHERE name_key=? AND product_id NOT IN "
                      "(SELECT product_id FROM receipt_items WHERE product_id IS NOT NULL)", (k,))
     return rid
+
+
+def _fill_receipt(conn: sqlite3.Connection, rid: int | None, oids: list[str], orders: dict[str, dict],
+                  cats) -> int:
+    """Put the export's items for these orders on receipt rid (made if None)."""
+    items = [it for oid in oids for it in orders[oid]["items"]]
+    tax = round(sum(it["tax"] for it in items), 2)
+    total = round(sum(it["price"] for it in items) + tax, 2)
+    date = min((orders[oid]["date"] for oid in oids if orders[oid]["date"]), default=None)
+    notes = (f"From Amazon's order history export (order {', '.join(oids)}). An item's price includes its "
+             "share of any discount and shipping; tax is what Amazon charged.")
+    return _write_receipt(conn, rid, oids, [{k: it[k] for k in ("name", "asin", "quantity", "price")} for it in items],
+                          date, tax, total, notes, "export", cats)
 
 
 def import_export(db_path: str, data: bytes, filename: str = "") -> dict:
@@ -616,7 +631,7 @@ def import_export(db_path: str, data: bytes, filename: str = "") -> dict:
                     continue
                 for oid in j.get("orders") or []:
                     by_order[oid] = r["id"]
-                if j.get("from_export"):
+                if j.get("detailed"):
                     filled.add(r["id"])
             # Group the export's orders the way the receipts are (one email
             # receipt can cover several orders)
@@ -676,3 +691,193 @@ def import_export_in_background(db_path: str, data: bytes, filename: str) -> boo
 
     threading.Thread(target=_bg, daemon=True).start()
     return True
+
+
+# ---- The Chrome extension (chrome_extension/ in the repo) -----------------------
+#
+# It reads an order's details page on amazon.com in the browser you shop in
+# (after you check out, when you open one, or for recent orders with "Sync")
+# and posts it here: every item's full name, ASIN, quantity and price, and
+# the order summary. The items must add up to the page's Item(s) Subtotal, or
+# the extension reports an error instead. Shipping and discounts (Total before
+# tax minus the subtotal) become a line of their own. The receipt made from
+# the order's email gets the items; with no email yet, a receipt is made. An
+# email receipt that covers several orders is split. Categories are picked by
+# the model afterwards, in the background; until then a product keeps the
+# category it had on an earlier receipt, else "Other".
+#
+# Every post is kept in the setting amazon_extension (the latest 50) for
+# /receipts to show; for one the extension couldn't read, the page itself is
+# saved under <data dir>/amazon-extension/ so the reader can be fixed.
+
+EXTENSION_LOG = 50
+
+
+def _log_extension(conn: sqlite3.Connection, entry: dict) -> None:
+    row = conn.execute("SELECT value FROM settings WHERE key='amazon_extension'").fetchone()
+    log = json.loads(row[0]) if row else []
+    log = [dict(entry, ts=_now())] + log[:EXTENSION_LOG - 1]
+    conn.execute("INSERT INTO settings (key, value) VALUES ('amazon_extension', ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(log),))
+    conn.commit()
+
+
+def extension_log(conn: sqlite3.Connection) -> list[dict]:
+    row = conn.execute("SELECT value FROM settings WHERE key='amazon_extension'").fetchone()
+    return json.loads(row[0]) if row else []
+
+
+def order_states(conn: sqlite3.Connection, order_ids: list[str]) -> dict[str, str]:
+    """For each order: 'detailed' (has its real items), 'summary' (only the
+    email's summary or shortened names) or 'missing' (no receipt)."""
+    detailed = _detailed_orders(conn)
+    known = set()
+    for (raw,) in conn.execute("SELECT raw_json FROM receipts WHERE source='amazon'"):
+        try:
+            known.update(json.loads(raw or "{}").get("orders") or [])
+        except json.JSONDecodeError:
+            pass
+    return {o: "detailed" if o in detailed else "summary" if o in known else "missing" for o in order_ids}
+
+
+def _check_page_order(d: dict) -> dict:
+    """The posted order, checked and cleaned. Raises AmazonError."""
+    oid = str(d.get("order_id") or "").strip()
+    if not _ORDER_RE.fullmatch(oid):
+        raise AmazonError(f"Not an Amazon order number: {oid!r}")
+    items = []
+    for it in d.get("items") or []:
+        try:
+            qty = max(int(it.get("quantity") or 1), 1)
+            each = round(float(it["unit_price"]), 2)
+        except (KeyError, TypeError, ValueError):
+            raise AmazonError(f"An item has no usable price or quantity: {it!r}")
+        name = " ".join(str(it.get("name") or "").split())[:300]
+        if not name:
+            raise AmazonError("An item has no name")
+        asin = str(it.get("asin") or "").strip() or None
+        items.append({"name": name, "asin": asin, "quantity": qty, "price": round(each * qty, 2)})
+    if not items:
+        raise AmazonError("No items")
+    nums = {}
+    for k in ("subtotal", "total_before_tax", "tax", "total"):
+        try:
+            nums[k] = round(float(d[k]), 2)
+        except (KeyError, TypeError, ValueError):
+            raise AmazonError(f"Missing {k}")
+    got = round(sum(it["price"] for it in items), 2)
+    if abs(got - nums["subtotal"]) >= 0.005:
+        raise AmazonError(f"The items add up to {got:.2f}, not the page's Item(s) Subtotal {nums['subtotal']:.2f}")
+    extra = round(nums["total_before_tax"] - nums["subtotal"], 2)
+    if abs(extra) >= 0.01:
+        items.append({"name": "Shipping" if extra > 0 else "Discounts and credits", "asin": None, "quantity": 1,
+                      "price": extra, "category": "Fees & Deposits" if extra > 0 else "Other"})
+    if abs(round(nums["total_before_tax"] + nums["tax"], 2) - nums["total"]) >= 0.015:
+        raise AmazonError(f"Total before tax {nums['total_before_tax']:.2f} + tax {nums['tax']:.2f} "
+                          f"isn't the Grand Total {nums['total']:.2f}")
+    date = _local_date(str(d.get("order_date") or "")) or None
+    return {"order_id": oid, "date": date, "items": items, "tax": nums["tax"], "total": nums["total"]}
+
+
+def apply_page_order(db_path: str, d: dict) -> dict:
+    """Store an order the extension read. Returns {outcome: 'filled' |
+    'created' | 'already', receipt_id}. Raises AmazonError (also logged)."""
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    oid = str(d.get("order_id") or "")
+    try:
+        try:
+            o = _check_page_order(d)
+        except AmazonError as e:
+            _log_extension(conn, {"order_id": oid, "outcome": "error", "error": str(e), "url": d.get("url")})
+            raise
+        detailed = _detailed_orders(conn)
+        if oid in detailed:
+            result = {"outcome": "already", "receipt_id": detailed[oid]}
+            _log_extension(conn, {"order_id": oid, **result})
+            return result
+        rid, email_id, others = None, None, []
+        for r in conn.execute("SELECT id, raw_json, email_id FROM receipts WHERE source='amazon'"):
+            orders = (json.loads(r["raw_json"] or "{}").get("orders") or [])
+            if oid in orders:
+                rid, email_id, others = r["id"], r["email_id"], [x for x in orders if x != oid]
+                break
+        if rid is not None and others:
+            # One email receipt for several orders: this order becomes its own
+            # receipt and the rest stays on the email's
+            old = conn.execute("SELECT total, raw_json FROM receipts WHERE id=?", (rid,)).fetchone()
+            raw = json.loads(old["raw_json"])
+            raw["orders"] = others
+            rest = round((old["total"] or 0) - o["total"], 2)
+            conn.execute("UPDATE receipts SET total=?, subtotal=?, raw_json=? WHERE id=?",
+                         (rest, rest, json.dumps(raw), rid))
+            lines = conn.execute("SELECT id FROM receipt_items WHERE receipt_id=?", (rid,)).fetchall()
+            if len(lines) == 1:
+                conn.execute("UPDATE receipt_items SET total_price=? WHERE id=?", (rest, lines[0][0]))
+            rid = None
+        # Until the model picks, a product keeps the category it had before
+        for it in o["items"]:
+            if it.get("category") is None and it["asin"]:
+                prev = conn.execute(
+                    "SELECT i.category FROM receipt_items i JOIN product_keys k ON k.product_id = i.product_id "
+                    "WHERE k.name_key=? ORDER BY i.id DESC LIMIT 1", (f"asin:{it['asin']}",)).fetchone()
+                it["guess"] = prev[0] if prev else None
+        cats = iter([it.get("guess") or "Other" for it in o["items"] if it.get("category") is None])
+        for it in o["items"]:
+            it.pop("guess", None)
+        notes = (f"From the order's page on amazon.com (order {oid}), read by the Chrome extension. "
+                 "Tax is what Amazon charged.")
+        created = rid is None
+        rid = _write_receipt(conn, rid, [oid], o["items"], o["date"], o["tax"], o["total"], notes, "extension", cats)
+        if created and email_id:
+            conn.execute("UPDATE receipts SET email_id=? WHERE id=?", (email_id, rid))
+        db.prune_products(conn)
+        conn.commit()
+        result = {"outcome": "created" if created else "filled", "receipt_id": rid}
+        _log_extension(conn, {"order_id": oid, **result})
+    finally:
+        conn.close()
+    _categorize_in_background(db_path, rid)
+    return result
+
+
+def _categorize_in_background(db_path: str, rid: int) -> None:
+    def _bg():
+        conn = sqlite3.connect(db_path, timeout=30)
+        try:
+            rows = conn.execute("SELECT id, description FROM receipt_items WHERE receipt_id=? "
+                                "AND product_id IS NOT NULL ORDER BY position", (rid,)).fetchall()
+            try:
+                cats = _categories([r[1] for r in rows])
+            except Exception as e:
+                msg = str(e) if isinstance(e, AmazonError) else f"{type(e).__name__}: {e}"
+                conn.execute("UPDATE receipts SET notes = notes || ? WHERE id=?",
+                             (f" Categories couldn't be picked automatically ({msg}); set them by hand.", rid))
+                conn.commit()
+                _log_extension(conn, {"receipt_id": rid, "outcome": "error",
+                                      "error": f"Picking categories failed: {msg}"})
+                return
+            for (iid, _), cat in zip(rows, cats):
+                conn.execute("UPDATE receipt_items SET category=? WHERE id=?", (cat, iid))
+            conn.commit()
+        finally:
+            conn.close()
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+def save_unreadable_page(db_path: str, order_id: str, url: str, error: str, html: str) -> str:
+    """Keep a page the extension couldn't read, for fixing the reader. Returns its path."""
+    import os
+    d = os.path.join(os.path.dirname(os.path.abspath(db_path)), "amazon-extension")
+    os.makedirs(d, exist_ok=True)
+    safe = re.sub(r"[^0-9A-Za-z-]", "_", order_id or "unknown")[:40]
+    path = os.path.join(d, f"{datetime.datetime.now():%Y%m%d-%H%M%S}-{safe}.html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"<!-- {url}\n{error} -->\n{html}")
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        _log_extension(conn, {"order_id": order_id, "outcome": "error", "error": error, "url": url, "saved": path})
+    finally:
+        conn.close()
+    return path
