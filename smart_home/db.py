@@ -537,6 +537,16 @@ def open_db(path: str) -> sqlite3.Connection:
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
+    # zone: where the product goes (receipts.ZONES, 'none', or NULL = not
+    # sorted yet). amazon_category: Amazon's category path for it, a JSON list
+    # (read by the Chrome extension); amazon_category_tried: when the
+    # extension last tried to read it and couldn't.
+    for col in ("zone TEXT", "amazon_category TEXT", "amazon_category_tried TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
     if conn.execute("SELECT COUNT(*) FROM subcategories").fetchone()[0] == 0:
         now = _now()
         conn.executemany("INSERT INTO subcategories (category, name, created_at) VALUES ('Groceries', ?, ?)",

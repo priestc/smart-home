@@ -115,6 +115,7 @@ _CRUMBS: dict[str, tuple[str, str | None]] = {
     "/cost-of-living": ("Cost of Living", "/"),
     "/receipts": ("Receipts", "/cost-of-living"),
     "/receipts/items": ("Products", "/receipts"),
+    "/receipts/sort": ("Sort into zones", "/receipts"),
     "/receipts/photos": ("Product Photos", "/receipts/items"),
     "/receipts/new": ("Add Receipt", "/receipts"),
     "/utilities": ("Utilities", "/cost-of-living"),
@@ -12018,6 +12019,8 @@ def api_receipts_config():
         'model': f'service delegator task {_receipts.AI_TASK}',
         'categories': _receipts.CATEGORIES,
         'tax_category': _receipts.TAX_CATEGORY,
+        'zones': _receipts.ZONES,
+        'no_zone': _receipts.NO_ZONE,
         'utilities': _receipts.UTILITIES,
         'subcategories': _subcategories(),
     })
@@ -12163,6 +12166,31 @@ def api_receipts_amazon_order_states():
         return jsonify({'states': _amazon.order_states(conn, [str(i) for i in ids[:500]])})
 
 
+@app.get("/api/receipts/amazon/categories-needed")
+def api_receipts_amazon_categories_needed():
+    """ASINs of products without Amazon's category path yet (the extension's
+    Sync reads it from each product's page)."""
+    from smart_home import amazon as _amazon
+    with _conn() as conn:
+        return jsonify({'asins': _amazon.asins_needing_category(conn)})
+
+
+@app.post("/api/receipts/amazon/category")
+def api_receipts_amazon_category():
+    """Body: {asin, path: ["Home & Kitchen", ...]} or {asin, error} when the
+    product's page had none."""
+    from smart_home import amazon as _amazon
+    data = request.get_json(silent=True) or {}
+    path = data.get('path')
+    if path is not None and not isinstance(path, list):
+        return jsonify({'error': 'path must be a list'}), 400
+    with _conn() as conn:
+        try:
+            return jsonify({'ok': True, **_amazon.set_category(conn, data.get('asin'), path, data.get('error'))})
+        except _amazon.AmazonError as e:
+            return jsonify({'error': str(e)}), 404
+
+
 @app.get("/api/receipts/<int:rid>")
 def api_receipt_detail(rid):
     with _conn() as conn:
@@ -12179,13 +12207,15 @@ def api_receipt_detail(rid):
         # many receipt-items (on any receipt) point to that product.
         r['items'] = [dict(i) for i in conn.execute(
             "SELECT i.id, i.description, i.quantity, i.unit, i.total_price, i.category, i.raw_text, i.item_code, "
-            "i.name_key, i.product_id, p.name AS product_name, p.quantity AS default_quantity, "
+            "i.name_key, i.product_id, p.name AS product_name, p.quantity AS default_quantity, p.zone, "
+            "p.amazon_category, "
             "p.unit AS default_unit, p.subcategory_id, "
             "(SELECT COUNT(*) FROM receipt_items i2 WHERE i2.product_id = i.product_id) AS product_lines, "
             "(SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = i.product_id) AS photo_id "
             "FROM receipt_items i LEFT JOIN products p ON p.id = i.product_id "
             "WHERE i.receipt_id=? ORDER BY i.position", (rid,)
         ).fetchall()]
+        r['items'] = [_with_amazon_category(i) for i in r['items']]
         # Products on this receipt still without a picture, in receipt order: the
         # app asks for a photo of each one (labelled as printed) right after a scan.
         # Savings/coupon lines (not a positive price) aren't products to photograph.
@@ -12538,7 +12568,7 @@ def api_products():
     day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
     with _conn() as conn:
         rows = conn.execute(f"""
-            SELECT p.id, p.name, p.quantity, p.unit, p.count AS package_count, p.storage, p.subcategory_id, COUNT(i.id) AS times_bought, MAX({day}) AS last_bought,
+            SELECT p.id, p.name, p.quantity, p.unit, p.count AS package_count, p.storage, p.subcategory_id, p.zone, p.amazon_category, COUNT(i.id) AS times_bought, MAX({day}) AS last_bought,
                    (SELECT i4.category FROM receipt_items i4 WHERE i4.product_id = p.id
                     GROUP BY i4.category ORDER BY COUNT(*) DESC, MAX(i4.id) DESC LIMIT 1) AS category,
                    (SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = p.id) AS photo_id,
@@ -12554,14 +12584,27 @@ def api_products():
             GROUP BY p.id
             ORDER BY p.name COLLATE NOCASE
         """).fetchall()
-    return jsonify({'products': [dict(r) for r in rows]})
+    return jsonify({'products': [_with_amazon_category(dict(r)) for r in rows]})
+
+
+def _with_amazon_category(p: dict) -> dict:
+    """amazon_category (stored as JSON) as a list, plus the sub-category taken from it."""
+    from smart_home import receipts as _receipts
+    try:
+        path = json.loads(p.get('amazon_category') or 'null')
+    except json.JSONDecodeError:
+        path = None
+    p['amazon_category'] = path
+    p['amazon_subcategory'] = _receipts.amazon_subcategory(path)
+    return p
 
 
 @app.patch("/api/products/<int:pid>")
 def api_product_update(pid):
     """Update a product: `name` (renames every receipt-item pointing to it)
     and/or `quantity` + `unit` (null clears it), the amount in one purchase,
-    and/or `subcategory_id` (null clears it)."""
+    and/or `subcategory_id` (null clears it), and/or `zone` (receipts.ZONES,
+    "none" for no zone, null for not sorted yet)."""
     data = request.get_json(silent=True) or {}
     fields = {}
     if 'name' in data:
@@ -12579,6 +12622,13 @@ def api_product_update(pid):
         if sid is not None and (not isinstance(sid, int) or isinstance(sid, bool)):
             return jsonify({'error': 'subcategory_id must be a number or null'}), 400
         fields['subcategory_id'] = sid
+    if 'zone' in data:
+        from smart_home import receipts as _receipts
+        zone = data['zone']
+        if zone is not None and zone not in _receipts.ZONES + [_receipts.NO_ZONE]:
+            return jsonify({'error': f'zone must be one of: {", ".join(_receipts.ZONES)}, '
+                                     f'"{_receipts.NO_ZONE}" or null'}), 400
+        fields['zone'] = zone
     if not fields:
         return jsonify({'error': 'Nothing to update'}), 400
     with _conn() as conn:
@@ -12689,7 +12739,7 @@ _RECEIPTS_PAGE = """\\
 </head>
 <body>
   <h1>Receipts</h1>
-  <div class="nav"><a href="/receipts/items">Products &rarr;</a><a href="/receipts/new">+ Add receipt by hand</a>
+  <div class="nav"><a href="/receipts/items">Products &rarr;</a><a href="/receipts/sort">Sort into zones &rarr;</a><a href="/receipts/new">+ Add receipt by hand</a>
     <a href="#" id="upload-link">+ Upload photos or screenshots</a><input type="file" id="upload" accept="image/jpeg,image/png,image/webp" multiple hidden></div>
   <div id="upload-status" class="muted" style="margin:-.4rem 0 .8rem"></div>
   <div class="periods" id="periods">
@@ -12717,8 +12767,9 @@ _RECEIPTS_PAGE = """\\
     </div>
     <div>
       <div class="card">
-        <h2>By category</h2>
+        <h2>By zone</h2>
         <table><tbody id="totals"></tbody></table>
+        <div class="muted" id="sort-link" style="margin-top:.6rem"></div>
       </div>
       <div class="card">
         <h2>Amazon orders</h2>
@@ -12841,12 +12892,17 @@ document.addEventListener('drop', e => {
 async function load() {
   clearTimeout(pollTimer);
   try {
-    const [s, r] = await Promise.all([
+    const [s, r, p] = await Promise.all([
       fetchJSON(`/api/receipts/summary?months=${months}`),
       fetchJSON('/api/receipts?kind=receipt'),
+      fetchJSON('/api/products'),
     ]);
     clearNetworkError();
     renderSummary(s);
+    const unsorted = p.products.filter(x => x.zone == null && x.times_bought > 0).length;
+    document.getElementById('sort-link').innerHTML = unsorted
+      ? `<a href="/receipts/sort">${unsorted} product${unsorted === 1 ? '' : 's'} not sorted into a zone yet &rarr;</a>`
+      : 'Every product is sorted into a zone.';
     renderReceipts(r.receipts);
     // Refresh while a receipt is still being read so it flips to done/error by itself
     if (r.receipts.some(x => x.status === 'processing')) pollTimer = setTimeout(load, 3000);
@@ -13036,7 +13092,7 @@ _RECEIPT_DETAIL_PAGE = """\\
       <div class="card" id="items-card">
         <h2>Items</h2>
         <table>
-          <thead><tr><th></th><th title="The product this line describes. Its name comes from a photo of the product (Product Photos page).">Product</th><th title="Amount bought on this line. Leave empty to use the product&rsquo;s default from the Products page.">Quantity</th><th class="num">Price</th><th>Category</th><th></th><th></th></tr></thead>
+          <thead><tr><th></th><th title="The product this line describes. Its name comes from a photo of the product (Product Photos page).">Product</th><th title="Amount bought on this line. Leave empty to use the product&rsquo;s default from the Products page.">Quantity</th><th class="num">Price</th><th title="Where the product goes (applies on every receipt it&rsquo;s on), and its Amazon category">Zone</th><th></th><th></th></tr></thead>
           <tbody id="items"></tbody>
           <tfoot><tr><td></td><td>Items total</td><td></td><td class="num" id="items-sum"></td><td colspan="3"></td></tr></tfoot>
         </table>
@@ -13074,7 +13130,7 @@ _RECEIPT_DETAIL_PAGE = """\\
   </dialog>
 <script>__COMMON_JS__
 const RID = __RID__;
-let receipt = null, categories = [], subcategories = [], pollTimer = null;
+let receipt = null, zones = [], NO_ZONE = 'none', pollTimer = null;
 const HEADER_FIELDS = ['kind', 'merchant', 'purchase_date', 'subtotal', 'tax', 'total'];
 
 function headerValue(k) {
@@ -13136,7 +13192,6 @@ function render() {
 
 function itemRow(it) {
   const printed = [it.raw_text, it.item_code].filter(Boolean).join(' \\u00b7 ');
-  const opts = categories.map(c => `<option${c === it.category ? ' selected' : ''}>${esc(c)}</option>`).join('');
   // Picture of the product this line is matched to (its most recent photo)
   const thumb = it.photo_id
     ? `<a href="/api/product-photos/${it.photo_id}/image" target="_blank"><img class="thumb" loading="lazy" src="/api/product-photos/${it.photo_id}/image" alt=""></a>`
@@ -13154,58 +13209,43 @@ function itemRow(it) {
         ${it.quantity == null && it.default_quantity != null ? '<div class="unit-price">product default</div>' : ''}</td>
     <td class="num"><input type="text" class="price" data-f="total_price" inputmode="decimal" value="${it.id == null ? '' : it.total_price.toFixed(2)}">
         <div class="unit-price">${unitPrice(it)}</div></td>
-    <td class="sub-cell"><select data-f="category">${opts}</select>${subSelect(it.category, it.subcategory_id, it.product_id)}</td>
+    <td class="sub-cell"><input type="hidden" data-f="category" value="${esc(it.category || 'Other')}">${zoneCell(it)}</td>
     <td class="row-status"></td>
     <td><button class="icon-btn" title="Delete item" data-delete>&times;</button></td></tr>`;
 }
 
-// Sub-category of the line's product, chosen from those in the line's
-// category, or a new one typed in. Only lines with a product can have one.
-function subSelect(category, sid, pid) {
-  if (pid == null) return '';
-  const opts = subcategories.filter(s => s.category === category || s.id === sid)
-    .map(s => `<option value="${s.id}"${s.id === sid ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
-  return `<select data-sub title="Sub-category of this product (applies on every receipt it&rsquo;s on)">
-    <option value="">${sid == null ? 'No sub-category' : '(none)'}</option>${opts}<option value="new">+ New sub-category\\u2026</option></select>`;
+// The product's zone (where it goes; shared by every line of the product)
+// and the sub-category from its Amazon category. Lines that aren't a
+// product (shipping, refunds) have none. The line's own category is kept,
+// hidden, only to count heating fuel and softener salt as utilities.
+const UTILITY_CATS = ['Heating Fuel', 'Water Softener Salt'];
+function zoneCell(it) {
+  const util = UTILITY_CATS.includes(it.category) ? `<div class="printed">Counted as a utility: ${esc(it.category)}</div>` : '';
+  if (it.product_id == null) return util;
+  const opts = zones.map(z => `<option value="${esc(z)}"${z === it.zone ? ' selected' : ''}>${esc(z)}</option>`).join('');
+  const sub = it.amazon_subcategory
+    ? `<div class="printed" title="${esc((it.amazon_category || []).join(' \u203a '))}">${esc(it.amazon_subcategory)}</div>` : '';
+  return `<select data-zone title="Where this product goes (applies on every receipt it&rsquo;s on)">
+    <option value=""${it.zone == null ? ' selected' : ''}>Not sorted</option>${opts}
+    <option value="${NO_ZONE}"${it.zone === NO_ZONE ? ' selected' : ''}>No zone</option></select>${sub}${util}`;
 }
-function redrawSub(tr, sid) {
-  const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
-  const old = tr.querySelector('[data-sub], [data-sub-new]');
-  if (!it || !old) return;
-  old.outerHTML = subSelect(tr.querySelector('[data-f="category"]').value, sid, it.product_id);
-}
-async function setSubcategory(tr, sid) {
+async function setZone(tr, zone) {
   const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
   const status = tr.querySelector('.row-status');
-  status.className = 'row-status muted'; status.textContent = 'Saving\\u2026';
+  status.className = 'row-status muted'; status.textContent = 'Saving\u2026';
   try {
-    await sendJSON(`/api/products/${it.product_id}`, 'PATCH', {subcategory_id: sid});
+    await sendJSON(`/api/products/${it.product_id}`, 'PATCH', {zone});
     status.className = 'row-status ok'; status.textContent = 'Saved';
-    // Every line of the same product shares the sub-category
-    receipt.items.forEach(x => { if (x.product_id === it.product_id) x.subcategory_id = sid; });
+    receipt.items.forEach(x => { if (x.product_id === it.product_id) x.zone = zone; });
     itemsEl.querySelectorAll('tr[data-id]').forEach(row => {
       const x = receipt.items.find(y => String(y.id) === row.dataset.id);
-      if (x && x.product_id === it.product_id) redrawSub(row, sid);
+      const sel = row.querySelector('[data-zone]');
+      if (x && sel && x.product_id === it.product_id) sel.value = zone || '';
     });
   } catch (e) {
     status.className = 'row-status err'; status.textContent = 'Save failed';
-    showNetworkError(`Could not save sub-category: ${e.message}`);
-    redrawSub(tr, it.subcategory_id);
-  }
-}
-async function createSubcategory(tr, input) {
-  const name = input.value.trim();
-  const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
-  if (!name) { redrawSub(tr, it.subcategory_id); return; }
-  const category = tr.querySelector('[data-f="category"]').value;
-  try {
-    const res = await sendJSON('/api/subcategories', 'POST', {category, name});
-    subcategories = res.subcategories;
-    await setSubcategory(tr, res.subcategory.id);
-  } catch (e) {
-    const status = tr.querySelector('.row-status');
-    status.className = 'row-status err'; status.textContent = 'Not created';
-    showNetworkError(`Could not create sub-category: ${e.message}`);
+    showNetworkError(`Could not save the zone: ${e.message}`);
+    tr.querySelector('[data-zone]').value = it.zone || '';
   }
 }
 
@@ -13334,35 +13374,12 @@ async function saveRow(tr) {
 const itemsEl = document.getElementById('items');
 itemsEl.addEventListener('change', e => {
   const tr = e.target.closest('tr');
-  if (e.target.matches('[data-sub]')) {
-    if (e.target.value !== 'new') { setSubcategory(tr, e.target.value ? +e.target.value : null); return; }
-    e.target.outerHTML = '<input type="text" data-sub-new placeholder="New sub-category name" maxlength="60">';
-    tr.querySelector('[data-sub-new]').focus();
-    return;
-  }
+  if (e.target.matches('[data-zone]')) { setZone(tr, e.target.value || null); return; }
   if (!e.target.dataset.f) return;
   saveRow(tr);
-  // The sub-category choices follow the line's category
-  if (e.target.dataset.f === 'category' && tr.dataset.id) {
-    const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
-    if (it) redrawSub(tr, it.subcategory_id);
-  }
 });
 itemsEl.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && (e.target.dataset.f || e.target.matches('[data-sub-new]'))) e.target.blur();
-  if (e.key === 'Escape' && e.target.matches('[data-sub-new]')) {
-    const tr = e.target.closest('tr');
-    const it = (receipt.items || []).find(x => String(x.id) === tr.dataset.id);
-    e.target.dataset.done = '1';
-    if (it) redrawSub(tr, it.subcategory_id);
-  }
-});
-// A new sub-category name is saved when the box loses focus
-itemsEl.addEventListener('focusout', e => {
-  if (e.target.matches('[data-sub-new]') && e.target.isConnected && !e.target.dataset.done) {
-    e.target.dataset.done = '1';
-    createSubcategory(e.target.closest('tr'), e.target);
-  }
+  if (e.key === 'Enter' && e.target.dataset.f) e.target.blur();
 });
 itemsEl.addEventListener('click', async e => {
   if (e.target.matches('[data-change-product]')) { openProductDialog(e.target.closest('tr').dataset.id); return; }
@@ -13466,7 +13483,7 @@ const img = document.getElementById('photo');
 img.onerror = () => { document.getElementById('photo-error').textContent = 'Could not load the photo.'; };
 
 fetchJSON('/api/receipts/config')
-  .then(c => { categories = c.categories; subcategories = c.subcategories || []; })
+  .then(c => { zones = c.zones; NO_ZONE = c.no_zone; })
   .catch(e => showNetworkError(`Could not load categories: ${e.message}`))
   .finally(load);
 </script>
@@ -14163,7 +14180,7 @@ _RECEIPT_ITEMS_PAGE = """\
     <table>
       <thead><tr>
         <th></th><th>Product</th><th>Printed as</th><th>Store</th><th class="num">Bought</th><th class="num">Last price</th>
-        <th title="Category of most of its receipt lines, and the product&rsquo;s sub-category">Category</th><th>Default quantity</th><th></th><th></th>
+        <th title="Where the product goes (sort them one at a time on Sort into zones), and its Amazon category">Zone</th><th>Default quantity</th><th></th><th></th>
       </tr></thead>
       <tbody id="rows"><tr><td colspan="10" class="empty">Loading&hellip;</td></tr></tbody>
     </table>
@@ -14194,23 +14211,17 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-let items = [], subcategories = [];
+let items = [], zones = [], NO_ZONE = 'none';
 
-function subName(sid) {
-  const s = subcategories.find(x => x.id === sid);
-  return s ? s.name : '';
-}
-// Sub-categories in the product's category (plus its current one), or a new one
-function subSelect(it) {
-  const opts = subcategories.filter(s => s.category === it.category || s.id === it.subcategory_id)
-    .map(s => `<option value="${s.id}"${s.id === it.subcategory_id ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
-  return `<select data-sub title="Saves as soon as you pick one">
-    <option value="">${it.subcategory_id == null ? 'No sub-category' : '(none)'}</option>${opts}<option value="new">+ New sub-category\u2026</option></select>`;
+// Where the product goes; saves as soon as one is picked
+function zoneSelect(it) {
+  const opt = (v, t) => `<option value="${esc(v)}"${(it.zone || '') === v ? ' selected' : ''}>${esc(t)}</option>`;
+  return `<select data-zone title="Saves as soon as you pick one">${opt('', 'Not sorted')}${zones.map(z => opt(z, z)).join('')}${opt(NO_ZONE, 'No zone')}</select>`;
 }
 
 function render() {
   const q = document.getElementById('filter').value.trim().toLowerCase();
-  const shown = items.filter(it => !q || [it.name, it.printed, it.merchants, it.category, subName(it.subcategory_id)]
+  const shown = items.filter(it => !q || [it.name, it.printed, it.merchants, it.zone, (it.amazon_category || []).join(' ')]
     .some(v => v && String(v).toLowerCase().includes(q)));
   document.getElementById('count').textContent = `${shown.length} of ${items.length} products`;
   const tbody = document.getElementById('rows');
@@ -14227,7 +14238,7 @@ function render() {
       <td class="muted">${esc(it.merchants) || '&mdash;'}</td>
       <td class="num">${it.times_bought}&times;<div class="muted">${esc(it.last_bought)}</div></td>
       <td class="num">${it.last_price == null ? '&mdash;' : '$' + Number(it.last_price).toFixed(2)}</td>
-      <td class="cat-cell">${it.category ? esc(it.category) + subSelect(it) : '<span class="muted">&mdash;</span>'}</td>
+      <td class="cat-cell">${zoneSelect(it)}${it.amazon_subcategory ? `<div class="muted" title="${esc((it.amazon_category || []).join(' \\u203a '))}">${esc(it.amazon_subcategory)}</div>` : ''}</td>
       <td><div class="qty-cell">
         <input type="text" data-f="quantity" inputmode="decimal" value="${it.quantity ?? ''}" placeholder="none">
         <select data-f="unit">${UNITS.map(u => `<option${u === (it.unit || 'oz') ? ' selected' : ''}>${u}</option>`).join('')}</select>
@@ -14297,59 +14308,24 @@ const rowsEl = document.getElementById('rows');
 rowsEl.addEventListener('input', e => { if (e.target.dataset.f) markDirty(e.target.closest('tr')); });
 rowsEl.addEventListener('change', e => {
   const tr = e.target.closest('tr');
-  if (e.target.matches('[data-sub]')) {
-    if (e.target.value !== 'new') { setSub(tr, e.target.value ? +e.target.value : null); return; }
-    e.target.outerHTML = '<input type="text" data-sub-new placeholder="New sub-category name" maxlength="60">';
-    tr.querySelector('[data-sub-new]').focus();
-    return;
-  }
+  if (e.target.matches('[data-zone]')) { setZone(tr, e.target.value || null); return; }
   if (e.target.dataset.f) markDirty(tr);
 });
-function redrawSub(tr) {
-  const el = tr.querySelector('[data-sub], [data-sub-new]');
-  if (el) el.outerHTML = subSelect(items[+tr.dataset.idx]);
-}
-async function setSub(tr, sid) {
+async function setZone(tr, zone) {
   const it = items[+tr.dataset.idx], status = tr.querySelector('.status');
-  status.className = 'status'; status.textContent = 'Saving\u2026';
+  status.className = 'status'; status.textContent = 'Saving\\u2026';
   try {
     await fetchJSON(`/api/products/${it.id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
-                                              body: JSON.stringify({subcategory_id: sid})});
-    it.subcategory_id = sid;
+                                              body: JSON.stringify({zone})});
+    it.zone = zone;
     status.className = 'status ok'; status.textContent = 'Saved';
   } catch (e) {
     status.className = 'status err'; status.textContent = 'Failed';
-    showNetworkError(`Could not save sub-category: ${e.message}`);
-  }
-  redrawSub(tr);
-}
-async function createSub(tr, input) {
-  const it = items[+tr.dataset.idx], name = input.value.trim();
-  if (!name) { redrawSub(tr); return; }
-  try {
-    const res = await fetchJSON('/api/subcategories', {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                                       body: JSON.stringify({category: it.category, name})});
-    subcategories = res.subcategories;
-    await setSub(tr, res.subcategory.id);
-  } catch (e) {
-    const status = tr.querySelector('.status');
-    status.className = 'status err'; status.textContent = 'Not created';
-    showNetworkError(`Could not create sub-category: ${e.message}`);
+    showNetworkError(`Could not save the zone: ${e.message}`);
+    tr.querySelector('[data-zone]').value = it.zone || '';
   }
 }
-// A new sub-category name is saved when its box loses focus (Enter blurs it)
-rowsEl.addEventListener('focusout', e => {
-  if (e.target.matches('[data-sub-new]') && e.target.isConnected && !e.target.dataset.done) {
-    e.target.dataset.done = '1';
-    createSub(e.target.closest('tr'), e.target);
-  }
-});
 rowsEl.addEventListener('keydown', e => {
-  if (e.target.matches('[data-sub-new]')) {
-    if (e.key === 'Enter') e.target.blur();
-    if (e.key === 'Escape') { e.target.dataset.done = '1'; redrawSub(e.target.closest('tr')); }
-    return;
-  }
   if (e.key === 'Enter' && e.target.dataset.f) save(e.target.closest('tr'));
 });
 rowsEl.addEventListener('click', e => {
@@ -14358,7 +14334,7 @@ rowsEl.addEventListener('click', e => {
 document.getElementById('filter').addEventListener('input', render);
 
 Promise.all([fetchJSON('/api/products'), fetchJSON('/api/receipts/config')])
-  .then(([data, cfg]) => { items = data.products; subcategories = cfg.subcategories; clearNetworkError(); render(); })
+  .then(([data, cfg]) => { items = data.products; zones = cfg.zones; NO_ZONE = cfg.no_zone; clearNetworkError(); render(); })
   .catch(e => {
     showNetworkError(`Could not load products: ${e.message}`);
     document.getElementById('rows').innerHTML =
@@ -15137,6 +15113,8 @@ _PRODUCT_PAGE = r"""<!DOCTYPE html>
       .read-box { margin-top: .6rem; font-size: .82rem; display: grid; gap: .35rem; }
     .read-box button { justify-self: start; background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem .8rem; font-size: .82rem; cursor: pointer; }
     .read-box button:disabled { opacity: .5; cursor: default; }
+      .zone-row { display: flex; gap: .7rem; align-items: center; flex-wrap: wrap; }
+    .zone-row select { font-size: .9rem; padding: .25rem .4rem; border: 1px solid #d0dce8; border-radius: 6px; }
   </style>
 </head>
 <body>
@@ -15187,7 +15165,8 @@ function render(d) {
       ${p.photo_id ? readBox(p) : ''}</div>
     <div>
       <h1>${esc(p.name)}</h1>
-      <div class="sub">${esc([d.category, p.subcategory].filter(Boolean).join(' · ')) || 'No category'}</div>
+      <div class="sub zone-row">${zoneSelect(p)}
+        <span>${p.amazon_category ? esc(p.amazon_category.join(' \u203a ')) : '<span class="muted">No Amazon category yet</span>'}</span></div>
       ${facts.length ? `<dl class="facts">${facts.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`
         : '<div class="muted">No package details yet. They come from a photo of the product (Read, then Use, on the Product Photos page).</div>'}
       <div class="tiles">
@@ -15229,7 +15208,7 @@ function render(d) {
     <td class="num">${money(x.price)}</td><td class="num">${unitPrice(x.unit_price, x.basis)}</td>
     <td><a href="/receipts/${x.receipt_id}">Receipt #${x.receipt_id}</a></td></tr>`).join('');
   document.getElementById('main').innerHTML = head
-    + `<div class="card"><h2>Price against ${c ? esc(c.group === 'subcategory' ? 'its sub-category' : 'its category') : 'similar products'}</h2>${compare}</div>`
+    + `<div class="card"><h2>Price against ${c ? esc(c.group === 'subcategory' ? 'its Amazon sub-category' : 'its zone') : 'similar products'}</h2>${compare}</div>`
     + `<div class="card"><h2>Purchases</h2>${d.purchases.length ? `<table><thead><tr><th>Date</th><th>Store</th><th>Printed as</th>
         <th class="num">Quantity</th><th class="num">Price</th><th class="num">Unit price</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
         : '<div class="muted">No purchases on scanned receipts.</div>'}</div>`;
@@ -15248,6 +15227,29 @@ function readBox(p) {
     ${ph.info_status === 'done' ? `<div class="muted">Read. <a href="/receipts/photos#photo-${p.photo_id}">Review it and Use</a> to copy it to the product.</div>` : ''}
   </div>`;
 }
+
+// Where the product goes (receipts.ZONES); saved as soon as it's changed
+let ZONES = [], NO_ZONE = 'none';
+function zoneSelect(p) {
+  const opt = (v, t) => `<option value="${esc(v)}"${(p.zone || '') === v ? ' selected' : ''}>${esc(t)}</option>`;
+  return `<select id="zone" title="Where this product goes">${opt('', 'Not sorted')}${ZONES.map(z => opt(z, z)).join('')}${opt(NO_ZONE, 'No zone')}</select>`;
+}
+document.addEventListener('change', async e => {
+  if (e.target.id !== 'zone') return;
+  e.target.disabled = true;
+  try {
+    const r = await fetch(`/api/products/${PID}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                                                  body: JSON.stringify({zone: e.target.value || null})});
+    if (!r.ok) {
+      const data = await r.json().catch(() => null);
+      throw new Error((data && data.error) || `HTTP ${r.status}`);
+    }
+    loadProduct();
+  } catch (err) {
+    showNetworkError('Could not save the zone: ' + err.message);
+    e.target.disabled = false;
+  }
+});
 
 let pollTimer = null;
 function loadProduct() {
@@ -15284,7 +15286,10 @@ document.addEventListener('click', async e => {
   }
   loadProduct();
 });
-loadProduct();
+fetch('/api/receipts/config').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+  .then(c => { ZONES = c.zones; NO_ZONE = c.no_zone; })
+  .catch(e => showNetworkError('Could not load the zones: ' + e.message))
+  .finally(loadProduct);
 </script>
 </body>
 </html>"""
@@ -15793,11 +15798,12 @@ def api_product_detail(pid):
     with _conn() as conn:
         prod = conn.execute(
             "SELECT p.id, p.name, p.quantity, p.unit, p.count AS package_count, p.storage, p.subcategory_id, "
-            "s.name AS subcategory, (SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = p.id) AS photo_id "
+            "s.name AS subcategory, p.zone, p.amazon_category, "
+            "(SELECT MAX(ph.id) FROM product_photos ph WHERE ph.product_id = p.id) AS photo_id "
             "FROM products p LEFT JOIN subcategories s ON s.id = p.subcategory_id WHERE p.id=?", (pid,)).fetchone()
         if prod is None:
             return jsonify({'error': 'Product not found'}), 404
-        prod = dict(prod)
+        prod = _with_amazon_category(dict(prod))
         info = None
         prod['photo'] = None
         if prod['photo_id']:
@@ -15817,7 +15823,7 @@ def api_product_detail(pid):
         lines = conn.execute(
             "SELECT i.id, i.receipt_id, i.product_id, i.quantity, i.unit, i.total_price, i.category, i.raw_text, "
             "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10)) AS day, r.merchant, "
-            "p.name, p.quantity AS pq, p.unit AS pu, p.subcategory_id "
+            "p.name, p.quantity AS pq, p.unit AS pu, p.subcategory_id, p.zone, p.amazon_category "
             "FROM receipt_items i JOIN receipts r ON r.id = i.receipt_id JOIN products p ON p.id = i.product_id "
             "WHERE r.kind = 'receipt' ORDER BY day DESC, i.id DESC").fetchall()
 
@@ -15835,10 +15841,6 @@ def api_product_detail(pid):
         basis = pts[0][1]
         vals = [v for v, b in pts if b == basis]
         return sum(vals) / len(vals), basis
-
-    def main_category(rows):
-        cats = [r['category'] for r in rows]
-        return max(set(cats), key=cats.count) if cats else None
 
     purchases = []
     for ln in mine:
@@ -15859,14 +15861,19 @@ def api_product_detail(pid):
     last_year = (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
     freq['spent_last_year'] = round(sum(ln['total_price'] for ln in mine if ln['day'] >= last_year), 2)
 
-    category = main_category(by_product.get(pid, []))
+    from smart_home import receipts as _receipts
+    category = _receipts.zone_label(prod['zone'])
     my_price, basis = recent_unit_price(by_product.get(pid, []))
-    group = 'subcategory' if prod['subcategory_id'] else 'category'
+    # Compared with products in the same Amazon sub-category, else the same zone
+    mine_sub = prod['amazon_subcategory']
+    group = 'subcategory' if mine_sub else 'zone' if prod['zone'] not in (None, _receipts.NO_ZONE) else None
     peers = []
-    if my_price is not None:
+    if my_price is not None and group:
         for opid, rows in by_product.items():
-            in_group = (rows[0]['subcategory_id'] == prod['subcategory_id'] if prod['subcategory_id']
-                        else main_category(rows) == category)
+            if group == 'subcategory':
+                in_group = _with_amazon_category({'amazon_category': rows[0]['amazon_category']})['amazon_subcategory'] == mine_sub
+            else:
+                in_group = rows[0]['zone'] == prod['zone']
             if not in_group:
                 continue
             price, b = recent_unit_price(rows)
@@ -15878,12 +15885,179 @@ def api_product_detail(pid):
     comparison = None
     if peers:
         others = [x['unit_price'] for x in peers if not x['this']]
-        comparison = {'group': group, 'group_name': prod['subcategory'] if group == 'subcategory' else category,
+        comparison = {'group': group, 'group_name': mine_sub if group == 'subcategory' else category,
                       'basis': basis, 'unit_price': round(my_price, 4),
                       'rank': next(i for i, x in enumerate(peers) if x['this']) + 1, 'of': len(peers),
                       'median_others': round(median(others), 4) if others else None, 'products': peers}
     return jsonify({'product': prod, 'info': info, 'category': category, 'frequency': freq,
                     'purchases': purchases, 'comparison': comparison})
+
+
+_SORT_PAGE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sort into zones &mdash; Smart Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; }
+    a { color: #2e7dd4; text-decoration: none; } a:hover { text-decoration: underline; }
+    .top { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -.02em; }
+    .muted { color: #7a90a8; } .err { color: #b00; }
+    .card { background: #fff; border-radius: 12px; padding: 1.3rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); max-width: 860px; }
+    .product { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 1.4rem; align-items: start; }
+    @media (max-width: 700px) { .product { grid-template-columns: 1fr; } }
+    .pic img { width: 100%; max-height: 320px; object-fit: contain; border-radius: 10px; background: #f7f9fb; display: block; }
+    .no-pic { aspect-ratio: 1; border-radius: 10px; background: #eef2f6; display: flex; align-items: center; justify-content: center; color: #7a90a8; font-size: .85rem; }
+    .name { font-size: 1.15rem; font-weight: 600; line-height: 1.35; margin-bottom: .5rem; }
+    .path { color: #4a6080; font-size: .85rem; margin-bottom: .7rem; }
+    .facts { color: #4a6080; font-size: .85rem; line-height: 1.6; }
+    .zones { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .5rem; margin-top: 1.2rem; max-width: 860px; }
+    .zones button { background: #fff; border: 1px solid #d0dce8; border-radius: 10px; padding: .8rem .6rem; font-size: .95rem; cursor: pointer; text-align: left; }
+    .zones button:hover { border-color: #e07820; }
+    .zones button kbd { float: right; color: #9aaabb; font: .75rem ui-monospace, monospace; }
+    .zones button.none { color: #4a6080; }
+    .zones button:disabled { opacity: .5; cursor: default; }
+    .actions { display: flex; gap: .6rem; margin-top: .8rem; flex-wrap: wrap; align-items: center; }
+    .actions button { background: none; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem .8rem; color: #4a6080; cursor: pointer; font-size: .85rem; }
+    .actions button:disabled { opacity: .5; cursor: default; }
+    #status { font-size: .85rem; }
+    .done li { margin: .2rem 0 .2rem 1.2rem; }
+  </style>
+</head>
+<body>
+  <div class="top"><h1>Sort into zones</h1><span class="muted" id="left"></span>
+    <a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Products</a></div>
+  <div id="main"><div class="card muted">Loading&hellip;</div></div>
+  <div class="zones" id="zones"></div>
+  <div class="actions"><button id="skip">Skip <span class="muted">(S)</span></button>
+    <button id="undo" disabled>Undo <span class="muted">(Z)</span></button><span id="status" class="muted"></span></div>
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+const money = v => v == null ? '' : '$' + Number(v).toFixed(2);
+let zones = [], NO_ZONE = 'none', queue = [], sorted = [], busy = false;
+
+function setStatus(text, err) {
+  const el = document.getElementById('status');
+  el.className = err ? 'err' : 'muted'; el.textContent = text;
+}
+
+function render() {
+  document.getElementById('left').textContent = `${queue.length} left to sort`;
+  document.getElementById('undo').disabled = !sorted.length || busy;
+  document.getElementById('skip').disabled = !queue.length || busy;
+  const p = queue[0];
+  const main = document.getElementById('main');
+  document.getElementById('zones').style.display = p ? '' : 'none';
+  if (!p) {
+    main.innerHTML = `<div class="card">Every product is sorted. <a href="/receipts">See spending by zone &rarr;</a></div>`;
+    return;
+  }
+  const path = (p.amazon_category || []).join(' › ');
+  main.innerHTML = `<div class="card product">
+    <div class="pic">${p.photo_id ? `<img src="/api/product-photos/${p.photo_id}/image" alt="">` : '<div class="no-pic">No picture</div>'}</div>
+    <div>
+      <div class="name"><a href="/receipts/products/${p.id}" target="_blank">${esc(p.name)}</a></div>
+      <div class="path">${path ? esc(path) : '<span class="muted">No Amazon category yet</span>'}</div>
+      <div class="facts">${money(p.last_price)}${p.merchants ? ' at ' + esc(p.merchants) : ''}<br>
+        Bought ${p.times_bought}&times;${p.last_bought ? ', last on ' + esc(p.last_bought) : ''}</div>
+    </div></div>`;
+  document.querySelectorAll('#zones button').forEach(b => b.disabled = busy);
+}
+
+async function patchZone(id, zone) {
+  const r = await fetch(`/api/products/${id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                                                 body: JSON.stringify({zone})});
+  if (!r.ok) {
+    const d = await r.json().catch(() => null);
+    throw new Error((d && d.error) || `HTTP ${r.status}`);
+  }
+}
+
+async function choose(zone) {
+  const p = queue[0];
+  if (!p || busy) return;
+  busy = true; render(); setStatus('Saving…');
+  try {
+    await patchZone(p.id, zone);
+    sorted.push(p);
+    queue.shift();
+    setStatus(`${p.name.slice(0, 50)}: ${zone === NO_ZONE ? 'No zone' : zone}`);
+  } catch (e) {
+    setStatus(`Couldn't save: ${e.message}`, true);
+  }
+  busy = false; render();
+}
+
+async function undo() {
+  const p = sorted[sorted.length - 1];
+  if (!p || busy) return;
+  busy = true; render(); setStatus('Undoing…');
+  try {
+    await patchZone(p.id, null);
+    sorted.pop();
+    queue.unshift(p);
+    setStatus(`Undid ${p.name.slice(0, 50)}`);
+  } catch (e) {
+    setStatus(`Couldn't undo: ${e.message}`, true);
+  }
+  busy = false; render();
+}
+
+function skip() {
+  if (!queue.length || busy) return;
+  queue.push(queue.shift());
+  setStatus('Skipped; it comes back at the end');
+  render();
+}
+
+document.getElementById('skip').addEventListener('click', skip);
+document.getElementById('undo').addEventListener('click', undo);
+document.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const n = parseInt(e.key, 10);
+  if (n >= 1 && n <= zones.length) choose(zones[n - 1]);
+  else if (e.key === '0') choose(NO_ZONE);
+  else if (e.key === 's' || e.key === 'S' || e.key === 'ArrowRight') skip();
+  else if (e.key === 'z' || e.key === 'Z' || e.key === 'Backspace') undo();
+});
+
+(async () => {
+  try {
+    const [cfg, prods] = await Promise.all(['/api/receipts/config', '/api/products'].map(async u => {
+      const r = await fetch(u);
+      const d = await r.json().catch(() => null);
+      if (!r.ok) throw new Error((d && d.error) || `HTTP ${r.status} from ${u}`);
+      return d;
+    }));
+    zones = cfg.zones; NO_ZONE = cfg.no_zone;
+    // Bought products not sorted yet, most recently bought first
+    queue = prods.products.filter(p => p.zone == null && p.times_bought > 0)
+      .sort((a, b) => (b.last_bought || '').localeCompare(a.last_bought || ''));
+    document.getElementById('zones').innerHTML = zones.map((z, i) =>
+      `<button data-zone="${esc(z)}">${esc(z)}<kbd>${i + 1}</kbd></button>`).join('')
+      + `<button class="none" data-zone="${esc(NO_ZONE)}" title="Doesn't go in a room: food, fuel, supplies">No zone<kbd>0</kbd></button>`;
+    document.getElementById('zones').addEventListener('click', e => {
+      const b = e.target.closest('button[data-zone]');
+      if (b) choose(b.dataset.zone);
+    });
+    render();
+  } catch (e) {
+    document.getElementById('main').innerHTML = `<div class="card err">Could not load the products: ${esc(e.message)}</div>`;
+  }
+})();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/receipts/sort")
+def sort_page():
+    """Sort products into zones one at a time (receipts.ZONES)."""
+    return Response(_SORT_PAGE, mimetype="text/html")
 
 
 @app.get("/receipts/products/<int:pid>")
@@ -15933,22 +16107,29 @@ def _utility_item_purchases(conn: sqlite3.Connection) -> list[dict]:
 
 @app.get("/api/receipts/summary")
 def api_receipts_summary():
-    """Spending per month per category over the last N months (default 12),
-    including the current month. Sales tax is reported as its own category.
-    Utility bills are left out; they're summed by /api/utilities/summary, as
-    are items that are really utilities (wood pellets, softener salt; with
+    """Spending per month per zone over the last N months (default 12),
+    including the current month. A line counts in its product's zone
+    (receipts.zone_label: "Unsorted" until it's sorted on /receipts/sort);
+    a line without a product is "Shipping & fees", or "Refunds & credits"
+    when negative. Sales tax is reported as its own group. Rows and totals
+    keep the key "category" for the group's name. Utility bills are left out;
+    they're summed by /api/utilities/summary, as are items that are really
+    utilities (wood pellets, softener salt, by the line's category; with
     their share of the tax, see _utility_item_purchases)."""
     from smart_home import receipts as _receipts
     months = max(1, min(int(request.args.get('months', 12)), 120))
     start = _months_start(months)
     day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
     with _conn() as conn:
+        group = (f"CASE WHEN i.product_id IS NULL THEN (CASE WHEN i.total_price < 0 THEN '{_receipts.REFUNDS_GROUP}' "
+                 f"ELSE '{_receipts.SHIPPING_GROUP}' END) WHEN p.zone IS NULL THEN '{_receipts.UNSORTED}' "
+                 f"WHEN p.zone = '{_receipts.NO_ZONE}' THEN '{_receipts.NO_ZONE_LABEL}' ELSE p.zone END")
         item_rows = conn.execute(
-            f"SELECT substr({day}, 1, 7) AS month, i.category, SUM(i.total_price) AS amount "
-            f"FROM receipt_items i JOIN receipts r ON r.id = i.receipt_id "
+            f"SELECT substr({day}, 1, 7) AS month, {group} AS category, SUM(i.total_price) AS amount "
+            f"FROM receipt_items i JOIN receipts r ON r.id = i.receipt_id LEFT JOIN products p ON p.id = i.product_id "
             f"WHERE r.status='done' AND r.kind='receipt' AND {day} >= ? "
             f"AND i.category NOT IN ({','.join('?' * len(_receipts.UTILITY_ITEM_CATEGORIES))}) "
-            f"GROUP BY month, i.category",
+            f"GROUP BY month, {group}",
             (start, *_receipts.UTILITY_ITEM_CATEGORIES),
         ).fetchall()
         fuel_tax: dict[str, float] = {}

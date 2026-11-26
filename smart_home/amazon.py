@@ -1282,3 +1282,41 @@ def save_unreadable_page(db_path: str, order_id: str, url: str, error: str, html
     finally:
         conn.close()
     return path
+
+
+# ---- Amazon categories, for products' sub-categories ------------------------------
+#
+# The extension's Sync also reads Amazon's category path ("Home & Kitchen >
+# Kitchen & Dining > Small Appliances > Rice Cookers") from each product's
+# page on amazon.com, for products that don't have one yet. It's kept on the
+# product (products.amazon_category); receipts.amazon_subcategory picks the
+# sub-category level from it. A page without one (a listing that's gone, a
+# collectible) is tried again after CATEGORY_RETRY_DAYS.
+
+CATEGORY_RETRY_DAYS = 30
+
+
+def asins_needing_category(conn: sqlite3.Connection) -> list[str]:
+    since = (datetime.datetime.now() - datetime.timedelta(days=CATEGORY_RETRY_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+    return [r[0][5:] for r in conn.execute(
+        "SELECT k.name_key FROM product_keys k JOIN products p ON p.id = k.product_id "
+        "WHERE k.name_key LIKE 'asin:%' AND p.amazon_category IS NULL "
+        "AND (p.amazon_category_tried IS NULL OR p.amazon_category_tried < ?) ORDER BY p.id DESC", (since,))]
+
+
+def set_category(conn: sqlite3.Connection, asin: str, path: list | None, error: str | None) -> dict:
+    """Store the category path read for this ASIN's product, or that it had none."""
+    asin = str(asin or "").strip()
+    row = conn.execute("SELECT product_id FROM product_keys WHERE name_key=?", (f"asin:{asin}",)).fetchone()
+    if row is None:
+        raise AmazonError(f"No product for ASIN {asin!r}")
+    clean = [" ".join(str(x).split())[:100] for x in (path or []) if str(x).strip()][:8]
+    if clean:
+        conn.execute("UPDATE products SET amazon_category=?, amazon_category_tried=NULL, updated_at=? WHERE id=?",
+                     (json.dumps(clean), _now(), row[0]))
+    else:
+        conn.execute("UPDATE products SET amazon_category_tried=? WHERE id=?", (_now(), row[0]))
+        if error:
+            _log_extension(conn, {"outcome": "error", "error": f"No Amazon category for {asin}: {error}"})
+    conn.commit()
+    return {"product_id": row[0], "amazon_category": clean or None}

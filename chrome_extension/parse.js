@@ -194,3 +194,23 @@ function shParseOrderDetails(doc, url) {
   throw new Error(`No combination of the products found adds up to the page's Item(s) Subtotal (all of them: $${sum(items).toFixed(2)}, subtotal ` +
     `$${subtotal.toFixed(2)}; found: ${items.map(it => `${it.quantity} x ${it.name.slice(0, 40)} $${it.unit_price}`).join('; ')})`);
 }
+
+// Amazon's category path on a product page ("Home & Kitchen > Kitchen &
+// Dining > Small Appliances > Rice Cookers"), from the breadcrumb above the
+// product. [] when the page has none.
+function shParseCategory(doc) {
+  const sel = '#wayfinding-breadcrumbs_feature_div a, #wayfinding-breadcrumbs_container a, [data-component="breadcrumbs"] a';
+  return [...doc.querySelectorAll(sel)].map(a => shText(a.textContent))
+    .filter(t => t && !/^[‹<]?\s*Back to/i.test(t));
+}
+
+// A page Amazon shows instead when it wants to check you're a person
+function shIsCaptcha(doc) {
+  return !!doc.querySelector('form[action*="validateCaptcha"]') ||
+    /Enter the characters you see below|To discuss automated access to Amazon data/i.test(doc.body ? doc.body.textContent : '');
+}
+
+function shAsinFromUrl(url) {
+  const m = (url || '').match(/\/(?:dp|gp\/product|gp\/aw\/d)\/([A-Z0-9]{10})(?:[/?#]|$)/);
+  return m ? m[1] : null;
+}

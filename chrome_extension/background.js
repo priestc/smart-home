@@ -157,6 +157,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
         if (msg.state === 'done' && msg.error) await chrome.storage.local.set({lastError: true});
         await updateBadge();
         return {ok: true};
+      case 'categories-needed':
+        try {
+          const r = await fetch(`${await server()}/api/receipts/amazon/categories-needed`);
+          if (!r.ok) throw new Error(`smart-home answered HTTP ${r.status}`);
+          return await r.json();
+        } catch (e) {
+          return {error: e.message};
+        }
+      case 'category':
+        try {
+          await post('/api/receipts/amazon/category', {asin: msg.asin, path: msg.path, error: msg.error});
+        } catch (e) {
+          // A product page you opened that smart-home has no product for: nothing to do
+          if (!msg.passive) await addLog({outcome: 'error', error: `Saving the category of ${msg.asin}: ${e.message}`});
+        }
+        return {ok: true};
       case 'flush':
         await flushQueue();
         return {ok: true};

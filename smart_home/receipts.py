@@ -79,6 +79,34 @@ UTILITY_ITEM_CATEGORIES = ("Heating Fuel", "Water Softener Salt")
 # What a utility bill (kind='bill') is for
 UTILITIES = ["Electricity", "Water", "Propane", "Natural Gas", "Internet", "Phone", "Trash", "Sewer",
              "Insurance", "Hosting", "Other"]
+# Where a product goes in the house: the top level products are grouped by
+# (products.zone), set by hand on /receipts/sort. NO_ZONE is "doesn't go in
+# a room" (food, fuel...); NULL is not sorted yet. A line's category (above)
+# is only used to count heating fuel and softener salt as utilities.
+ZONES = ["Living Room", "Wardrobe", "Music Studio", "Computer Desk", "Kitchen", "Garage", "Hobby", "Video Games"]
+NO_ZONE = "none"
+# Spending groups for lines that aren't a product, and products not sorted yet
+UNSORTED = "Unsorted"
+NO_ZONE_LABEL = "No zone"
+SHIPPING_GROUP = "Shipping & fees"
+REFUNDS_GROUP = "Refunds & credits"
+# A product's sub-category is a level of Amazon's category path for it
+# (products.amazon_category, read by the Chrome extension), e.g. "Small
+# Appliances" from Home & Kitchen > Kitchen & Dining > Small Appliances >
+# Rice Cookers. 0 is the top level; shorter paths use their last level.
+AMAZON_SUBCATEGORY_LEVEL = 2
+
+
+def amazon_subcategory(path: list[str] | None) -> str | None:
+    if not path:
+        return None
+    return path[min(AMAZON_SUBCATEGORY_LEVEL, len(path) - 1)]
+
+
+def zone_label(zone: str | None) -> str:
+    return NO_ZONE_LABEL if zone == NO_ZONE else zone or UNSORTED
+
+
 # Units for an item's quantity: a count, ounces or pounds
 UNITS = ["ea", "oz", "lb"]
 # Not an item category: receipts.tax is reported under this name in summaries

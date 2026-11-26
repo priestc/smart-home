@@ -85,6 +85,36 @@ function shNextPageUrl(doc) {
   return href ? new URL(href, 'https://www.amazon.com').href : null;
 }
 
+const SH_CATEGORY_PAUSE_MS = 2000;  // between product pages, to go easy on amazon.com
+
+// Read the category path of every product smart-home is missing one for.
+// Returns a sentence about it for the sync's summary.
+async function shSyncCategories(progress) {
+  const need = await shSend({type: 'categories-needed'});
+  if (!need || need.error) return `(Couldn't ask smart-home which products need categories: ${need ? need.error : 'no answer'}.)`;
+  let read = 0, none = 0;
+  for (let i = 0; i < need.asins.length; i++) {
+    const asin = need.asins[i];
+    progress({state: 'running', message: `Reading Amazon categories: product ${i + 1} of ${need.asins.length}\u2026`});
+    let doc;
+    try {
+      const resp = await shFetch(`https://www.amazon.com/dp/${asin}`, {credentials: 'include'});
+      doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+      if (!resp.ok && resp.status !== 404) throw new Error(`HTTP ${resp.status}`);
+    } catch (e) {
+      return `Stopped reading categories after ${read} (${e.message}).`;
+    }
+    if (shIsCaptcha(doc)) {
+      return `Amazon asked for a CAPTCHA after ${read} product pages, so reading categories stopped; Sync again later to continue.`;
+    }
+    const path = shParseCategory(doc);
+    await shSend({type: 'category', asin, path, error: path.length ? null : 'no category path on its page'});
+    path.length ? read++ : none++;
+    await shSleep(SH_CATEGORY_PAUSE_MS);
+  }
+  return need.asins.length ? `Categories read for ${read} products${none ? ` (${none} pages had none)` : ''}.` : '';
+}
+
 async function shSync() {
   history.replaceState(null, '', location.pathname + location.search);
   const progress = p => shSend({type: 'sync-progress', ...p});
@@ -131,7 +161,9 @@ async function shSync() {
       counts[r] = (counts[r] || 0) + 1;
       await shSleep(1500);  // don't hammer amazon.com
     }
-    progress({state: 'done', message: `Done. ${ids.size} orders found: ${ids.size - todo.length} already had their items, `
+    // Amazon's category path for products that don't have one yet
+    const cat = await shSyncCategories(progress);
+    progress({state: 'done', message: `Done. ${cat} ${ids.size} orders found: ${ids.size - todo.length} already had their items, `
       + `${counts.sent} sent, ${counts.skipped} have no details page`
       + `${counts.queued ? `, ${counts.queued} queued until smart-home can be reached` : ''}, ${counts.error} couldn’t be read.`,
       error: counts.error > 0});
@@ -164,5 +196,9 @@ async function shSync() {
     }
   } else if (/your-orders\/orders|order-history/i.test(path) && location.hash === SH_SYNC_HASH) {
     await shSync();
+  } else if (shAsinFromUrl(location.href)) {
+    // A product page you opened: its category, if smart-home has the product
+    const pathNow = shParseCategory(document);
+    if (pathNow.length) await shSend({type: 'category', asin: shAsinFromUrl(location.href), path: pathNow, passive: true});
   }
 })();
