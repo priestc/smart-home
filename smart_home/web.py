@@ -14065,6 +14065,18 @@ const UTILITY_COLORS = {Electricity: '#e0a800', Water: '#2e7dd4', Propane: '#e07
                         Insurance: '#c0392b', Hosting: '#5865f2', Other: '#34495e'};
 // "every 6 months" for a bill covering several months, '' for one month
 function fmtPeriod(b) { return b.period_months > 1 ? `every ${b.period_months} months` : ''; }
+// How a propane bill is spread (a span from /api/utilities/summary): until
+// the next bill, or for an open one, an estimate from earlier usage
+function fmtSpan(span, total) {
+  if (!span) return '';
+  const perMonth = total != null ? ` \\u00b7 ${money(total / span.days * 30.44)} a month` : '';
+  if (span.final) return `Lasted ${span.days} days${perMonth}`;
+  const elapsed = Math.round((Date.now() - new Date(span.start + 'T00:00')) / 864e5) + 1;
+  if (span.estimated_days == null) return `Spread until the next bill (${elapsed} days so far)`;
+  const over = elapsed > span.estimated_days;
+  return `Estimated to last ${span.estimated_days} days` + (over ? `, now ${elapsed}` : '')
+    + ` \\u00b7 spread until the next bill`;
+}
 // Unit suggested when entering a bill by hand
 const USAGE_UNITS = {Electricity: 'kWh', Water: 'gal', Propane: 'gal', 'Natural Gas': 'therm'};
 function fmtUsage(b) {
@@ -14134,7 +14146,7 @@ _UTILITIES_PAGE = """\\
           <thead><tr><th>Billing date</th><th>Utility</th><th>Company</th><th class="num">Usage</th><th class="num">Cost per unit</th><th class="num">Amount</th></tr></thead>
           <tbody id="bills"><tr><td colspan="6" class="muted">Loading&hellip;</td></tr></tbody>
         </table>
-        <div class="muted" style="margin-top:.8rem">Photograph a paper bill with the app&rsquo;s receipt camera; it&rsquo;s recognized as a bill and shows up here. A bill that covers several months is spread over them.</div>
+        <div class="muted" style="margin-top:.8rem">Photograph a paper bill with the app&rsquo;s receipt camera; it&rsquo;s recognized as a bill and shows up here. A bill that covers several months is spread over them. A propane bill is spread day by day until the next one; the latest is spread at the rate earlier deliveries were used, and finalized when the next bill comes.</div>
       </div>
       <div class="card">
         <h2>Bills from email</h2>
@@ -14173,7 +14185,7 @@ _UTILITIES_PAGE = """\\
     </div>
   </div>
 <script>__COMMON_JS____UTILITY_JS__
-let months = 12, chart = null, bills = [];
+let months = 12, chart = null, bills = [], spans = {};
 
 function renderSummary(s) {
   document.getElementById('grand').textContent = money(s.grand_total);
@@ -14222,7 +14234,8 @@ function renderBills() {
       <td>${esc(b.merchant || '')}</td>
       <td class="num">${fmtUsage(b)}</td>
       <td class="num muted">${unitCost(b)}</td>
-      <td class="num">${money(b.total)}${fmtPeriod(b) ? `<div class="muted">${fmtPeriod(b)}</div>` : ''}</td></tr>`).join('');
+      <td class="num">${money(b.total)}${fmtPeriod(b) ? `<div class="muted">${fmtPeriod(b)}</div>` : ''}${
+        spans[b.id] ? `<div class="muted">${fmtSpan(spans[b.id], b.total)}</div>` : ''}</td></tr>`).join('');
   // Companies already billed for the chosen utility, for the hand-entry form
   updateCompanies();
 }
@@ -14241,6 +14254,7 @@ async function load() {
     ]);
     clearNetworkError();
     bills = list.receipts;
+    spans = s.spans || {};
     renderBills();
     renderSummary(s);
   } catch (e) {
@@ -14469,7 +14483,7 @@ const RID = __RID__;
 const FIELDS = ['utility', 'merchant', 'purchase_date', 'usage_amount', 'usage_unit', 'unit_price', 'lease_fee',
                 'reconnect_fee', 'tax', 'total', 'period_months'];
 const MONEY_FIELDS = ['total', 'lease_fee', 'reconnect_fee', 'tax'];
-let bill = null, pollTimer = null;
+let bill = null, pollTimer = null, spans = {};
 
 function fieldValue(k) {
   const v = bill[k];
@@ -14543,6 +14557,10 @@ function render() {
   if (b.reconnect_fee != null) figures.push(`<div class="figure"><div class="v">${money(b.reconnect_fee)}</div>
       <div class="l">Tank reconnection</div></div>`);
   if (b.tax != null) figures.push(`<div class="figure"><div class="v">${money(b.tax)}</div><div class="l">Tax</div></div>`);
+  const span = spans[b.id];
+  if (span) figures.push(`<div class="figure"><div class="v">${span.final ? span.days + ' days'
+        : span.estimated_days != null ? '~' + span.estimated_days + ' days' : 'Open'}</div>
+      <div class="l">${span.final ? 'Lasted' : 'Expected to last'}</div><div class="s">${fmtSpan(span, b.total)}</div></div>`);
   if (b.period_months > 1 && b.total != null) figures.push(`<div class="figure"><div class="v">${money(b.total / b.period_months)}</div>
       <div class="l">A month</div><div class="s">Covers ${b.period_months} months</div></div>`);
   figures.push(`<div class="figure"><div class="v">${esc(b.purchase_date || '\\u2014')}</div><div class="l">Billing date</div></div>`);
@@ -14561,6 +14579,7 @@ async function load() {
     clearNetworkError();
     // Read again and it turned out to be a store receipt
     if (bill.kind !== 'bill') { location.replace(`/receipts/${RID}`); return; }
+    if (bill.utility === 'Propane') spans = (await fetchJSON('/api/utilities/summary?months=1')).spans || {};
     render();
     if (bill.status === 'processing') pollTimer = setTimeout(load, 3000);
   } catch (e) {
@@ -15467,26 +15486,113 @@ def api_receipts_summary():
     })
 
 
+# Utilities delivered on no schedule (a propane tank is filled when it runs
+# low). Such a bill pays for what's burned from its billing date until the
+# next delivery, so it's spread day by day over that span instead of by
+# period_months.
+_DELIVERED_UTILITIES = ('Propane',)
+
+
+def _delivery_spans(bills: list, today: datetime.date) -> dict[int, dict]:
+    """How each delivered-utility bill (see _DELIVERED_UTILITIES) is spread.
+    bills are rows with id, day, utility, amount and usage_amount. A bill
+    followed by a later one is final: it lasted until that bill's date. The
+    latest bill is open: how long it will last is estimated from the usage
+    rate of the earlier ones (gallons a day, or dollars a day if gallons
+    weren't entered), and with no earlier bill, or once it outlasts that
+    estimate, it's spread evenly through today. Returns {bill id: {start,
+    end (exclusive), days, final, estimated_days, rate_basis}}."""
+    spans: dict[int, dict] = {}
+    for utility in _DELIVERED_UTILITIES:
+        # Bills on the same day (e.g. a delivery and a fee) share one span
+        groups: dict[str, list] = {}
+        for b in bills:
+            if b['utility'] == utility:
+                groups.setdefault(b['day'], []).append(b)
+        days = sorted(groups)
+        finals = []  # (gallons or None, amount, days) of each finished span
+        for i, d in enumerate(days):
+            start = datetime.date.fromisoformat(d)
+            group = groups[d]
+            gallons = sum(b['usage_amount'] or 0 for b in group)
+            amount = sum(b['amount'] or 0 for b in group)
+            info = {'start': d, 'final': i + 1 < len(days), 'estimated_days': None, 'rate_basis': None}
+            if info['final']:
+                end = datetime.date.fromisoformat(days[i + 1])
+                finals.append((gallons or None, amount, (end - start).days))
+            else:
+                est = None
+                with_gal = [f for f in finals if f[0]]
+                if gallons and with_gal:
+                    per_day = sum(f[0] for f in with_gal) / sum(f[2] for f in with_gal)
+                    est, info['rate_basis'] = gallons / per_day, 'gallons'
+                elif finals and sum(f[1] for f in finals) > 0:
+                    per_day = sum(f[1] for f in finals) / sum(f[2] for f in finals)
+                    est, info['rate_basis'] = amount / per_day, 'dollars'
+                if est is not None:
+                    info['estimated_days'] = round(est)
+                end = max(start + datetime.timedelta(days=max(1, round(est or 0))),
+                          today + datetime.timedelta(days=1))
+            info['end'] = end.isoformat()
+            info['days'] = max(1, (end - start).days)
+            for b in group:
+                spans[b['id']] = info
+    return spans
+
+
+def _spread_by_day(amount: float, start: datetime.date, end: datetime.date,
+                   until: datetime.date) -> dict[str, float]:
+    """amount spread evenly over the days start..end (exclusive), per month
+    (YYYY-MM), counting only days before until."""
+    total_days = max(1, (end - start).days)
+    out: dict[str, float] = {}
+    d = start
+    while d < min(end, until):
+        nxt = (d.replace(day=1) + datetime.timedelta(days=32)).replace(day=1)
+        n = (min(nxt, end, until) - d).days
+        out[d.strftime("%Y-%m")] = out.get(d.strftime("%Y-%m"), 0) + amount * n / total_days
+        d = min(nxt, end, until)
+    return out
+
+
 @app.get("/api/utilities/summary")
 def api_utilities_summary():
     """Utility bills per month per utility over the last N months (default 12),
     by billing date. A bill's amount is its total, or its charges + tax if no
     total was read. A bill covering several months (period_months) is spread
     evenly over them, starting with its billing month; months after this one
-    aren't counted yet."""
+    aren't counted yet. A propane bill is spread by day until the next one
+    (see _delivery_spans), counting only the days so far; spans gives how
+    each was spread."""
     months = max(1, min(int(request.args.get('months', 12)), 120))
     start = _months_start(months)[:7]
-    this_month = datetime.date.today().strftime("%Y-%m")
+    today = datetime.date.today()
+    this_month = today.strftime("%Y-%m")
     day = "COALESCE(r.purchase_date, substr(r.uploaded_at, 1, 10))"
     amount = ("COALESCE(r.total, (SELECT SUM(i.total_price) FROM receipt_items i WHERE i.receipt_id = r.id) "
               "+ COALESCE(r.tax, 0), 0)")
     with _conn() as conn:
         bills = conn.execute(
-            f"SELECT {day} AS day, COALESCE(r.utility, 'Other') AS utility, {amount} AS amount, "
-            f"COALESCE(r.period_months, 1) AS n FROM receipts r WHERE r.status='done' AND r.kind='bill'"
+            f"SELECT r.id, {day} AS day, COALESCE(r.utility, 'Other') AS utility, {amount} AS amount, "
+            f"r.usage_amount, COALESCE(r.period_months, 1) AS n FROM receipts r "
+            f"WHERE r.status='done' AND r.kind='bill'"
         ).fetchall()
+    spans = _delivery_spans(bills, today)
     cells: dict[tuple[str, str], dict] = {}
     for b in bills:
+        span = spans.get(b['id'])
+        if span:
+            counted = False
+            for month, amt in sorted(_spread_by_day(
+                    b['amount'], datetime.date.fromisoformat(span['start']),
+                    datetime.date.fromisoformat(span['end']), today + datetime.timedelta(days=1)).items()):
+                if start <= month <= this_month:
+                    c = cells.setdefault((month, b['utility']), {'amount': 0.0, 'n_bills': 0})
+                    c['amount'] += amt
+                    if not counted:
+                        c['n_bills'] += 1
+                        counted = True
+            continue
         y, m = int(b['day'][:4]), int(b['day'][5:7])
         counted = False
         for _ in range(b['n']):
@@ -15512,6 +15618,7 @@ def api_utilities_summary():
         'rows': sorted(rows, key=lambda r: (r['month'], r['utility'])),
         'totals': sorted(totals.values(), key=lambda t: -t['amount']),
         'grand_total': round(sum(t['amount'] for t in totals.values()), 2),
+        'spans': {str(k): v for k, v in spans.items()},
     })
 
 
