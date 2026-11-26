@@ -14194,6 +14194,7 @@ _UTILITIES_PAGE = """\\
           <div class="propane-only"><label for="f-lease">Annual tank lease fee</label><input type="text" id="f-lease" inputmode="decimal" placeholder="0.00 (optional)"></div>
           <div class="propane-only"><label for="f-reconnect">Tank reconnection fee</label><input type="text" id="f-reconnect" inputmode="decimal" placeholder="0.00 (optional)"></div>
           <div class="propane-only"><label for="f-tax">Tax</label><input type="text" id="f-tax" inputmode="decimal" placeholder="0.00 (optional)"></div>
+          <div class="propane-only wide muted">For a bill with no propane delivered (e.g. the yearly lease on its own), enter 0 gallons.</div>
           <div class="propane-only wide muted" id="f-calc"></div>
           <div><label for="f-months">Months covered</label><input type="number" id="f-months" min="1" max="24" value="1"></div>
           <div class="wide actions"><button class="btn" id="f-save">Add bill</button> <span id="f-status" class="muted"></span></div>
@@ -14252,7 +14253,8 @@ function renderBills() {
       <td class="num">${fmtUsage(b)}</td>
       <td class="num muted">${unitCost(b)}</td>
       <td class="num">${money(b.total)}${fmtPeriod(b) ? `<div class="muted">${fmtPeriod(b)}</div>` : ''}${
-        spans[b.id] ? `<div class="muted">${fmtSpan(spans[b.id], b)}</div>` : ''}</td></tr>`).join('');
+        spans[b.id] ? `<div class="muted">${fmtSpan(spans[b.id], b)}</div>`
+        : b.utility === 'Propane' && b.usage_amount === 0 ? '<div class="muted">Fees only, no delivery</div>' : ''}</td></tr>`).join('');
   // Companies already billed for the chosen utility, for the hand-entry form
   updateCompanies();
 }
@@ -14359,11 +14361,13 @@ const PROPANE_EXTRAS = [['f-lease', 'lease'], ['f-reconnect', 'reconnection'], [
 ['f-gallons', 'f-price', ...PROPANE_EXTRAS.map(e => e[0])].forEach(id => document.getElementById(id).addEventListener('input', () => {
   const g = num('f-gallons'), p = num('f-price'), calc = document.getElementById('f-calc');
   const extras = PROPANE_EXTRAS.map(([id, what]) => [num(id) || 0, what]);
-  if (g == null || p == null || isNaN(g) || isNaN(p) || extras.some(([v]) => isNaN(v))) { calc.textContent = ''; return; }
-  const t = g * p + extras.reduce((sum, [v]) => sum + v, 0);
+  // Zero gallons is a fees-only bill (e.g. the yearly lease on its own): no price needed
+  if (g == null || (g && p == null) || isNaN(g) || isNaN(p) || extras.some(([v]) => isNaN(v))) { calc.textContent = ''; return; }
+  const t = (g ? g * p : 0) + extras.reduce((sum, [v]) => sum + v, 0);
   document.getElementById('f-total').value = t.toFixed(2);
-  calc.textContent = `${g.toLocaleString()} gal \\u00d7 ${money(p)}`
-    + extras.filter(([v]) => v).map(([v, what]) => ` + ${money(v)} ${what}`).join('') + ` = ${money(t)}`;
+  const parts = extras.filter(([v]) => v).map(([v, what]) => `${money(v)} ${what}`);
+  calc.textContent = g ? `${g.toLocaleString()} gal \\u00d7 ${money(p)}` + parts.map(x => ` + ${x}`).join('') + ` = ${money(t)}`
+                       : `No propane delivered: ${parts.join(' + ') || 'no fees'} = ${money(t)}`;
 }));
 document.getElementById('f-date').value = new Date().toLocaleDateString('en-CA');
 document.getElementById('f-save').addEventListener('click', async () => {
@@ -14675,8 +14679,8 @@ document.getElementById('utility').addEventListener('change', setPropane);
   if (document.getElementById('utility').value !== 'Propane') return;
   const v = k => parseAmount(document.getElementById(k).value);
   const g = v('usage_amount'), p = v('unit_price'), extras = ['lease_fee', 'reconnect_fee', 'tax'].map(k => v(k) || 0);
-  if (g == null || p == null || [g, p, ...extras].some(Number.isNaN)) return;
-  document.getElementById('total').value = (g * p + extras.reduce((a, b) => a + b, 0)).toFixed(2);
+  if (g == null || (g && p == null) || [g, p, ...extras].some(Number.isNaN)) return;
+  document.getElementById('total').value = ((g ? g * p : 0) + extras.reduce((a, b) => a + b, 0)).toFixed(2);
 }));
 document.getElementById('edit-card').addEventListener('input', () => {
   let dirty = false;
@@ -15573,6 +15577,17 @@ _DELIVERED_UTILITIES = ('Propane',)
 _LEASE_MONTHS = 12
 
 
+def _is_fees_only(b) -> bool:
+    """A delivered-utility bill with nothing delivered, e.g. the yearly tank
+    lease paid on its own: zero gallons, or no gallons entered and nothing
+    charged beyond its fees and tax. It isn't a delivery, so it neither
+    starts nor ends one's span."""
+    if b['usage_amount'] is not None:
+        return b['usage_amount'] <= 0
+    fees = (b['lease_fee'] or 0) + (b['reconnect_fee'] or 0) + (b['tax'] or 0)
+    return fees > 0 and (b['amount'] or 0) - fees < 0.005
+
+
 def _propane_burn(readings: list, deliveries: list, tank_gallons: float | None) -> dict | None:
     """Gallons of propane burned a day, from the tank readings (dicts with
     read_on and percent, oldest first) and deliveries (dicts with day and
@@ -15596,7 +15611,7 @@ def _propane_burn(readings: list, deliveries: list, tank_gallons: float | None) 
             days += d
         return (used / days, days) if days and used > 0 else None
 
-    latest = max((x['day'] for x in deliveries), default=None)
+    latest = max((x['day'] for x in deliveries if (x['gallons'] or 0) > 0), default=None)
     recent = [r for r in readings if latest is None or r['read_on'] >= latest]
     got = rate(recent) or rate(readings)
     if got is None:
@@ -15631,7 +15646,7 @@ def _delivery_spans(bills: list, today: datetime.date, tank_gallons: float | Non
         # Bills on the same day (e.g. a delivery and a fee) share one span
         groups: dict[str, list] = {}
         for b in bills:
-            if b['utility'] == utility:
+            if b['utility'] == utility and not _is_fees_only(b):
                 groups.setdefault(b['day'], []).append(b)
         days = sorted(groups)
         burn = None
@@ -15776,7 +15791,8 @@ def api_utilities_summary():
     with _conn() as conn:
         bills = conn.execute(
             f"SELECT r.id, {day} AS day, COALESCE(r.utility, 'Other') AS utility, {amount} AS amount, "
-            f"r.usage_amount, r.lease_fee, COALESCE(r.period_months, 1) AS n FROM receipts r "
+            f"r.usage_amount, r.lease_fee, r.reconnect_fee, r.tax, COALESCE(r.period_months, 1) AS n "
+            f"FROM receipts r "
             f"WHERE r.status='done' AND r.kind='bill'"
         ).fetchall()
         tank_gallons, readings = _propane_tank(conn)
@@ -15784,10 +15800,15 @@ def api_utilities_summary():
     cells: dict[tuple[str, str], dict] = {}
     for b in bills:
         span = spans.get(b['id'])
-        if span:
+        fees_only = b['utility'] in _DELIVERED_UTILITIES and _is_fees_only(b)
+        if span or fees_only:
             lease = b['lease_fee'] or 0
-            shares = _spread_by_day(b['amount'] - lease, datetime.date.fromisoformat(span['start']),
-                                    datetime.date.fromisoformat(span['end']), today + datetime.timedelta(days=1))
+            if span:
+                shares = _spread_by_day(b['amount'] - lease, datetime.date.fromisoformat(span['start']),
+                                        datetime.date.fromisoformat(span['end']), today + datetime.timedelta(days=1))
+            else:  # any other fees on a fees-only bill count in its billing month
+                rest = b['amount'] - lease
+                shares = {b['day'][:7]: rest} if abs(rest) >= 0.005 else {}
             # The yearly lease fee, a twelfth a month from the billing month
             y, m = int(b['day'][:4]), int(b['day'][5:7])
             for _ in range(_LEASE_MONTHS if lease else 0):
