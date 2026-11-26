@@ -591,12 +591,11 @@ def _migrate_known_items_to_products(conn: sqlite3.Connection) -> None:
     """One-time: every name_key in receipt_known_items (and every receipt-item
     without a product) gets a product, keeping its friendly name and default
     quantity. receipt_known_items is dropped afterwards."""
-    known = {}
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_known_items'").fetchone():
-        known = {r[0]: r[1:] for r in conn.execute("SELECT name_key, name, quantity, unit FROM receipt_known_items")}
-    if not known and conn.execute("SELECT 1 FROM receipt_items WHERE product_id IS NULL LIMIT 1").fetchone() is None:
-        conn.execute("DROP TABLE IF EXISTS receipt_known_items")
+    # Only while the old table is still there: some lines are meant to have no
+    # product (an Amazon order's shipping, discount and refund lines)
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_known_items'").fetchone():
         return
+    known = {r[0]: r[1:] for r in conn.execute("SELECT name_key, name, quantity, unit FROM receipt_known_items")}
     now = _now()
     for key, (name, qty, unit) in known.items():
         if conn.execute("SELECT 1 FROM product_keys WHERE name_key=?", (key,)).fetchone():
