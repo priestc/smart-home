@@ -31,6 +31,15 @@ function shAmountAfter(text, label) {
   return m ? (m[1] ? -1 : 1) * parseFloat(m[2].replace(/,/g, '')) : null;
 }
 
+// A product picture's full-size address: Amazon serves thumbnails such as
+// https://m.media-amazon.com/images/W/<test>/images/I/619zN9UfOXL._SS284_.jpg
+// of https://m.media-amazon.com/images/I/619zN9UfOXL.jpg
+function shImageUrl(src) {
+  if (!/^https:\/\/[^/]*(media-amazon|images-amazon)\.com\//.test(src || '')) return null;
+  const m = src.match(/\/images\/I\/([^/.]+)[^/]*?\.(jpg|jpeg|png|webp)(?:[?#]|$)/i);
+  return m ? `https://m.media-amazon.com/images/I/${m[1]}.${m[2].toLowerCase()}` : null;
+}
+
 function shIsoDate(s) {
   const d = new Date(s);
   if (isNaN(d)) return null;
@@ -116,10 +125,18 @@ function shParseOrderDetails(doc, url) {
     // Wording only an ordered item has next to it
     const ordered = (/Sold by/i.test(wideText) ? 1 : 0)
       + (/Return or replace|Return items|Eligible through|Return window|Get product support|Track package/i.test(wideText) ? 1 : 0);
-    // The product's picture, at full size ("71abc._SS142_.jpg" is a thumbnail of "71abc.jpg")
-    const img = [...wide.querySelectorAll('img')].map(i => i.getAttribute('data-a-hires') || i.getAttribute('src') || '')
-      .find(src => /^https:\/\/[^/]*(media-amazon|images-amazon)\.com\/images\/I\//.test(src));
-    const image_url = img ? img.replace(/\._[^/]*_\.(jpg|jpeg|png|webp)$/i, '.$1') : null;
+    // The product's picture: an <img> whose alt text is the product's name,
+    // else the first product picture near it
+    const pics = [...body.querySelectorAll('img')].map(i => ({alt: shText(i.getAttribute('alt')),
+      src: i.getAttribute('data-a-hires') || i.getAttribute('src') || ''})).filter(i => shImageUrl(i.src));
+    const t = title.replace(/(\.\.\.|\u2026)$/, '').toLowerCase();
+    let pic = pics.find(i => i.alt && (i.alt.toLowerCase().startsWith(t) || t.startsWith(i.alt.toLowerCase())));
+    if (!pic) {
+      const near = [...wide.querySelectorAll('img')].map(i => i.getAttribute('data-a-hires') || i.getAttribute('src') || '');
+      const src = near.find(shImageUrl);
+      pic = src ? {src} : null;
+    }
+    const image_url = pic ? shImageUrl(pic.src) : null;
     items.push({name: title, asin, quantity: Math.max(qty, 1), unit_price: price, ordered, image_url});
   }
   if (!items.length) throw new Error('No products found on the page');

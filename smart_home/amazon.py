@@ -1233,7 +1233,8 @@ def _attach_images_in_background(db_path: str, rid: int, items: list[dict]) -> N
                     _log_extension(conn, {"receipt_id": rid, "outcome": "error",
                                           "error": f"Couldn't get the picture of {it['name'][:60]}: {msg}"})
             raw = conn.execute("SELECT raw_json FROM receipts WHERE id=?", (rid,)).fetchone()
-            if raw:
+            # Only a page that had pictures counts: otherwise a later sync asks again
+            if raw and any(it.get("image_url") for it in items):
                 j = json.loads(raw[0] or "{}")
                 j["images_tried"] = True
                 conn.execute("UPDATE receipts SET raw_json=? WHERE id=?", (json.dumps(j), rid))

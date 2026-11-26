@@ -77,21 +77,33 @@ async function shOrderIdsOnPage(doc, tries) {
   return [];
 }
 
+// The order history's "Next" page link, or null on the last page
+function shNextPageUrl(doc) {
+  const links = [...doc.querySelectorAll('.a-pagination a, a[href*="startIndex="]')];
+  const next = links.find(a => /^\s*Next/i.test(a.textContent || '')) ;
+  const href = next && next.getAttribute('href');
+  return href ? new URL(href, 'https://www.amazon.com').href : null;
+}
+
 async function shSync() {
   history.replaceState(null, '', location.pathname + location.search);
   const progress = p => shSend({type: 'sync-progress', ...p});
   progress({state: 'running', message: 'Finding recent orders…'});
   try {
     const ids = new Set(await shOrderIdsOnPage(document, 5));
-    for (let page = 1; page < SH_SYNC_PAGES; page++) {
-      const u = new URL(location.href);
-      u.searchParams.set('startIndex', String(page * 10));
-      const resp = await shFetch(u, {credentials: 'include'});
-      if (!resp.ok) break;
-      const found = shFindOrderIds(new DOMParser().parseFromString(await resp.text(), 'text/html'));
+    // Follow the page's own "Next" link, as clicking it would
+    let page = document;
+    for (let n = 1; n < SH_SYNC_PAGES; n++) {
+      const next = shNextPageUrl(page);
+      if (!next) break;
+      progress({state: 'running', message: `Finding orders: page ${n + 1} (${ids.size} so far)\u2026`});
+      const resp = await shFetch(next, {credentials: 'include'});
+      if (!resp.ok) throw new Error(`amazon.com returned HTTP ${resp.status} for order history page ${n + 1}`);
+      page = new DOMParser().parseFromString(await resp.text(), 'text/html');
       const before = ids.size;
-      found.forEach(i => ids.add(i));
+      shFindOrderIds(page).forEach(i => ids.add(i));
       if (ids.size === before) break;
+      await shSleep(1000);
     }
     if (!ids.size) throw new Error('No orders found on the order history page (are you signed in?)');
     const states = await shSend({type: 'states', ids: [...ids]});
