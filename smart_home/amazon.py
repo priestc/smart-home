@@ -1192,6 +1192,11 @@ def _categorize_in_background(db_path: str, rid: int) -> None:
             for (iid, _), cat in zip(rows, cats):
                 conn.execute("UPDATE receipt_items SET category=? WHERE id=?", (cat, iid))
             conn.commit()
+            # Refund lines take their item's category: put them back now that it's known
+            raw = conn.execute("SELECT raw_json FROM receipts WHERE id=?", (rid,)).fetchone()
+            if raw:
+                conn.row_factory = sqlite3.Row
+                reapply_refunds(conn, db_path, json.loads(raw[0] or "{}").get("orders") or [])
         finally:
             conn.close()
 
