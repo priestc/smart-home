@@ -5434,6 +5434,16 @@ def index():
     .chart-link:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12), 0 6px 18px rgba(0,0,0,.08); transform: translateY(-1px); }
     .chart-link .cl-title { font-size: .9rem; font-weight: 600; }
     .chart-link .cl-arrow { color: #aabbc8; font-size: 1.1rem; }
+    /* A widget waiting for its data: drawn from its last render (or a stand-in)
+       with the text hidden behind grey bars, so the page doesn't shift when the
+       data comes in. See setWidget(). */
+    .skeleton { animation: skel-pulse 1.2s ease-in-out infinite; pointer-events: none; }
+    .skeleton :is(.label, .temp, .hum, .ts, .gas-price, .gas-cmp, .sun-time, .gstate, .gtimer, .disk-head span,
+                  .disk-sub, .pc-label, .pc-status, .pc-metrics, .pc-ts, .ev-badge, .ev-detail, .ev-time) {
+      color: transparent !important; background: #e3eaf1; border-radius: 4px; width: fit-content; max-width: 100%; }
+    .skeleton .disk-fill { background: #d0dae4 !important; }
+    @keyframes skel-pulse { 50% { opacity: .55; } }
+    #pool-cards:empty { display: none; }
     #error-bar { display:none; background:#fde8e8; color:#c0392b; border-radius:8px; padding:.6rem 1rem; margin-bottom:1rem; font-size:.85rem; font-weight:500; }
   </style>
 </head>
@@ -5449,7 +5459,31 @@ def index():
     <div id="gas-widget"></div>
     <div id="disk-widget"></div>
   </div>
-  <div class="pool-cards"    id="pool-cards"    style="display:none"></div>
+  <div class="pool-cards"    id="pool-cards"></div>
+<script>
+// Draw every widget as a placeholder before the first paint (see setWidget).
+const WIDGET_KEY = 'home-widget:';
+const N_DRIVES = __N_DRIVES__;
+const WIDGET_STANDINS = {
+  cards: [1, 2, 3].map(() => `<div class="card"><div class="label">Sensor name</div><div class="temp">00.0&deg;F</div>
+    <div class="hum">00.0% RH</div><div class="ts">1/1/2026, 12:00:00 PM</div></div>`).join(''),
+  'sun-widget': `<div class="card"><div class="label">Until Sunset</div><div class="sun-time">0:00:00</div><div class="ts">Sunset at 0:00 PM</div></div>`,
+  'garage-cards': `<a class="garage-card"><div class="label">Garage</div><div class="gstate">CLOSED</div><div class="gtimer">Closed 0h 00m 00s</div></a>`,
+  'gas-widget': `<a class="card gas-card"><div class="label">Gas &middot; Regular avg</div><div class="gas-price">$0.00</div>
+    <div class="gas-cmp">&#9660; $0.00 vs 30-day avg $0.00</div><div class="ts">Cheapest $0.00 &middot; Station name</div></a>`,
+  'disk-widget': `<div class="card disk-card"><div class="label">Storage</div>` + Array.from({length: N_DRIVES}, () =>
+    `<div class="disk"><div class="disk-head"><span>Drive name</span><span class="disk-pct">00%</span></div>
+     <div class="disk-bar"><div class="disk-fill" style="width:50%"></div></div><div class="disk-sub">000 GB free of 0.00 TB</div></div>`).join('') + `</div>`,
+};
+for (const id of ['cards', 'sun-widget', 'garage-cards', 'gas-widget', 'disk-widget', 'pool-cards']) {
+  let html = null;
+  try { html = localStorage.getItem(WIDGET_KEY + id); } catch (e) {}
+  if (html == null) html = WIDGET_STANDINS[id] || '';
+  const el = document.getElementById(id);
+  el.innerHTML = html;
+  if (html) el.classList.add('skeleton');
+}
+</script>
 
   <div class="section-title">Charts</div>
   <div class="chart-links">
@@ -5469,6 +5503,7 @@ def index():
     <a href="/email-archive"     class="chart-link"><span class="cl-title">Email Archive</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/gpu"               class="chart-link"><span class="cl-title">GPU Temperatures</span><span class="cl-arrow">&#8594;</span></a>
     <a href="/water-chemistry"   class="chart-link" id="pool-link" style="display:none"><span class="cl-title">Water Chemistry</span><span class="cl-arrow">&#8594;</span></a>
+    <script>try { if (localStorage.getItem('home-widget:pool-link') === '1') document.getElementById('pool-link').style.display = ''; } catch (e) {}</script>
     <a href="/rssi"              class="chart-link"><span class="cl-title">Bluetooth Signal</span><span class="cl-arrow">&#8594;</span></a>
   </div>
 
@@ -5476,6 +5511,16 @@ def index():
     <div class="section-title">Events &nbsp;<a href="/events" style="font-size:.75rem;font-weight:500;color:#2e7dd4;text-decoration:none;">View all &rarr;</a></div>
     <div class="events-list" id="events-list"></div>
   </div>
+<script>
+try {
+  const html = localStorage.getItem('home-widget:events-list');
+  if (html) {
+    document.getElementById('events-list').innerHTML = html;
+    document.getElementById('events-list').classList.add('skeleton');
+    document.getElementById('events-wrap').style.display = '';
+  }
+} catch (e) {}
+</script>
 
 <script>
 function showNetworkError(msg) {
@@ -5504,6 +5549,21 @@ async function fetchJSON(url, opts) {
     throw e;
   }
 }
+// Put a widget's content in place of its placeholder, and remember it so the
+// next page load can draw the placeholder in the same shape. save=false for
+// redraws that only change text (the sun countdown).
+function setWidget(id, html, save = true) {
+  const el = document.getElementById(id);
+  el.innerHTML = html;
+  el.classList.remove('skeleton');
+  if (save) try { localStorage.setItem(WIDGET_KEY + id, html); } catch (e) {}
+}
+// A widget whose data couldn't be loaded: an error card instead of a placeholder
+function widgetError(id, title, msg) {
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  setWidget(id, `<div class="card"><div class="label">${esc(title)}</div>
+    <div class="ts" style="font-size:.85rem;color:#c0392b">&#9888; Couldn’t load: ${esc(msg)}</div></div>`, false);
+}
 const _errors = new Set();
 function showError(section) {
   if (_errors.has(section)) return;
@@ -5529,7 +5589,7 @@ async function loadCurrent() {
     const now = Date.now();
     const OFFLINE_MS = 10 * 60 * 1000;
     const sensors = data.filter(s => s.source === 'reading');
-    document.getElementById("cards").innerHTML = sensors.map(s => {
+    setWidget("cards", sensors.map(s => {
       const isOnline = (now - new Date(s.ts).getTime()) < OFFLINE_MS;
       const tsStr = `<div class="ts">${new Date(s.ts).toLocaleString()}</div>`;
       if (isOnline) {
@@ -5538,8 +5598,8 @@ async function loadCurrent() {
       } else {
         return `<div class="card offline"><div class="label">${s.label || s.address}</div><div class="temp">Offline</div>${tsStr}</div>`;
       }
-    }).join("");
-  } catch(e) { showError("sensors"); }
+    }).join(""));
+  } catch(e) { showError("sensors"); widgetError("cards", "Sensors", e.message); }
 }
 function timeSince(date) {
   const s = Math.floor((Date.now() - date) / 1000);
@@ -5559,10 +5619,9 @@ async function loadEvents() {
   try {
     const data = await fetchJSON("/api/events?limit=15");
     const wrap = document.getElementById("events-wrap");
-    const el = document.getElementById("events-list");
-    if (!data.length) { wrap.style.display = "none"; return; }
+    if (!data.length) { wrap.style.display = "none"; setWidget("events-list", ""); return; }
     wrap.style.display = "";
-    el.innerHTML = data.map(e => {
+    setWidget("events-list", data.map(e => {
       const [label, cls] = EV_LABELS[e.event_type] || [e.event_type, "b-io"];
       const timeStr = new Date(e.ts.replace(" ", "T")).toLocaleString();
       const detail = e.details || (e.value != null ? `${e.value.toFixed(1)}°F` : "");
@@ -5571,8 +5630,12 @@ async function loadEvents() {
         <span class="ev-detail">${detail}</span>
         <span class="ev-time">${timeStr}</span>
       </div>`;
-    }).join("");
-  } catch(e) { showError("events"); }
+    }).join(""));
+  } catch(e) {
+    showError("events");  // the error bar says so; don't leave old events looking current
+    setWidget("events-list", "", false);
+    document.getElementById("events-wrap").style.display = "none";
+  }
 }
 const garageOpenSince = {};    // name -> ms timestamp when last opened
 const garageClosedSince = {};  // name -> ms timestamp when last closed
@@ -5597,14 +5660,20 @@ function tickGarageTimers() {
 }
 setInterval(tickGarageTimers, 1000);
 async function loadGarage() {
-  const garages = await fetchJSON("/api/garage");
-  if (!garages.length) return;
+  let garages;
+  try {
+    garages = await fetchJSON("/api/garage");
+  } catch (e) {
+    showError("garage");
+    widgetError("garage-cards", "Garage", e.message);
+    return;
+  }
+  if (!garages.length) { setWidget("garage-cards", ""); return; }
   const results = await Promise.all(garages.map(g =>
     fetchJSON(`/api/garage/${encodeURIComponent(g.name)}/status`)
       .then(s => ({ name: g.name, ...s })).catch(() => ({ name: g.name, ok: false }))
   ));
-  const el = document.getElementById("garage-cards");
-  el.innerHTML = results.map(d => {
+  setWidget("garage-cards", results.map(d => {
     let stateClass = "unknown", stateText = "?";
     if (d.ok) {
       if (d.door_closed === true)  { stateClass = "closed"; stateText = "CLOSED"; }
@@ -5627,17 +5696,17 @@ async function loadGarage() {
       <div class="gstate ${stateClass}">${stateText}</div>
       <div class="gtimer" id="gtimer-${d.name}"></div>
     </a>`;
-  }).join("");
+  }).join(""));
   tickGarageTimers();
 }
 async function loadPool() {
   try {
     const rows = await fetchJSON('/api/pool/current');
-    if (!rows.length) return;
-    document.getElementById('pool-link').style.display = '';
-    const wrap = document.getElementById('pool-cards');
-    wrap.style.display = '';
-    wrap.innerHTML = rows.map(r => {
+    const link = document.getElementById('pool-link');
+    try { localStorage.setItem(WIDGET_KEY + 'pool-link', rows.length ? '1' : '0'); } catch (e) {}
+    link.style.display = rows.length ? '' : 'none';
+    if (!rows.length) { setWidget('pool-cards', ''); return; }
+    setWidget('pool-cards', rows.map(r => {
       const offline = r.offline;
       const statusClass = offline ? 'offline' : 'online';
       const statusDot   = offline ? '●' : '●';
@@ -5655,8 +5724,8 @@ async function loadPool() {
         ${metrics ? `<div class="pc-metrics">${metrics}</div>` : ''}
         <div class="pc-ts">${tsText}</div>
       </a>`;
-    }).join('');
-  } catch(e) { /* pool not configured — silently skip */ }
+    }).join(''));
+  } catch(e) { setWidget('pool-cards', ''); /* pool not configured — skip */ }
 }
 let _sunData = null;
 function tickSunWidget() {
@@ -5694,14 +5763,16 @@ function tickSunWidget() {
   const s = totalSecs % 60;
   const timeStr = `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
   const color = isDay ? '#e07820' : '#5b7fa6';
-  el.innerHTML = `<div class="card"><div class="label">${label}</div><div class="sun-time" style="color:${color}">${timeStr}</div><div class="ts">${nextEventStr}</div></div>`;
+  // Saved for the placeholder only on the first draw, not every second
+  setWidget('sun-widget', `<div class="card"><div class="label">${label}</div><div class="sun-time" style="color:${color}">${timeStr}</div><div class="ts">${nextEventStr}</div></div>`,
+            el.classList.contains('skeleton') || !el.innerHTML);
 }
 async function loadSunTimes() {
   try {
     _sunData = await fetchJSON('/api/sun-times');
     tickSunWidget();
     setInterval(tickSunWidget, 1000);
-  } catch(e) { /* property not configured — skip sun widget */ }
+  } catch(e) { setWidget('sun-widget', ''); /* property not configured — skip sun widget */ }
 }
 async function loadGas() {
   const el = document.getElementById('gas-widget');
@@ -5712,23 +5783,24 @@ async function loadGas() {
     data = await r.json();
   } catch (e) {
     showError('gas prices');
+    widgetError('gas-widget', 'Gas Prices', e.message);
     return;
   }
   if (!r.ok) {
     // 404 = gas area or prices not set up yet; anything else is a real failure
-    el.innerHTML = `<a class="card gas-card" href="/gas"><div class="label">Gas Prices</div>
-      <div class="ts" style="font-size:.85rem;color:${r.status === 404 ? '#7a90a8' : '#c0392b'}">${esc(data.error || 'HTTP ' + r.status)}</div></a>`;
+    setWidget('gas-widget', `<a class="card gas-card" href="/gas"><div class="label">Gas Prices</div>
+      <div class="ts" style="font-size:.85rem;color:${r.status === 404 ? '#7a90a8' : '#c0392b'}">${esc(data.error || 'HTTP ' + r.status)}</div></a>`);
     return;
   }
   const color = data.trend === 'cheaper' ? '#2a9d6e' : data.trend === 'pricier' ? '#c0392b' : '#7a90a8';
   const arrow = data.trend === 'cheaper' ? '&#9660;' : data.trend === 'pricier' ? '&#9650;' : '&#9644;';
   const days = data.avg_30d_days < 30 ? ` (${data.avg_30d_days}d so far)` : '';
   const warn = data.last_run_error ? `<div class="ts" style="color:#c0392b">&#9888; ${esc(data.last_run_error)}</div>` : '';
-  el.innerHTML = `<a class="card gas-card" href="/gas" title="Average ${data.fuel_label} price across ${data.n_stations} stations in your gas area">
+  setWidget('gas-widget', `<a class="card gas-card" href="/gas" title="Average ${data.fuel_label} price across ${data.n_stations} stations in your gas area">
     <div class="label">Gas &middot; ${data.fuel_label} avg</div>
     <div class="gas-price" style="color:${color}">$${data.current_avg.toFixed(2)}</div>
     <div class="gas-cmp" style="color:${color}">${arrow} $${Math.abs(data.diff).toFixed(2)} vs 30-day avg $${data.avg_30d.toFixed(2)}${days}</div>
-    <div class="ts">Cheapest $${data.current_min.toFixed(2)} &middot; ${esc(data.cheapest_name)}</div>${warn}</a>`;
+    <div class="ts">Cheapest $${data.current_min.toFixed(2)} &middot; ${esc(data.cheapest_name)}</div>${warn}</a>`);
 }
 async function loadDisks() {
   const el = document.getElementById('disk-widget');
@@ -5744,11 +5816,12 @@ async function loadDisks() {
     data = await r.json();
   } catch (e) {
     showError('drive space');
+    widgetError('disk-widget', 'Storage', e.message);
     return;
   }
   if (!r.ok) {
-    el.innerHTML = `<div class="card disk-card"><div class="label">Storage</div>
-      <div class="ts" style="font-size:.85rem;color:#c0392b">${esc(data.error || 'HTTP ' + r.status)}</div></div>`;
+    setWidget('disk-widget', `<div class="card disk-card"><div class="label">Storage</div>
+      <div class="ts" style="font-size:.85rem;color:#c0392b">${esc(data.error || 'HTTP ' + r.status)}</div></div>`, false);
     return;
   }
   const rows = data.drives.map(d => {
@@ -5764,7 +5837,7 @@ async function loadDisks() {
       <div class="disk-bar"><div class="disk-fill" style="width:${pct.toFixed(1)}%;background:${color}"></div></div>
       <div class="disk-sub">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}${d.stale ? ` &middot; <span title="${esc(d.stale_reason)}">as of ${fmtAge(d.as_of)}</span>` : ''}</div></div>`;
   }).join('');
-  el.innerHTML = `<div class="card disk-card"><div class="label">Storage</div>${rows}</div>`;
+  setWidget('disk-widget', `<div class="card disk-card"><div class="label">Storage</div>${rows}</div>`);
 }
 loadCurrent();
 loadDisks();
@@ -5784,6 +5857,7 @@ setInterval(loadPool, 60000);
 </script>
 </body>
 </html>"""
+    html = html.replace("__N_DRIVES__", str(len(_LOCAL_DRIVES) + len(_REMOTE_DRIVES)))
     return Response(html, mimetype="text/html")
 
 
