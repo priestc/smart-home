@@ -537,7 +537,16 @@ def open_db(path: str) -> sqlite3.Connection:
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
-    # zone: where the product goes (receipts.ZONES, 'none', or NULL = not
+    # Products are sorted into the zones on /zones (wc_zones; see
+    # receipts.zones). The zones for products were added there once.
+    if not conn.execute("SELECT 1 FROM settings WHERE key='product_zones_added'").fetchone():
+        from smart_home import receipts as _receipts
+        for z in _receipts.PRODUCT_ZONES_TO_ADD:
+            if not conn.execute("SELECT 1 FROM wc_zones WHERE name = ? COLLATE NOCASE", (z,)).fetchone():
+                conn.execute("INSERT INTO wc_zones (name, zone_type) VALUES (?, 'indoor_room')", (z,))
+        conn.execute("INSERT INTO settings (key, value) VALUES ('product_zones_added', '1')")
+        conn.commit()
+    # zone: where the product goes (a /zones zone's name, 'none', or NULL = not
     # sorted yet). amazon_category: Amazon's category path for it, a JSON list
     # (read by the Chrome extension); amazon_category_tried: when the
     # extension last tried to read it and couldn't.

@@ -8414,9 +8414,12 @@ def api_pool_relay_reading():
 
 @app.get("/api/water-chemistry/zones")
 def api_wc_zones_get():
-    """List all water chemistry zones."""
+    """List all zones (water chemistry, and where products go), with
+    n_products: how many products are sorted into each."""
     with _conn() as conn:
-        rows = conn.execute("SELECT id, name, mode, zone_type, datetime(created_at, 'localtime') AS created_at FROM wc_zones ORDER BY id ASC").fetchall()
+        rows = conn.execute("SELECT z.id, z.name, z.mode, z.zone_type, datetime(z.created_at, 'localtime') AS created_at, "
+                            "(SELECT COUNT(*) FROM products p WHERE p.zone = z.name) AS n_products "
+                            "FROM wc_zones z ORDER BY z.id ASC").fetchall()
     return jsonify([dict(r) for r in rows])
 
 
@@ -8431,6 +8434,8 @@ def api_wc_zones_create():
         return jsonify({"error": f"invalid zone_type '{zone_type}'"}), 400
     if not name:
         return jsonify({"error": "name required"}), 400
+    if name.lower() == "none":
+        return jsonify({"error": '"none" is reserved (it means a product has no zone)'}), 400
     try:
         with _conn() as conn:
             conn.execute("INSERT INTO wc_zones (name, zone_type) VALUES (?, ?)", (name, zone_type))
@@ -8445,9 +8450,12 @@ def api_wc_zones_create():
 
 @app.patch("/api/water-chemistry/zones/<int:zone_id>")
 def api_wc_zones_update(zone_id):
-    """Update name and/or zone_type for a zone. Cascades name change to pool_readings."""
+    """Update name and/or zone_type for a zone. Cascades name change to pool_readings
+    and to the products sorted into it."""
     data = request.get_json(silent=True) or {}
     new_name = (data.get("name") or "").strip() or None
+    if new_name and new_name.lower() == "none":
+        return jsonify({"error": '"none" is reserved (it means a product has no zone)'}), 400
     zone_type = data.get("zone_type", "__unset__")
     valid_types = {"running_water", "pooling_water", "indoor_room", "outdoor_shade", "outdoor_sun", "unclassified", None}
     if zone_type != "__unset__" and zone_type not in valid_types:
@@ -8472,6 +8480,8 @@ def api_wc_zones_update(zone_id):
                 return jsonify({"error": str(e)}), 500
             if new_name and new_name != old_name:
                 conn.execute("UPDATE pool_readings SET zone=? WHERE zone=?", (new_name, old_name))
+                # Products sorted into it follow the new name
+                conn.execute("UPDATE products SET zone=? WHERE zone=?", (new_name, old_name))
             conn.commit()
         row = conn.execute("SELECT id, name, mode, zone_type, datetime(created_at, 'localtime') AS created_at FROM wc_zones WHERE id=?", (zone_id,)).fetchone()
     return jsonify(dict(row))
@@ -8487,10 +8497,12 @@ def api_wc_zones_delete(zone_id):
             return jsonify({"error": "zone not found"}), 404
         zone_name = row["name"]
         conn.execute("DELETE FROM wc_zones WHERE id=?", (zone_id,))
+        # Products sorted into it go back to be sorted again
+        unsorted = conn.execute("UPDATE products SET zone=NULL WHERE zone=?", (zone_name,)).rowcount
         if purge:
             conn.execute("DELETE FROM pool_readings WHERE zone=?", (zone_name,))
         conn.commit()
-    return jsonify({"ok": True, "id": zone_id, "purged": purge})
+    return jsonify({"ok": True, "id": zone_id, "purged": purge, "products_unsorted": unsorted})
 
 
 @app.get("/api/water-chemistry/zone-list")
@@ -8970,6 +8982,9 @@ _ZONES_PAGE = """<!DOCTYPE html>
 <body>
   <div id="error-bar"></div>
   <h1>Zones</h1>
+  <p style="font-size:.85rem;color:#5a6e84;margin:-.9rem 0 1.2rem;max-width:46rem">Places in and around the house: where water readings
+    are taken, and where products go (sorted on <a href="/receipts/sort" style="color:#2e7dd4">Sort into zones</a>; every zone except
+    running-water ones). Renaming a zone renames it on its products too.</p>
   <div class="card">
     <div class="card-header">All Zones</div>
     <div id="zone-list"></div>
@@ -9030,6 +9045,7 @@ function renderZones() {
       <div class="zone-dot" style="background:${ZONE_COLORS[i % ZONE_COLORS.length]}"></div>
       <span class="zone-name">${esc(z.name)}</span>
       ${typeBadge}
+      ${z.n_products ? `<a class="zone-type-badge" style="text-decoration:none;color:#2e7dd4" href="/receipts/items?q=${encodeURIComponent(z.name)}">${z.n_products} product${z.n_products === 1 ? '' : 's'}</a>` : ''}
       <button class="edit-btn" onclick="openEditZone(${z.id})">Edit</button>
       <button class="del-btn" onclick="confirmDelete(${z.id},'${z.name.replace(/'/g,"\\\\'")}')">Delete</button>
     </div>`;
@@ -9057,12 +9073,15 @@ async function addZone() {
 }
 
 function confirmDelete(id, name) {
+  const zn = zones.find(z => z.id === id);
+  const nProducts = zn ? zn.n_products : 0;
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:999;display:flex;align-items:center;justify-content:center;';
   const box = document.createElement('div');
   box.style.cssText = 'background:#fff;border-radius:14px;padding:1.5rem 1.75rem;max-width:360px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.18);';
   box.innerHTML = `
     <div style="font-size:1rem;font-weight:700;color:#1a2535;margin-bottom:.4rem">Delete zone &#8220;${esc(name)}&#8221;?</div>
+    ${nProducts ? `<div style="font-size:.85rem;color:#8a4b00;margin-bottom:.6rem">Its ${nProducts} product${nProducts === 1 ? '' : 's'} will go back to being unsorted.</div>` : ''}
     <div style="font-size:.85rem;color:#5a6e84;margin-bottom:1.25rem">What should happen to historical readings tagged with this zone?</div>
     <div style="display:flex;flex-direction:column;gap:.55rem">
       <button id="dz-keep"   style="text-align:left;padding:.6rem .9rem;border-radius:9px;border:1.5px solid #d0dce8;background:#fff;cursor:pointer;font-size:.88rem;font-weight:600;color:#1a2535">Keep historical data &mdash; <span style="font-weight:400;color:#5a6e84">readings stay, zone label removed</span></button>
@@ -12019,7 +12038,7 @@ def api_receipts_config():
         'model': f'service delegator task {_receipts.AI_TASK}',
         'categories': _receipts.CATEGORIES,
         'tax_category': _receipts.TAX_CATEGORY,
-        'zones': _receipts.ZONES,
+        'zones': _zone_names(),
         'no_zone': _receipts.NO_ZONE,
         'utilities': _receipts.UTILITIES,
         'subcategories': _subcategories(),
@@ -12587,6 +12606,13 @@ def api_products():
     return jsonify({'products': [_with_amazon_category(dict(r)) for r in rows]})
 
 
+def _zone_names() -> list[str]:
+    """Zones products can be sorted into (the /zones zones, but not running water)."""
+    from smart_home import receipts as _receipts
+    with _conn() as conn:
+        return _receipts.zones(conn)
+
+
 def _with_amazon_category(p: dict) -> dict:
     """amazon_category (stored as JSON) as a list, plus the sub-category taken from it."""
     from smart_home import receipts as _receipts
@@ -12603,7 +12629,7 @@ def _with_amazon_category(p: dict) -> dict:
 def api_product_update(pid):
     """Update a product: `name` (renames every receipt-item pointing to it)
     and/or `quantity` + `unit` (null clears it), the amount in one purchase,
-    and/or `subcategory_id` (null clears it), and/or `zone` (receipts.ZONES,
+    and/or `subcategory_id` (null clears it), and/or `zone` (a zone's name,
     "none" for no zone, null for not sorted yet)."""
     data = request.get_json(silent=True) or {}
     fields = {}
@@ -12625,8 +12651,9 @@ def api_product_update(pid):
     if 'zone' in data:
         from smart_home import receipts as _receipts
         zone = data['zone']
-        if zone is not None and zone not in _receipts.ZONES + [_receipts.NO_ZONE]:
-            return jsonify({'error': f'zone must be one of: {", ".join(_receipts.ZONES)}, '
+        names = _zone_names()
+        if zone is not None and zone not in names + [_receipts.NO_ZONE]:
+            return jsonify({'error': f'zone must be one of: {", ".join(names)}, '
                                      f'"{_receipts.NO_ZONE}" or null'}), 400
         fields['zone'] = zone
     if not fields:
@@ -14332,6 +14359,8 @@ rowsEl.addEventListener('click', e => {
   if (e.target.matches('[data-save]')) save(e.target.closest('tr'));
 });
 document.getElementById('filter').addEventListener('input', render);
+// /receipts/items?q=Kitchen opens filtered (the /zones page links here)
+document.getElementById('filter').value = new URLSearchParams(location.search).get('q') || '';
 
 Promise.all([fetchJSON('/api/products'), fetchJSON('/api/receipts/config')])
   .then(([data, cfg]) => { items = data.products; zones = cfg.zones; NO_ZONE = cfg.no_zone; clearNetworkError(); render(); })
@@ -15228,7 +15257,7 @@ function readBox(p) {
   </div>`;
 }
 
-// Where the product goes (receipts.ZONES); saved as soon as it's changed
+// Where the product goes (one of the zones); saved as soon as it's changed
 let ZONES = [], NO_ZONE = 'none';
 function zoneSelect(p) {
   const opt = (v, t) => `<option value="${esc(v)}"${(p.zone || '') === v ? ' selected' : ''}>${esc(t)}</option>`;
@@ -15929,7 +15958,7 @@ _SORT_PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
   <div class="top"><h1>Sort into zones</h1><span class="muted" id="left"></span>
-    <a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Products</a></div>
+    <a href="/receipts">&larr; Receipts</a><a href="/receipts/items">Products</a><a href="/zones">Edit zones</a></div>
   <div id="main"><div class="card muted">Loading&hellip;</div></div>
   <div class="zones" id="zones"></div>
   <div class="actions"><button id="skip">Skip <span class="muted">(S)</span></button>
@@ -15938,6 +15967,8 @@ _SORT_PAGE = r"""<!DOCTYPE html>
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const money = v => v == null ? '' : '$' + Number(v).toFixed(2);
 let zones = [], NO_ZONE = 'none', queue = [], sorted = [], busy = false;
+// Keyboard shortcut for each zone, in order (S and Z are skip and undo; 0 is No zone)
+const KEYS = '123456789abcdefghijklmnopqrtuvwxy';
 
 function setStatus(text, err) {
   const el = document.getElementById('status');
@@ -16017,8 +16048,8 @@ document.getElementById('skip').addEventListener('click', skip);
 document.getElementById('undo').addEventListener('click', undo);
 document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  const n = parseInt(e.key, 10);
-  if (n >= 1 && n <= zones.length) choose(zones[n - 1]);
+  const k = KEYS.indexOf(e.key.toLowerCase());
+  if (e.key.length === 1 && k >= 0 && k < zones.length) choose(zones[k]);
   else if (e.key === '0') choose(NO_ZONE);
   else if (e.key === 's' || e.key === 'S' || e.key === 'ArrowRight') skip();
   else if (e.key === 'z' || e.key === 'Z' || e.key === 'Backspace') undo();
@@ -16037,7 +16068,7 @@ document.addEventListener('keydown', e => {
     queue = prods.products.filter(p => p.zone == null && p.times_bought > 0)
       .sort((a, b) => (b.last_bought || '').localeCompare(a.last_bought || ''));
     document.getElementById('zones').innerHTML = zones.map((z, i) =>
-      `<button data-zone="${esc(z)}">${esc(z)}<kbd>${i + 1}</kbd></button>`).join('')
+      `<button data-zone="${esc(z)}">${esc(z)}<kbd>${KEYS[i] || ''}</kbd></button>`).join('')
       + `<button class="none" data-zone="${esc(NO_ZONE)}" title="Doesn't go in a room: food, fuel, supplies">No zone<kbd>0</kbd></button>`;
     document.getElementById('zones').addEventListener('click', e => {
       const b = e.target.closest('button[data-zone]');
@@ -16056,7 +16087,7 @@ document.addEventListener('keydown', e => {
 
 @app.get("/receipts/sort")
 def sort_page():
-    """Sort products into zones one at a time (receipts.ZONES)."""
+    """Sort products into zones one at a time (edited on /receipts/zones)."""
     return Response(_SORT_PAGE, mimetype="text/html")
 
 

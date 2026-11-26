@@ -80,10 +80,15 @@ UTILITY_ITEM_CATEGORIES = ("Heating Fuel", "Water Softener Salt")
 UTILITIES = ["Electricity", "Water", "Propane", "Natural Gas", "Internet", "Phone", "Trash", "Sewer",
              "Insurance", "Hosting", "Other"]
 # Where a product goes in the house: the top level products are grouped by
-# (products.zone), set by hand on /receipts/sort. NO_ZONE is "doesn't go in
-# a room" (food, fuel...); NULL is not sorted yet. A line's category (above)
-# is only used to count heating fuel and softener salt as utilities.
-ZONES = ["Living Room", "Wardrobe", "Music Studio", "Computer Desk", "Kitchen", "Garage", "Hobby", "Video Games"]
+# (products.zone, the zone's name), set by hand on /receipts/sort. The zones
+# are the ones on /zones (wc_zones, shared with water chemistry), except
+# running-water ones (faucets and spigots are places readings are taken, not
+# where things go). PRODUCT_ZONES_TO_ADD were added there once. NO_ZONE is
+# "doesn't go in a room" (food, fuel...); NULL is not sorted yet. A line's
+# category (above) is only used to count heating fuel and softener salt as
+# utilities.
+PRODUCT_ZONES_TO_ADD = ["Living Room", "Wardrobe", "Music Studio", "Computer Desk", "Kitchen", "Garage", "Hobby",
+                        "Video Games"]
 NO_ZONE = "none"
 # Spending groups for lines that aren't a product, and products not sorted yet
 UNSORTED = "Unsorted"
@@ -101,6 +106,12 @@ def amazon_subcategory(path: list[str] | None) -> str | None:
     if not path:
         return None
     return path[min(AMAZON_SUBCATEGORY_LEVEL, len(path) - 1)]
+
+
+def zones(conn) -> list[str]:
+    """The names of the zones products can be sorted into, in /zones order."""
+    return [r[0] for r in conn.execute(
+        "SELECT name FROM wc_zones WHERE COALESCE(zone_type, '') != 'running_water' ORDER BY id")]
 
 
 def zone_label(zone: str | None) -> str:
