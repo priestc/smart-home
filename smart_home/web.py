@@ -118,6 +118,7 @@ _CRUMBS: dict[str, tuple[str, str | None]] = {
     "/receipts/photos": ("Product Photos", "/receipts/items"),
     "/receipts/new": ("Add Receipt", "/receipts"),
     "/utilities": ("Utilities", "/cost-of-living"),
+    "/income": ("Income", "/cost-of-living"),
 }
 
 
@@ -16392,6 +16393,15 @@ _COST_OF_LIVING_PAGE = """\\
     <div id="chart-wrap" style="margin-top:1rem;display:none"><canvas id="chart" height="90"></canvas></div>
   </div>
   <div class="sections" id="sections"></div>
+  <div class="sections" style="margin-top:1.2rem">
+    <div class="card section">
+      <h2><span class="swatch" style="background:#2db37a"></span><a href="/income">Income &rarr;</a></h2>
+      <div class="amount" id="amt-income">&hellip;</div>
+      <div class="muted desc" id="sub-income">Money coming in, compared to what you spend.</div>
+      <table><tbody id="top-income"></tbody></table>
+      <div class="links"><a href="/income">Income vs. spending</a></div>
+    </div>
+  </div>
 <script>__COMMON_JS__
 const SECTIONS = [
   {key: 'receipts', title: 'Receipts', href: '/receipts', api: '/api/receipts/summary', color: '#2e7dd4',
@@ -16461,8 +16471,28 @@ async function load() {
     clearNetworkError();
     SECTIONS.forEach((sec, i) => renderSection(sec, results[i]));
     renderTotal(results);
+    loadIncome(results.reduce((a, s) => a + s.grand_total, 0));
   } catch (e) {
     showNetworkError(`Could not load cost of living: ${e.message}`);
+  }
+}
+
+// Income isn't part of the cost of living; it's shown next to it
+async function loadIncome(spent) {
+  const amt = document.getElementById('amt-income'), sub = document.getElementById('sub-income');
+  try {
+    const s = await fetchJSON(`/api/income/summary?months=${months}`);
+    const left = s.grand_total - spent;
+    amt.textContent = money(s.grand_total);
+    sub.innerHTML = `${s.n} payment${s.n === 1 ? '' : 's'} \\u00b7 <span style="color:${left >= 0 ? '#1d7a50' : '#b00'}">`
+      + `${money(Math.abs(left))} ${left >= 0 ? 'more than' : 'less than'} spending</span>`;
+    document.getElementById('top-income').innerHTML = [
+      ...s.totals.slice(0, 3).map(t => `<tr><td>${esc(t.source)}</td><td class="num">${money(t.amount)}</td></tr>`),
+      `<tr><td class="muted">Spending (receipts + utilities)</td><td class="num muted">${money(spent)}</td></tr>`,
+    ].join('');
+  } catch (e) {
+    amt.textContent = '';
+    sub.innerHTML = `<span class="err">Could not load income: ${esc(e.message)}</span>`;
   }
 }
 
@@ -16477,6 +16507,300 @@ load();
 </script>
 </body>
 </html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS)
+
+
+@app.get("/api/income/summary")
+def api_income_summary():
+    """Income per month per source over the last N months (default 12),
+    like /api/receipts/summary, plus every entry (newest first) and the last
+    email scan (see income.py)."""
+    from smart_home import income as _income
+    months = max(1, min(int(request.args.get('months', 12)), 120))
+    start = _months_start(months)
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT substr(received_on, 1, 7) AS month, source, SUM(amount) AS amount, COUNT(*) AS n "
+            "FROM income WHERE received_on >= ? GROUP BY month, source", (start,)).fetchall()
+        entries = [dict(r) for r in conn.execute(
+            "SELECT id, received_on, source, amount, email_id, subject FROM income ORDER BY received_on DESC, id DESC")]
+        scan = _income.last_scan(conn)
+    rows = [{'month': r['month'], 'source': r['source'], 'amount': round(r['amount'], 2), 'n': r['n']} for r in rows]
+    totals: dict[str, dict] = {}
+    for r in rows:
+        t = totals.setdefault(r['source'], {'source': r['source'], 'amount': 0.0, 'n': 0})
+        t['amount'] = round(t['amount'] + r['amount'], 2)
+        t['n'] += r['n']
+    return jsonify({
+        'start': start,
+        'months': months,
+        'n': sum(t['n'] for t in totals.values()),
+        'rows': sorted(rows, key=lambda r: (r['month'], r['source'])),
+        'totals': sorted(totals.values(), key=lambda t: -t['amount']),
+        'grand_total': round(sum(t['amount'] for t in totals.values()), 2),
+        'entries': entries,
+        'scan': scan,
+    })
+
+
+@app.post("/api/income/scan")
+def api_income_scan():
+    """Read income emails in the archive now (it also runs after each sync)."""
+    from smart_home import income as _income
+    r = _income.scan(_db_path)
+    if not r['ok']:
+        return jsonify({'error': f"The scan failed: {r['error']}"}), 500
+    return jsonify(r)
+
+
+@app.post("/api/income")
+def api_income_add():
+    """Enter income by hand: {received_on: YYYY-MM-DD, source, amount}."""
+    data = request.get_json(silent=True) or {}
+    try:
+        day = datetime.date.fromisoformat(data.get('received_on') or '').isoformat()
+    except (TypeError, ValueError):
+        return jsonify({'error': 'received_on must be YYYY-MM-DD'}), 400
+    source = (data.get('source') or '').strip()
+    if not source:
+        return jsonify({'error': 'Say where the income is from'}), 400
+    try:
+        amount = round(float(str(data.get('amount')).replace('$', '').replace(',', '')), 2)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'amount must be a number'}), 400
+    if amount <= 0:
+        return jsonify({'error': 'amount must be more than zero'}), 400
+    with _conn() as conn:
+        cur = conn.execute("INSERT INTO income (received_on, source, amount, created_at) VALUES (?, ?, ?, ?)",
+                           (day, source, amount, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    return jsonify({'ok': True, 'id': cur.lastrowid}), 201
+
+
+@app.delete("/api/income/<int:income_id>")
+def api_income_delete(income_id):
+    """Delete income entered by hand. Income read from an email would just be
+    read again by the next scan, so it can't be deleted."""
+    with _conn() as conn:
+        row = conn.execute("SELECT email_id FROM income WHERE id=?", (income_id,)).fetchone()
+        if row is None:
+            return jsonify({'error': 'Income not found'}), 404
+        if row['email_id']:
+            return jsonify({'error': 'Income read from an email can\'t be deleted'}), 409
+        conn.execute("DELETE FROM income WHERE id=?", (income_id,))
+    return jsonify({'ok': True})
+
+
+_INCOME_PAGE = """\\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Income &mdash; Smart Home</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>__COMMON_CSS__
+    .periods { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .periods button { background: #fff; color: #4a6080; border: 1px solid #d0dce8; border-radius: 6px; padding: .35rem 1rem; cursor: pointer; font-size: .85rem; font-weight: 500; }
+    .periods button.active { background: #e07820; color: #fff; border-color: #e07820; }
+    .layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(16rem, 1fr); gap: 1.2rem; align-items: start; }
+    @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } }
+    .figures { display: flex; flex-wrap: wrap; gap: 1rem 2.4rem; }
+    .figure .v { font-size: 1.7rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.15; }
+    .figure .l { font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+    .figure .s { font-size: .82rem; color: #7a90a8; }
+    .pos { color: #1d7a50; } .neg { color: #b00; }
+    .swatch { display: inline-block; width: .7rem; height: .7rem; border-radius: 2px; margin-right: .5rem; vertical-align: middle; }
+    .form { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; }
+    .form label { display: block; font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-bottom: .25rem; }
+    .form input { width: 100%; }
+    .form .wide { grid-column: 1 / -1; }
+    .entries { max-height: 28rem; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>Income</h1>
+  <div class="periods" id="periods">
+    <button data-months="1">This month</button>
+    <button data-months="3">3 months</button>
+    <button data-months="6">6 months</button>
+    <button data-months="12" class="active">12 months</button>
+    <button data-months="120">All</button>
+  </div>
+  <div class="layout">
+    <div>
+      <div class="card">
+        <h2>Income compared to spending</h2>
+        <div class="figures" id="figures">&hellip;</div>
+        <div id="chart-wrap" style="margin-top:1rem;display:none"><canvas id="chart" height="110"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>By month</h2>
+        <table>
+          <thead><tr><th>Month</th><th class="num">Income</th><th class="num">Receipts</th><th class="num">Utilities</th><th class="num">Left over</th></tr></thead>
+          <tbody id="months"></tbody>
+        </table>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>By source</h2>
+        <table><tbody id="totals"></tbody></table>
+      </div>
+      <div class="card">
+        <h2>From email</h2>
+        <div id="scan-status" class="muted">Loading&hellip;</div>
+        <div class="actions" style="margin-top:.6rem"><button class="btn secondary" id="scan">Scan emails now</button></div>
+      </div>
+      <div class="card">
+        <h2>Add income by hand</h2>
+        <div class="form">
+          <div><label for="f-date">Date</label><input type="date" id="f-date"></div>
+          <div><label for="f-amount">Amount</label><input type="text" id="f-amount" inputmode="decimal" placeholder="0.00"></div>
+          <div class="wide"><label for="f-source">From</label><input type="text" id="f-source" list="sources" placeholder="e.g. Paycheck"><datalist id="sources"></datalist></div>
+          <div class="wide actions"><button class="btn" id="f-save">Add income</button> <span id="f-status" class="muted"></span></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Payments</h2>
+        <div class="entries"><table><tbody id="entries"></tbody></table></div>
+      </div>
+    </div>
+  </div>
+<script>__COMMON_JS__
+const SOURCE_COLORS = ['#2db37a', '#16a085', '#27ae60', '#1abc9c', '#2e7dd4', '#8e44ad'];
+let months = 12, chart = null;
+const monthLabel = m => new Date(m + '-15').toLocaleDateString(undefined, {month: 'short', year: 'numeric'});
+const sum = (rows, m) => rows.filter(r => r.month === m).reduce((a, r) => a + r.amount, 0);
+
+function render(inc, rec, util) {
+  const spent = rec.grand_total + util.grand_total, left = inc.grand_total - spent;
+  const allMonths = [...new Set([...inc.rows, ...rec.rows, ...util.rows].map(r => r.month))].sort();
+  const n = Math.max(1, allMonths.length);
+  document.getElementById('figures').innerHTML = `
+    <div class="figure"><div class="v pos">${money(inc.grand_total)}</div><div class="l">Income</div>
+      <div class="s">${money(inc.grand_total / n)} a month</div></div>
+    <div class="figure"><div class="v">${money(spent)}</div><div class="l">Spent</div>
+      <div class="s">${money(rec.grand_total)} receipts + ${money(util.grand_total)} utilities</div></div>
+    <div class="figure"><div class="v ${left >= 0 ? 'pos' : 'neg'}">${left < 0 ? '\\u2212' : ''}${money(Math.abs(left))}</div>
+      <div class="l">${left >= 0 ? 'Left over' : 'Short'}</div>
+      <div class="s">${spent > 0 ? `income covers ${Math.round(inc.grand_total / spent * 100)}% of spending` : ''}</div></div>`;
+
+  document.getElementById('months').innerHTML = allMonths.length ? allMonths.slice().reverse().map(m => {
+    const i = sum(inc.rows, m), r = sum(rec.rows, m), u = sum(util.rows, m), l = i - r - u;
+    return `<tr><td>${monthLabel(m)}</td><td class="num pos">${money(i)}</td><td class="num">${money(r)}</td>
+      <td class="num">${money(u)}</td><td class="num ${l >= 0 ? 'pos' : 'neg'}">${l < 0 ? '\\u2212' : ''}${money(Math.abs(l))}</td></tr>`;
+  }).join('') : '<tr><td colspan="5" class="muted">Nothing in this period.</td></tr>';
+
+  document.getElementById('totals').innerHTML = inc.totals.length ? inc.totals.map((t, i) => `<tr>
+      <td><span class="swatch" style="background:${SOURCE_COLORS[i % SOURCE_COLORS.length]}"></span>${esc(t.source)}
+        <div class="muted">${t.n} payment${t.n === 1 ? '' : 's'}</div></td>
+      <td class="num">${money(t.amount)}</td></tr>`).join('')
+    : '<tr><td class="muted">No income in this period.</td></tr>';
+
+  document.getElementById('entries').innerHTML = inc.entries.length ? inc.entries.map(e => `<tr>
+      <td>${esc(e.received_on)}</td>
+      <td>${esc(e.source)}${e.email_id ? `<div class="muted"><a href="/email-archive/${encodeURIComponent(e.email_id)}">email</a></div>` : ''}</td>
+      <td class="num">${money(e.amount)}</td>
+      <td class="num">${e.email_id ? '' : `<button class="btn secondary" data-del="${e.id}">Delete</button>`}</td></tr>`).join('')
+    : '<tr><td class="muted">No income yet.</td></tr>';
+  document.getElementById('sources').innerHTML = [...new Set(inc.entries.map(e => e.source))]
+    .map(s => `<option value="${esc(s)}">`).join('');
+
+  const scan = inc.scan, st = document.getElementById('scan-status');
+  let html = 'Reads Coinbase USDC reward emails from the email archive after each sync.';
+  if (!scan) html += ' Not scanned yet.';
+  else if (!scan.ok) html += `<div class="err">The last scan (${esc(scan.ts)}) failed: ${esc(scan.error)}</div>`;
+  else html += ` Last scanned ${esc(scan.ts)}: ${scan.n_new} new.`;
+  if (scan && scan.unreadable && scan.unreadable.length) html += `<div class="err" style="margin-top:.4rem">No amount in
+      ${scan.unreadable.length} email${scan.unreadable.length === 1 ? '' : 's'}, so ${scan.unreadable.length === 1 ? 'it isn\\u2019t' : 'they aren\\u2019t'} counted:
+      ${scan.unreadable.map(u => `<a href="/email-archive/${encodeURIComponent(u.message_id)}">${esc(u.received_at.slice(0, 10))}</a>`).join(', ')}</div>`;
+  st.innerHTML = html;
+
+  const wrap = document.getElementById('chart-wrap');
+  if (allMonths.length < 2) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('chart'), {
+    type: 'bar',
+    data: {labels: allMonths.map(monthLabel), datasets: [
+      {label: 'Income', backgroundColor: '#2db37a', stack: 'in', data: allMonths.map(m => sum(inc.rows, m))},
+      {label: 'Receipts', backgroundColor: '#2e7dd4', stack: 'out', data: allMonths.map(m => sum(rec.rows, m))},
+      {label: 'Utilities', backgroundColor: '#e07820', stack: 'out', data: allMonths.map(m => sum(util.rows, m))},
+    ]},
+    options: {
+      animation: false,
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
+                 tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${money(ctx.raw)}` } } },
+      scales: { x: { stacked: true, grid: { display: false } }, y: { stacked: true, ticks: { callback: v => '$' + v } } },
+    },
+  });
+}
+
+async function load() {
+  try {
+    const [inc, rec, util] = await Promise.all([
+      fetchJSON(`/api/income/summary?months=${months}`).catch(e => { throw new Error(`Income: ${e.message}`); }),
+      fetchJSON(`/api/receipts/summary?months=${months}`).catch(e => { throw new Error(`Receipts: ${e.message}`); }),
+      fetchJSON(`/api/utilities/summary?months=${months}`).catch(e => { throw new Error(`Utilities: ${e.message}`); }),
+    ]);
+    clearNetworkError();
+    render(inc, rec, util);
+  } catch (e) {
+    showNetworkError(`Could not load income: ${e.message}`);
+  }
+}
+
+document.getElementById('periods').addEventListener('click', e => {
+  const b = e.target.closest('button[data-months]');
+  if (!b) return;
+  months = +b.dataset.months;
+  document.querySelectorAll('#periods button').forEach(x => x.classList.toggle('active', x === b));
+  load();
+});
+document.getElementById('scan').addEventListener('click', async e => {
+  e.target.disabled = true;
+  try {
+    await fetchJSON('/api/income/scan', {method: 'POST'});
+  } catch (err) {
+    showNetworkError(`Could not scan emails: ${err.message}`);
+  }
+  e.target.disabled = false;
+  load();
+});
+document.getElementById('f-date').value = new Date().toLocaleDateString('en-CA');
+document.getElementById('f-save').addEventListener('click', async () => {
+  const status = document.getElementById('f-status'), val = id => document.getElementById(id).value.trim();
+  const amount = parseFloat(val('f-amount').replace(/[$,]/g, ''));
+  if (!val('f-source')) { status.className = 'err'; status.textContent = 'Say where it\\u2019s from.'; return; }
+  if (isNaN(amount)) { status.className = 'err'; status.textContent = 'Enter the amount.'; return; }
+  status.className = 'muted'; status.textContent = 'Saving\\u2026';
+  try {
+    await sendJSON('/api/income', 'POST', {received_on: val('f-date'), source: val('f-source'), amount});
+    status.textContent = 'Added';
+    document.getElementById('f-amount').value = '';
+    await load();
+  } catch (e) {
+    status.className = 'err'; status.textContent = 'Could not add it: ' + e.message;
+  }
+});
+document.getElementById('entries').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-del]');
+  if (!b || !confirm('Delete this income?')) return;
+  try {
+    await fetchJSON(`/api/income/${b.dataset.del}`, {method: 'DELETE'});
+    await load();
+  } catch (err) {
+    showNetworkError(`Could not delete it: ${err.message}`);
+  }
+});
+load();
+</script>
+</body>
+</html>""".replace("__COMMON_CSS__", _RECEIPTS_COMMON_CSS).replace("__COMMON_JS__", _RECEIPTS_COMMON_JS)
+
+
+@app.get("/income")
+def income_page():
+    return Response(_INCOME_PAGE, mimetype="text/html")
 
 
 @app.get("/cost-of-living")

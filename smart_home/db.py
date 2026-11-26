@@ -375,6 +375,20 @@ def open_db(path: str) -> sqlite3.Connection:
             percent REAL NOT NULL
         )
     """)
+    # Money coming in (see income.py). received_on is the day it was paid;
+    # email_id is the Gmail message it was read from, NULL if entered by hand.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS income (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            received_on TEXT NOT NULL,
+            source      TEXT NOT NULL,
+            amount      REAL NOT NULL,
+            email_id    TEXT UNIQUE,
+            subject     TEXT,
+            created_at  TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS income_received ON income (received_on)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS email_bill_checks (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,

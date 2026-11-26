@@ -509,6 +509,13 @@ def sync_in_background(db_path: str) -> None:
                 print(f"[{ts}] Email archive: {r['n_new']} new, {r['n_failed']} failed", flush=True)
         except Exception as e:
             print(f"Email archive sync failed: {e}", flush=True)  # also in runs, shown on /email-archive
+            return
+        # Read any income emails that just arrived (see income.py)
+        from smart_home import income
+        r = income.scan(db_path)  # the result, errors included, is shown on /income
+        if r["n_new"] or not r["ok"]:
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] Income: {r['n_new']} new" + ("" if r["ok"] else f", scan failed: {r['error']}"), flush=True)
 
     threading.Thread(target=_bg, daemon=True).start()
 
