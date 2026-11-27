@@ -298,6 +298,24 @@ def open_db(path: str) -> sqlite3.Connection:
             error      TEXT
         )
     """)
+    # Water softener salt refills (see softener.py). days_late is how many days
+    # later than ideal the salt went in (negative = early), by the user's judgement.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS softener_salt_additions (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            day        TEXT NOT NULL,
+            days_late  INTEGER NOT NULL DEFAULT 0,
+            note       TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS softener_reminders (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            addition_id INTEGER NOT NULL,
+            sent_at     TEXT NOT NULL
+        )
+    """)
     # Receipts photographed in the iOS app and read by a local vision model. status is
     # 'processing', 'done' or 'error'; purchase_date falls back to the upload
     # date in summaries when the receipt doesn't print one.

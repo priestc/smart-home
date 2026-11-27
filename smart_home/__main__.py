@@ -2278,6 +2278,28 @@ def monitor(duration, verbose, db, no_db):
                 click.echo(f"[{ts}] Gas price fetch failed: {e}")
             await asyncio.sleep(3540)
 
+    async def softener_salt_loop():
+        """Every hour, push a reminder if it's time to add water softener salt."""
+        from smart_home import softener as _softener
+        while True:
+            await asyncio.sleep(90)
+            if conn:
+                try:
+                    def _check():
+                        c = open_db(db)
+                        try:
+                            return _softener.check_reminder(c)
+                        finally:
+                            c.close()
+                    result = await asyncio.to_thread(_check)
+                    if result:
+                        ts = datetime.datetime.now().strftime("%H:%M:%S")
+                        click.echo(f"[{ts}] Softener salt: {result}")
+                except Exception as e:
+                    ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    click.echo(f"[{ts}] Softener salt reminder check failed: {e}")
+            await asyncio.sleep(3510)
+
     async def gmail_bill_loop():
         """Every hour, read new bill emails from Gmail (if it's connected)."""
         from smart_home import gmail as _gmail
@@ -2828,7 +2850,7 @@ def monitor(duration, verbose, db, no_db):
 
     click.echo("Monitoring BLE devices... (Ctrl+C to stop)")
     try:
-        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), gas_price_loop(), gmail_bill_loop(), email_archive_loop(), check_iphone_network(), check_iphone_bluetooth(), check_iphone_presence(), ble_watchdog_loop()]
+        extra = [snapshot_loop(), check_events_loop(), process_stats_loop(), garage_door_loop(), db_size_loop(), gas_price_loop(), gmail_bill_loop(), softener_salt_loop(), email_archive_loop(), check_iphone_network(), check_iphone_bluetooth(), check_iphone_presence(), ble_watchdog_loop()]
         if cameras_cfg:
             extra.append(camera_watch_loop())
             extra.append(camera_vitals_loop())

@@ -93,6 +93,7 @@ _CRUMBS: dict[str, tuple[str, str | None]] = {
     "/map": ("Map", "/"),
     "/map-settings": ("Settings", "/map"),
     "/gas": ("Gas Prices", "/"),
+    "/softener": ("Water Softener Salt", "/"),
     "/presence": ("Presence", "/"),
     "/chart/temperature": ("Temperature", "/"),
     "/chart/typical-day": ("Typical Day", "/chart/temperature"),
@@ -5453,13 +5454,14 @@ def index():
 <body>
   <div id="error-bar"></div>
   <div id="ble-bar" style="display:none;background:#fde8e8;color:#c0392b;border-radius:8px;padding:.6rem 1rem;margin-bottom:1rem;font-size:.85rem;font-weight:500"></div>
-  <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a>&nbsp;<a href="/devices" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Devices &#9881;</a>&nbsp;<a href="/zones" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Zones</a>&nbsp;<a href="/map" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Map</a>&nbsp;<a href="/gas" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Gas</a></h1>
+  <h1>Smart Home &nbsp;<a href="/trends" style="font-size:.85rem;font-weight:500;color:#2e7dd4;text-decoration:none;">Trends &rarr;</a>&nbsp;<a href="/devices" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Devices &#9881;</a>&nbsp;<a href="/zones" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Zones</a>&nbsp;<a href="/map" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Map</a>&nbsp;<a href="/gas" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Gas</a>&nbsp;<a href="/softener" style="font-size:.85rem;font-weight:500;color:#7a90a8;text-decoration:none;">Salt</a></h1>
 
   <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:2rem">
     <div class="cards" id="cards" style="margin-bottom:0;flex-wrap:wrap;display:flex;gap:1rem"></div>
     <div id="sun-widget"></div>
     <div class="garage-cards" id="garage-cards" style="margin-bottom:0"></div>
     <div id="gas-widget"></div>
+    <div id="salt-widget"></div>
     <div id="disk-widget"></div>
   </div>
   <div class="pool-cards"    id="pool-cards"></div>
@@ -5474,11 +5476,13 @@ const WIDGET_STANDINS = {
   'garage-cards': `<a class="garage-card"><div class="label">Garage</div><div class="gstate">CLOSED</div><div class="gtimer">Closed 0h 00m 00s</div></a>`,
   'gas-widget': `<a class="card gas-card"><div class="label">Gas &middot; Regular avg</div><div class="gas-price">$0.00</div>
     <div class="gas-cmp">&#9660; $0.00 vs 30-day avg $0.00</div><div class="ts">Cheapest $0.00 &middot; Station name</div></a>`,
+  'salt-widget': `<a class="card gas-card"><div class="label">Softener Salt</div><div class="gas-price">00 days</div>
+    <div class="ts">Due Jan 1, 2026</div></a>`,
   'disk-widget': `<div class="card disk-card"><div class="label">Storage</div>` + Array.from({length: N_DRIVES}, () =>
     `<div class="disk"><div class="disk-head"><span>Drive name</span><span class="disk-pct">00%</span></div>
      <div class="disk-bar"><div class="disk-fill" style="width:50%"></div></div><div class="disk-sub">000 GB free of 0.00 TB</div></div>`).join('') + `</div>`,
 };
-for (const id of ['cards', 'sun-widget', 'garage-cards', 'gas-widget', 'disk-widget', 'pool-cards']) {
+for (const id of ['cards', 'sun-widget', 'garage-cards', 'gas-widget', 'salt-widget', 'disk-widget', 'pool-cards']) {
   let html = null;
   try { html = localStorage.getItem(WIDGET_KEY + id); } catch (e) {}
   if (html == null) html = WIDGET_STANDINS[id] || '';
@@ -5805,6 +5809,31 @@ async function loadGas() {
     <div class="gas-cmp" style="color:${color}">${arrow} $${Math.abs(data.diff).toFixed(2)} vs 30-day avg $${data.avg_30d.toFixed(2)}${days}</div>
     <div class="ts">Cheapest $${data.current_min.toFixed(2)} &middot; ${esc(data.cheapest_name)}</div>${warn}</a>`);
 }
+async function loadSalt() {
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let st;
+  try {
+    const r = await fetch('/api/softener');
+    st = await r.json();
+    if (!r.ok) throw new Error(st.error || 'HTTP ' + r.status);
+  } catch (e) {
+    showError('softener salt');
+    widgetError('salt-widget', 'Softener Salt', e.message);
+    return;
+  }
+  let big, color = '#7a90a8', sub;
+  if (st.days_until_due == null) {
+    big = st.last_day ? 'Learning' : 'Not set up';
+    sub = st.last_day ? `Added ${st.days_since} days ago` : 'Record a refill';
+  } else {
+    const d = st.days_until_due;
+    color = d <= 0 ? '#c0392b' : d <= 14 ? '#d4760a' : '#2a9d6e';
+    big = d < 0 ? `${-d}d overdue` : d === 0 ? 'Due today' : `${d} days`;
+    sub = `Due ${new Date(st.next_due + 'T12:00:00').toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'})} &middot; lasts ~${st.interval_days} days`;
+  }
+  setWidget('salt-widget', `<a class="card gas-card" href="/softener"><div class="label">Softener Salt</div>
+    <div class="gas-price" style="color:${color}">${esc(big)}</div><div class="ts">${sub}</div></a>`);
+}
 async function loadDisks() {
   const el = document.getElementById('disk-widget');
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -5853,6 +5882,8 @@ loadPool();
 loadSunTimes();
 loadGas();
 setInterval(loadGas, 15 * 60 * 1000);
+loadSalt();
+setInterval(loadSalt, 60 * 60 * 1000);
 setInterval(loadCurrent, 30000);
 setInterval(loadEvents, 60000);
 setInterval(loadGarage, 15000);
@@ -12160,6 +12191,223 @@ init();
 @app.get("/gas")
 def gas_page():
     return Response(_GAS_PAGE, mimetype="text/html")
+
+
+@app.get("/api/softener")
+def api_softener():
+    """Salt additions, the learned refill interval, when salt is next due, and
+    softener salt bought (from receipts)."""
+    from smart_home import softener as _softener
+    with _conn() as conn:
+        st = _softener.status(conn)
+        st['purchases'] = _softener.purchases(conn)
+    return jsonify(st)
+
+
+@app.post("/api/softener/additions")
+def api_softener_add():
+    """Record salt added: {day: 'YYYY-MM-DD', days_late: int (negative = early), note}."""
+    from smart_home import softener as _softener
+    body = request.get_json(silent=True) or {}
+    try:
+        day = str(body.get('day') or datetime.date.today().isoformat())
+        days_late = int(body.get('days_late') or 0)
+        if datetime.date.fromisoformat(day) > datetime.date.today():
+            return jsonify({'error': 'That day is in the future'}), 400
+    except (TypeError, ValueError) as e:
+        return jsonify({'error': f'Bad day or days_late: {e}'}), 400
+    with _conn() as conn:
+        aid = _softener.add(conn, day, days_late, (body.get('note') or '').strip())
+    return jsonify({'id': aid})
+
+
+@app.delete("/api/softener/additions/<int:aid>")
+def api_softener_delete(aid: int):
+    with _conn() as conn:
+        n = conn.execute("DELETE FROM softener_salt_additions WHERE id=?", (aid,)).rowcount
+        conn.execute("DELETE FROM softener_reminders WHERE addition_id=?", (aid,))
+        conn.commit()
+    if not n:
+        return jsonify({'error': 'No such addition'}), 404
+    return jsonify({'ok': True})
+
+
+@app.get("/softener")
+def softener_page():
+    return Response(_SOFTENER_PAGE, mimetype="text/html")
+
+
+_SOFTENER_PAGE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Water Softener Salt — Smart Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f0f4f8; color: #1a2535; padding: 1.5rem; max-width: 900px; }
+    h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 1rem; letter-spacing: -.02em; }
+    .card { background: #fff; border-radius: 12px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.05); margin-bottom: 1.5rem; }
+    .section-title { font-size: .75rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .07em; font-weight: 600; margin-bottom: .75rem; }
+    .big { font-size: 2.2rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+    .sub { font-size: .9rem; color: #4a5d72; margin-top: .4rem; }
+    .muted { font-size: .8rem; color: #7a90a8; margin-top: .6rem; }
+    .ok { color: #2a9d6e; } .soon { color: #d4760a; } .due { color: #c0392b; } .unknown { color: #7a90a8; }
+    form { display: flex; flex-wrap: wrap; gap: .75rem 1rem; align-items: flex-end; }
+    label { display: flex; flex-direction: column; gap: .3rem; font-size: .8rem; color: #4a5d72; font-weight: 600; }
+    input, select { padding: .45rem .6rem; border-radius: 8px; border: 1px solid #dde4ec; font-size: .9rem; background: #fff; color: #1a2535; font-family: inherit; }
+    input[type=number] { width: 5.5rem; }
+    .btn { padding: .5rem 1.1rem; border-radius: 8px; font-size: .88rem; font-weight: 600; border: none; cursor: pointer; background: #2e7dd4; color: #fff; }
+    .btn:disabled { opacity: .5; cursor: default; }
+    .btn-del { background: none; border: 1px solid #dde4ec; color: #7a90a8; padding: .2rem .6rem; font-size: .78rem; border-radius: 6px; cursor: pointer; }
+    .btn-del.confirm { background: #c0392b; color: #fff; border-color: #c0392b; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    th { text-align: left; font-size: .72rem; color: #7a90a8; text-transform: uppercase; letter-spacing: .05em; padding: .4rem .5rem; border-bottom: 1px solid #e3eaf1; }
+    td { padding: .5rem; border-bottom: 1px solid #f0f4f8; font-variant-numeric: tabular-nums; }
+    td.num, th.num { text-align: right; }
+    #error-bar { display: none; background: #fde8e8; color: #c0392b; border-radius: 8px; padding: .6rem 1rem; margin-bottom: 1rem; font-size: .85rem; font-weight: 500; }
+    #form-msg { font-size: .85rem; }
+  </style>
+</head>
+<body>
+  <h1>Water Softener Salt</h1>
+  <div id="error-bar"></div>
+
+  <div class="card" id="status-card"><div class="section-title">Next refill</div><div class="big unknown">Loading&hellip;</div></div>
+
+  <div class="card">
+    <div class="section-title">I added salt</div>
+    <form id="add-form">
+      <label>Day <input type="date" id="f-day" required></label>
+      <label>Timing
+        <select id="f-timing">
+          <option value="ontime">About right</option>
+          <option value="late">Too late (tank was low/empty)</option>
+          <option value="early">Too early (plenty left)</option>
+        </select>
+      </label>
+      <label id="f-days-wrap" style="display:none">By how many days <input type="number" id="f-days" min="1" value="30"></label>
+      <label style="flex:1;min-width:12rem">Note <input type="text" id="f-note" placeholder="optional, e.g. 2 bags"></label>
+      <button class="btn" id="f-submit" type="submit">Save</button>
+      <span id="form-msg"></span>
+    </form>
+    <div class="muted">“Too late” corrects the learned interval: if two refills were 200 days apart but the second was a month late, the tank lasts about 170 days.</div>
+  </div>
+
+  <div class="card">
+    <div class="section-title">History</div>
+    <div id="history"></div>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Salt bought (from receipts)</div>
+    <div id="purchases"></div>
+  </div>
+
+<script>
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtDay = d => new Date(d + 'T12:00:00').toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'});
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+function showError(msg) { const b = document.getElementById('error-bar'); b.textContent = msg; b.style.display = msg ? '' : 'none'; }
+
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  let data = null;
+  try { data = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
+  return data;
+}
+
+function renderStatus(st) {
+  const el = document.getElementById('status-card');
+  let big, cls, sub = '';
+  if (!st.last_day) {
+    big = 'No refills yet'; cls = 'unknown';
+    sub = 'Record when you add salt below. After two refills it learns how long the tank lasts.';
+  } else if (st.interval_days == null) {
+    big = 'Learning'; cls = 'unknown';
+    sub = `Last added ${fmtDay(st.last_day)} (${st.days_since} days ago). One more refill and it can estimate when the next is due.`;
+  } else {
+    const d = st.days_until_due;
+    cls = d <= 0 ? 'due' : d <= 14 ? 'soon' : 'ok';
+    big = d < 0 ? `Overdue by ${-d} day${d === -1 ? '' : 's'}` : d === 0 ? 'Due today' : `Due in ${d} day${d === 1 ? '' : 's'}`;
+    sub = `${fmtDay(st.next_due)} &middot; last added ${fmtDay(st.last_day)} (${st.days_since} days ago) &middot; ` +
+          `the tank lasts about <b>${st.interval_days} days</b> (from ${st.n_intervals} refill${st.n_intervals === 1 ? '' : 's'})`;
+  }
+  const rem = st.last_reminder ? `<div class="muted">Reminder sent ${esc(st.last_reminder)}</div>`
+            : '<div class="muted">A push reminder is sent the morning it’s due, then weekly until salt is added.</div>';
+  el.innerHTML = `<div class="section-title">Next refill</div><div class="big ${cls}">${big}</div><div class="sub">${sub}</div>${rem}`;
+}
+
+function renderHistory(adds) {
+  const el = document.getElementById('history');
+  if (!adds.length) { el.innerHTML = '<div class="muted">Nothing recorded yet.</div>'; return; }
+  const timing = n => n > 0 ? `<span class="due">${n} days late</span>` : n < 0 ? `<span class="soon">${-n} days early</span>` : 'on time';
+  el.innerHTML = `<table><thead><tr><th>Day</th><th class="num">Since previous</th><th>Timing</th><th class="num">Ideal interval</th><th>Note</th><th></th></tr></thead><tbody>` +
+    adds.slice().reverse().map(a => `<tr><td>${fmtDay(a.day)}</td>
+      <td class="num">${a.gap_days == null ? '&mdash;' : a.gap_days + ' days'}</td>
+      <td>${timing(a.days_late)}</td>
+      <td class="num">${a.ideal_days == null ? '&mdash;' : a.ideal_days + ' days'}</td>
+      <td>${esc(a.note)}</td>
+      <td class="num"><button class="btn-del" data-id="${a.id}">Delete</button></td></tr>`).join('') + '</tbody></table>';
+}
+
+function renderPurchases(ps) {
+  const el = document.getElementById('purchases');
+  if (!ps.length) { el.innerHTML = '<div class="muted">No receipts with softener salt.</div>'; return; }
+  el.innerHTML = `<table><thead><tr><th>Day</th><th>Store</th><th>Item</th><th class="num">Qty</th><th class="num">Price</th></tr></thead><tbody>` +
+    ps.slice().reverse().map(p => `<tr><td><a href="/receipts/${p.receipt_id}">${fmtDay(p.day)}</a></td><td>${esc(p.merchant)}</td>
+      <td>${esc(p.description)}</td><td class="num">${p.quantity ?? ''}</td><td class="num">$${Number(p.total_price).toFixed(2)}</td></tr>`).join('') + '</tbody></table>';
+}
+
+async function load() {
+  try {
+    const st = await api('/api/softener');
+    showError('');
+    renderStatus(st); renderHistory(st.additions); renderPurchases(st.purchases);
+  } catch (e) {
+    showError('Couldn’t load softener data: ' + e.message);
+    document.getElementById('status-card').innerHTML = `<div class="section-title">Next refill</div><div class="big due">Error</div><div class="sub">${esc(e.message)}</div>`;
+  }
+}
+
+document.getElementById('f-day').value = todayStr();
+document.getElementById('f-day').max = todayStr();
+document.getElementById('f-timing').addEventListener('change', e => {
+  document.getElementById('f-days-wrap').style.display = e.target.value === 'ontime' ? 'none' : '';
+});
+document.getElementById('add-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = document.getElementById('f-submit'), msg = document.getElementById('form-msg');
+  const timing = document.getElementById('f-timing').value;
+  const n = parseInt(document.getElementById('f-days').value, 10) || 0;
+  const days_late = timing === 'late' ? n : timing === 'early' ? -n : 0;
+  btn.disabled = true; msg.textContent = ''; msg.className = '';
+  try {
+    await api('/api/softener/additions', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({day: document.getElementById('f-day').value, days_late, note: document.getElementById('f-note').value})});
+    msg.textContent = 'Saved'; msg.className = 'ok';
+    document.getElementById('f-note').value = '';
+    document.getElementById('f-timing').value = 'ontime';
+    document.getElementById('f-days-wrap').style.display = 'none';
+    await load();
+  } catch (err) {
+    msg.textContent = 'Couldn’t save: ' + err.message; msg.className = 'due';
+  } finally { btn.disabled = false; }
+});
+document.getElementById('history').addEventListener('click', async e => {
+  const b = e.target.closest('.btn-del');
+  if (!b) return;
+  if (!b.classList.contains('confirm')) { b.classList.add('confirm'); b.textContent = 'Confirm'; return; }
+  b.disabled = true;
+  try { await api(`/api/softener/additions/${b.dataset.id}`, {method: 'DELETE'}); await load(); }
+  catch (err) { showError('Couldn’t delete: ' + err.message); b.disabled = false; }
+});
+load();
+</script>
+</body>
+</html>
+"""
 
 
 # A receipt entered by hand on the web page has no photo (image_path '').
